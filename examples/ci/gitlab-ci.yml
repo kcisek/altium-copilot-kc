@@ -1,0 +1,46 @@
+# Altium design checks in GitLab CI, on Linux: no Altium Designer, no licence and no
+# Windows (altium-copilot-kc's check command; README, "Continuous integration"). Add
+# this job to the .gitlab-ci.yml of the repository that holds your Altium project and
+# set PROJECT below. GitLab shows the JUnit report in the merge request and the
+# pipeline's Tests tab; the Markdown summary and the JSON are kept as artifacts.
+altium-checks:
+  image: python:3.13-slim
+  rules:
+    # Merge requests (where the design diff runs against the merge base) and branch
+    # pushes, without a second pipeline for a branch that has a merge request open.
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+  variables:
+    # Your .PrjPcb, or the folder holding exactly one, relative to the repository root.
+    PROJECT: hardware/Board.PrjPcb
+    # The altium-copilot-kc release tag to run. Pin it, and change it on purpose.
+    ALTIUM_COPILOT_REF: v0.4.0
+    GIT_DEPTH: "0"  # the history --diff-base reads the base revision from
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git > /dev/null
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+    - git clone --quiet --depth 1 --branch "$ALTIUM_COPILOT_REF" https://github.com/kcisek/altium-copilot-kc.git /opt/altium-copilot
+    - pip install --quiet -r /opt/altium-copilot/requirements.txt
+  script:
+    # Merge request pipelines get a design-diff summary against the merge base.
+    - >
+      python /opt/altium-copilot/server/main.py check "$PROJECT"
+      --checklist schematic,release
+      --checks run_erc,check_sch_pcb_sync
+      --drc-report
+      ${CI_MERGE_REQUEST_DIFF_BASE_SHA:+--diff-base "$CI_MERGE_REQUEST_DIFF_BASE_SHA"}
+      --junit altium-results/junit.xml
+      --markdown altium-results/summary.md
+      --json altium-results/result.json
+      --fail-on error
+  # Exit 1: a check failed at or above --fail-on; 2: a usage, load or configuration
+  # problem (a pack file that does not validate, an unknown base revision, nothing
+  # checked ...). The reports are written either way.
+  artifacts:
+    when: always
+    paths:
+      - altium-results/
+    reports:
+      junit: altium-results/junit.xml

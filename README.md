@@ -404,7 +404,7 @@ No ERC runs offline: open the project in Altium for its compile messages.
 
 ## Requirements
 
-- Windows
+- Windows (the `check` command for CI also runs on Linux and macOS from source: Python and `requirements.txt`, see [Continuous integration](#continuous-integration))
 - [Altium Designer](https://www.altium.com/altium-designer) — running with the project open and a schematic sheet active whenever the netlist has to be generated: the first time a project is loaded and after schematic changes
   - A project whose netlist is still up to date loads with Altium closed; the board, rule, DRC report, BOM and notes tools only read the saved files
   - Without Altium and without an up-to-date netlist (for example a fresh copy of an Altium 365 project, which never contains `Project Outputs`), the copilot compiles the netlist from the saved sheets and every tool works (see [Offline netlist](#offline-netlist)). Only when no sheet can be compiled does the project load partially: the board, rule, length, differential-pair, via, connectivity, health, DFM, DRC report, notes, picture and variant tools work, and the netlist tools ask for the project to be opened in Altium once
@@ -440,6 +440,116 @@ After you save schematic changes in Altium, tell Claude: it calls `refresh_netli
 - *"Is this power supply circuit correct?"* — triggers a structured design review automatically
 - *"Is the PCB in sync with the schematic?"*
 - *"Give me the BOM for this variant as CSV"*
+
+---
+
+## Continuous integration
+
+The same executable runs the offline checks headless, for a CI job on every commit
+(GitHub Actions, GitLab or anything that reads JUnit XML), with no Altium Designer, no
+licence and no Windows:
+
+```bash
+python server/main.py check hardware/Board.PrjPcb --checks run_erc,check_sch_pcb_sync \
+  --drc-report --diff-base origin/main --junit results/junit.xml --markdown results/summary.md
+# or, with the released executable:
+altium-copilot-kc.exe check hardware\Board.PrjPcb --junit results\junit.xml
+```
+
+Without the `check` subcommand the MCP server starts exactly as before. The project is
+loaded headless: the netlist is compiled offline from the committed sheets (see
+[Offline netlist](#offline-netlist); a committed `.NET` is not used, since a checkout's
+file times cannot say whether it is up to date), Altium is never started or asked, the
+project registry and the state file in `%USERPROFILE%\.ee-in-a-box` are not written, no
+update check runs and nothing is written into the project folder. Everything runs
+in-process through the same functions the MCP tools are.
+
+| Option | What it does |
+|---|---|
+| `<project>` | The `.PrjPcb`, or a folder holding exactly one |
+| `--checklist schematic,release` | Review checklists to run (default `schematic,release`; also `pcb`, `bom`, a team checklist's id, or `none`), with the team's overrides as `run_review_checklist` applies them |
+| `--checks run_erc,check_sch_pcb_sync,...` | Single tools to run as well: any tool a pack's tool rule may call that answers in JSON (all but `get_design_notes`) |
+| `--packs auto` | Check packs (`run_custom_checks`): `auto` runs every pack found next to the `.PrjPcb` or in the Git repository root (none found: a note, not an error), `none`, or pack ids; `--pack-file` adds a pack file (absolute or relative to the project folder), whose rules the checklists' custom items see too |
+| `--allow-plugins` | Runs the packs' Python plugins, only when `ALTIUM_COPILOT_ALLOW_PLUGINS=1` is set in the job's environment too; otherwise they are listed as not run |
+| `--variant`, `--rails`, `--hv`, `--vref` | The variant to check; net voltages, working voltages and feedback references given to every tool that takes them (checklist items and pack tool rules included) |
+| `--diff-base <ref>` | A design-diff summary (`diff_design`) of the files checked against a commit, branch, tag or `HEAD~1`: the base revision is read with git into a temporary folder, the work tree is not touched (the checkout needs the history: `fetch-depth: 0`). A change that adds, moves or renames the board has no project in the base revision: the diff says so and is skipped |
+| `--drc-report` | Reads the committed Batch DRC report of the board (`get_drc_report`, where Altium writes it or anywhere under the project folder); none found fails as an error |
+| `--junit`, `--markdown`, `--json` | Output files; the Markdown summary is also appended to `$GITHUB_STEP_SUMMARY` when it is set (shortened to fit GitHub's 1 MiB) |
+| `--fail-on error` | `error` (default), `warning` or `never` |
+| `--quiet` | Prints nothing but errors |
+
+Exit code 0 when nothing fails at or above `--fail-on`, 1 when something does, 2 for a
+usage, load or configuration problem (an unknown option, checklist, tool, pack, variant
+or base revision, a project that does not load, a checklist override or pack file that
+does not validate), for a run that checked nothing (no checklist, no pack found, no
+tool) and for an internal error of the command; the reports are written in every case
+(except `--help`) and name the problem.
+
+Statuses: the project load is a suite of its own: a sheet that cannot be read (a corrupt
+file, a Git LFS pointer in a checkout without LFS, a document path whose case does not
+match the file on Linux), a board document that is missing or not a binary PcbDoc, or a
+netlist that cannot be compiled fails as an error, since the checks after it would
+otherwise pass on what was not read; an `.Annotation` file that cannot be read is a
+warning. A checklist item's Yes passes, its No fails as an error (a custom item with its
+pack rule's severity), N/A and needs judgment are skipped: judgment items, and anything
+that could not run or be evaluated, are never passed. A pack rule fails with its own
+severity; one that checked nothing it could evaluate is skipped. A single tool gives one
+test case per finding group (its check, ERC violation type, release gate, rule kind or
+DRC rule) with the group's highest severity; info never fails. `--fail-on never` exits 0
+and still marks errors and warnings as failures in the JUnit report. The design diff is
+informational except its ICT hazards (a net that kept its name while its pins changed, a
+designator now on another part), which are warnings.
+
+Outputs:
+
+- **JUnit XML**: one `testsuite` per checklist, pack, tool, the project load, the DRC
+  report and the design diff, with its `properties` (kind, version, origin, design
+  state); one `testcase` per item, rule or finding group, with `failure` (type `error` or
+  `warning`), `skipped` (N/A, needs judgment, could not run) or `error` (a configuration
+  problem), and the item's status, evidence, anchors, tool and arguments in the failure
+  text or `system-out`. It follows the JUnit schema of the Jenkins xunit plugin
+  (`junit-10.xsd`: no properties in a `testcase`, no `skipped` on `testsuites`), so a
+  validating consumer reads it as GitHub and GitLab reporters do; a case's own properties
+  are in the JSON. Text is escaped and characters XML cannot carry are dropped. A failing
+  result below `--fail-on` passes, with its severity in `system-out`.
+- **Markdown**: the verdict, project, variant and design state (the Git commit and
+  whether design files changed since it), a coverage table per suite and per checklist
+  section, the failing items with their evidence and anchors, those below the threshold,
+  the design-diff summary (changes per section, ICT hazards, the first changes) and the
+  items not evaluated. Design and pack text is shown as written: control characters are
+  dropped and Markdown markup in it (links, code, emphasis, HTML) is escaped.
+- **JSON**: every suite and case with its properties, the design state, the diff and the
+  counts.
+
+Ready-made jobs in [`examples/ci`](examples/ci): `github-actions.yml` (Ubuntu: checks out
+the design, fetches this server at a pinned ref outside the design's work tree, installs
+`requirements.txt`, runs the check, publishes the JUnit report and keeps the results),
+`gitlab-ci.yml` (the same as a GitLab job, run for merge requests, which get a diff
+against their merge base, and for branch pushes) and `github-actions-windows.yml` (a
+Windows runner with the released `altium-copilot-kc.exe`, optionally checked against its
+SHA256). Pin the version you run and change it on purpose: a new version can add checks.
+Notes: on Linux, document paths in the `.PrjPcb` must match the files' case (they did on
+every project it was run on; a document that does not fails the project load); in a
+checkout every file has the checkout's time, so the DRC report's age against the board is
+not meaningful there; a self-hosted step that drives Altium Designer itself (its own ERC
+and DRC) is not part of this.
+
+Calibration, run as a CI job runs it (a fresh interpreter per project, an empty home
+folder): on Altium's 11 public AD25 example projects and 63 private ones every run
+finished without an exception, no project folder or home folder was written, every JUnit
+file passed the `junit-10.xsd` element, attribute and count checks, and the step summary
+equalled the Markdown file. Every project loaded with its netlist compiled, every sheet
+read and a binary board document, so the project load passed everywhere. With the
+defaults (the schematic and release checklists) 50 of the 63 private projects exit 1
+and 13 pass, in 4.4 s per project (median; 7.7 s at most). The items
+answered No most often: SCH-CMP-02 (a part's library item not found, on 31 boards, the
+same with or without the PC's installed Altium libraries, which a CI runner lacks),
+REL-OUT-01 (the OutJob gate, 22), REL-VAL-01 (no clean and current Batch DRC report,
+18), REL-VAL-04 (schematic and PCB out of sync, 13) and SCH-SIG-01 (offline ERC errors,
+9): a team starting with CI fixes those or disables them in a checklist override. With
+`--checks run_erc,check_sch_pcb_sync,check_release_readiness --drc-report` every project
+fails (45 of 63 have no DRC report to read), in 4.9 s (median; 7.7 s at most); the public
+examples take 2.3 s (median; 34 s for the largest).
 
 ---
 

@@ -6,6 +6,78 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [Unreleased]
 
 ### Added
+- Headless CI mode with JUnit output (roadmap #50): a `check` subcommand of the same
+  entry point (`python server/main.py check <project>` or `altium-copilot-kc.exe check
+  <project>`, dispatched by `main.run_entry` to the new `server/cli.py`; without a
+  subcommand the MCP server starts as before) runs the offline checks in a CI job on
+  every commit, with no Altium licence and no Windows.
+  - Runs the review checklists (`--checklist`, default `schematic,release`, team
+    checklists and overrides included) through `run_review_checklist`'s runner with one
+    tool runner shared by all of them, the check packs (`--packs auto|none|<ids>`,
+    `--pack-file`; plugins only with `--allow-plugins` and
+    `ALTIUM_COPILOT_ALLOW_PLUGINS=1`, as #49 requires), single tools (`--checks`, any tool
+    a checklist item or a pack's tool rule may call), the committed Batch DRC report
+    (`--drc-report`, `get_drc_report`) and a design diff against a base revision
+    (`--diff-base <ref>`: `diff_design`'s read-only git export into a temporary folder,
+    the work tree untouched). `--variant` sets the variant; `--rails`, `--hv` and `--vref`
+    are given to every tool that takes them, checklist items and pack tool rules
+    included, and are validated first.
+  - The project is loaded headless (`main.load_project_headless`): the netlist compiled
+    offline from the saved sheets (a committed `.NET` is not used), Altium never started
+    or asked, no registry or state-file write, no update check, nothing written into the
+    project folder. The loaders take `headless` to skip the registry and the Altium 365
+    status. `run_custom_checks`' run before paging is `_custom_run`, which the command
+    reads every rule and finding from.
+  - Statuses: the project load is a suite (a sheet that cannot be read or a netlist that
+    cannot be compiled fails as an error, an unreadable `.Annotation` file is a warning);
+    checklist Yes passes, No fails as an error (a custom item with its pack rule's
+    severity; custom items see `--pack-file`'s rules too), N/A and needs judgment are
+    skipped; a pack rule fails with its severity (a pass that left objects not evaluated
+    is skipped); a single tool gives one case per finding group (check, ERC violation
+    type, release gate with blocking fails as errors, rule-compliance kind, length rule,
+    DRC rule, report assessment, PCB health table) with the group's highest severity,
+    info never failing; the design diff's ICT hazards are warnings, and a board the base
+    revision does not have (added, moved or renamed) is a skipped diff. Exit code 1 when
+    a result fails at or above `--fail-on` (`error` default, `warning`, `never`), 2 for
+    usage, load or configuration problems (unknown option, checklist, tool, pack, variant
+    or revision, a project that does not load, an override or pack file that does not
+    validate), a run that checked nothing, or an internal error, with the reports written
+    either way (`--help` aside).
+  - Outputs: JUnit XML (`--junit`: a testsuite per checklist, pack, tool, the project
+    load, the DRC report and the diff; a testcase per item, rule or finding group with
+    failure, error or skipped and the evidence in the failure text or system-out; valid
+    against the Jenkins xunit plugin's `junit-10.xsd` element and attribute rules; text
+    escaped and characters XML 1.0 cannot carry dropped), a Markdown summary
+    (`--markdown`, also appended to `$GITHUB_STEP_SUMMARY`, shortened to fit 1 MiB:
+    verdict, design state, coverage per suite and per checklist section, failing items
+    with evidence and anchors, the design-diff summary, what was not evaluated; design
+    text shown as written, its control characters dropped and Markdown markup escaped),
+    JSON (`--json`, with each case's properties) and a short console summary (`--quiet`
+    for none).
+  - CI examples in `examples/ci`: GitHub Actions on Ubuntu (the design checked out, the
+    server fetched at a pinned ref outside its work tree, `pip install -r
+    requirements.txt`, the check, a JUnit test report and the results as an artifact),
+    the same as a GitLab job (merge request and branch pipelines), and a Windows runner
+    with the released executable (optional SHA256 check). README: "Continuous
+    integration".
+  - `services/review_checklist.runner_needs`: the paging needs of a set of checklist
+    items, shared by `run_review_checklist` and the check command's one runner.
+  - Calibration (a fresh interpreter per project, an empty home folder): 11 public AD25
+    example projects and 63 private ones all ran without an exception, no project or
+    home folder written, every JUnit file passing the `junit-10.xsd` element, attribute
+    and count checks, the step summary equal to the Markdown, the project load passing on
+    all 74. Defaults (schematic and release checklists): 50 of the 63 private projects
+    exit 1, 13 exit 0, 4.4 s per project (median, 7.7 s max);
+    the bundled items answered No most often are SCH-CMP-02 (31 boards; unchanged
+    without the PC's installed libraries), REL-OUT-01 (22), REL-VAL-01 (18), REL-VAL-04
+    (13) and SCH-SIG-01 (9). With `--checks
+    run_erc,check_sch_pcb_sync,check_release_readiness --drc-report` all 63 exit 1 (45
+    have no DRC report), 4.9 s (median, 7.7 s max). `--diff-base` was run on a public
+    example in a temporary Git repository (a path with spaces, given relative to the
+    repository root): the project-parameter change was reported, `git status` stayed
+    clean and no temporary folder was left. The existing tools (`set_project_dir`,
+    `run_custom_checks`, `run_review_checklist`) answer as on the base branch on all 11
+    public examples.
 - `run_custom_checks`: team-defined deterministic check packs, run offline (roadmap #49,
   `services/custom_checks.py` on a new read-only design API, `services/design_api.py`).
   Works on a netlist-free load (tool rules run; the select rules and plugins say

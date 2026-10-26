@@ -1425,11 +1425,14 @@ def _load_unregistered_netlist(project_dir: str, prj_pcb_path: str) -> str | Non
         return None
 
 
-def _load_offline_netlist(project_dir: str, prj_pcb_path: str, netlist_stale: bool) -> dict:
+def _load_offline_netlist(project_dir: str, prj_pcb_path: str, netlist_stale: bool,
+                          headless: bool = False) -> dict:
     """Full load with the netlist compiled offline from the saved sheets (sch_netlister):
     Altium Designer is not running and no up-to-date cached netlist exists. Every tool
     works. Falls back to the netlist-free load when the project lists no sheet or the
-    compile fails. netlist_stale: a cached .NET exists but sheets were saved after it."""
+    compile fails. netlist_stale: a cached .NET exists but sheets were saved after it.
+    headless (the check command, cli.py): the project registry is not written and the
+    Altium 365 clone status is not read."""
     global _project, _variant_state, _netlist_last_updated
     _project = None
     _variant_state = None
@@ -1439,13 +1442,13 @@ def _load_offline_netlist(project_dir: str, prj_pcb_path: str, netlist_stale: bo
 
     prj_data = parse_prj_pcb(prj_pcb_path)
     if not prj_data.sheet_paths:
-        return _load_netlist_free(project_dir, prj_pcb_path, netlist_stale)
+        return _load_netlist_free(project_dir, prj_pcb_path, netlist_stale, headless=headless)
     try:
         _altium.compile_offline(prj_pcb_path, prj_data.sheet_paths, prj_data.annotation_paths)
     except Exception as e:
         logging.warning("Offline netlist compile failed: %s", e)
         return _load_netlist_free(project_dir, prj_pcb_path, netlist_stale,
-                                  compile_error=f"{type(e).__name__}: {e}")
+                                  compile_error=f"{type(e).__name__}: {e}", headless=headless)
     sheets = [{"name": Path(p).stem, "path": p} for p in prj_data.sheet_paths]
     _project = {
         "name": Path(prj_pcb_path).stem,
@@ -1458,7 +1461,8 @@ def _load_offline_netlist(project_dir: str, prj_pcb_path: str, netlist_stale: bo
     _resolve_dnp_uids(_variant_state, _altium._netlist)
     _netlist_last_updated = datetime.now(timezone.utc).isoformat()
     # No netlist_mtime: only Altium's .NET may serve a later cache shortcut.
-    upsert_registry_entry(Path(prj_pcb_path).name, project_dir)
+    if not headless:
+        upsert_registry_entry(Path(prj_pcb_path).name, project_dir)
     response = {
         "loaded": True,
         "load_mode": "offline_netlist",
@@ -1479,7 +1483,7 @@ def _load_offline_netlist(project_dir: str, prj_pcb_path: str, netlist_stale: bo
         ),
         **_load_diagnostics(_altium._netlist or {}),
         **_design_info(prj_data),
-        **_altium365_info(project_dir),
+        **({} if headless else _altium365_info(project_dir)),
     }
     if netlist_stale:
         response["cached_netlist_stale"] = True
@@ -1490,11 +1494,12 @@ def _load_offline_netlist(project_dir: str, prj_pcb_path: str, netlist_stale: bo
 
 
 def _load_netlist_free(project_dir: str, prj_pcb_path: str, netlist_stale: bool,
-                       compile_error: str | None = None) -> dict:
+                       compile_error: str | None = None, headless: bool = False) -> dict:
     """Load the project from its files alone, without a netlist: Altium Designer is not
     running, no up-to-date cached netlist exists and the sheets could not be compiled
     offline (compile_error) or there are none. Board, rule, notes, picture and variant
-    tools work; the NETLIST_TOOLS answer netlist_required."""
+    tools work; the NETLIST_TOOLS answer netlist_required. headless: as for
+    _load_offline_netlist."""
     global _project, _variant_state, _netlist_last_updated
     _project = None
     _variant_state = None
@@ -1521,7 +1526,8 @@ def _load_netlist_free(project_dir: str, prj_pcb_path: str, netlist_stale: bool,
     }
     _variant_state = VariantState(prj_data.variants)
     _resolve_dnp_uids(_variant_state, None)
-    upsert_registry_entry(Path(prj_pcb_path).name, project_dir)
+    if not headless:
+        upsert_registry_entry(Path(prj_pcb_path).name, project_dir)
 
     reason = ("the sheets could not be compiled offline" if compile_error
               else "the project lists no schematic sheet to compile")
@@ -1561,7 +1567,7 @@ def _load_netlist_free(project_dir: str, prj_pcb_path: str, netlist_stale: bool,
             "the board from get_design_notes and get_board_info instead."
         ),
         **_design_info(prj_data),
-        **_altium365_info(project_dir),
+        **({} if headless else _altium365_info(project_dir)),
     }
     if netlist_stale:
         response["netlist_stale"] = True
@@ -1571,6 +1577,16 @@ def _load_netlist_free(project_dir: str, prj_pcb_path: str, netlist_stale: bool,
     if context is not None:
         response["project_context"] = context
     return response
+
+
+def load_project_headless(prj_pcb_path: str) -> dict:
+    """Load a project for the headless check command (cli.py, roadmap #50) without Altium
+    Designer, the project registry or the state file: the netlist is compiled offline
+    from the saved sheets (a cached .NET is not used: in a fresh checkout its save time
+    cannot tell whether it is up to date), else the load is netlist-free. Returns the
+    load response; it has an error when the .PrjPcb lists no document."""
+    prj = Path(prj_pcb_path).resolve()
+    return _load_offline_netlist(str(prj.parent), str(prj), False, headless=True)
 
 
 @mcp.tool(title="Load Project", annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
@@ -7477,6 +7493,84 @@ def _custom_model(key: tuple | None, build) -> dict:
     return model
 
 
+def _custom_run(pack: str | None, rules: list[str] | None, path: str | None,
+                allow_plugins: bool) -> tuple[dict | None, dict | None, dict | None]:
+    """run_custom_checks' run before paging: (error payload, None, None), or (None, the
+    result's header, the model of run_rules). The check command (cli.py) reads every
+    rule and finding from the model."""
+    try:
+        project, netlist, variant_state = _require_project(netlist=False)
+    except ProjectNotReady as error:
+        return error.payload, None, None
+    root = project.get("root_dir")
+    tools = _custom_tools()
+    try:
+        packs, pack_info = load_check_packs(root, path, tools)
+    except PackError as error:
+        return error.error, None, None
+    plugins = plugin_files(root) if root else []
+    plugin_ids = [plugin_id(item) for item in plugins]
+    if not packs and not plugins:
+        return ({
+            "error": "no_check_packs",
+            "message": f"No check pack was found: add {PACK_FILE} or {PACK_FOLDER}/*.json "
+                       "next to the .PrjPcb or in the root of the Git repository above it, "
+                       "or pass path= to a pack file.",
+            "hint": "The README's 'Custom check packs' section and examples/check_packs.json "
+                    "show the format."}, None, None)
+    try:
+        chosen_packs, chosen, plugins_wanted = choose_custom_rules(packs, pack, rules,
+                                                                   plugin_ids)
+    except PackError as error:
+        return error.error, None, None
+    if not plugins_wanted:
+        plugins = []
+    elif rules:
+        named = {name.strip().lower() for name in rules if isinstance(name, str)}
+        plugins = [item for item in plugins if plugin_id(item).lower() in named]
+    run_plugins, plugin_reason = plugins_allowed(allow_plugins)
+
+    def build() -> dict:
+        api, no_design = None, None
+        if netlist is None:
+            no_design = ("netlist_required: the project was loaded without a netlist, so "
+                         "parts, nets and pins cannot be selected (tool rules still run)")
+        elif _no_components_error(netlist):
+            no_design = "no_components_loaded: the netlist has no component data"
+        else:
+            plan, _, _ = _bom_plan(netlist, variant_state, None)
+            api = DesignAPI(netlist, plan, project.get("parameters") or {},
+                            pcb=lambda: _pcb_session.get(project, netlist))
+        return run_custom_rules(chosen, api=api, tools=tools, packs=chosen_packs,
+                                no_design=no_design, plugins=plugins,
+                                plugin_reason=None if run_plugins else plugin_reason)
+
+    folder = folder_signature(root or ".")
+    variant = variant_state.active.name if variant_state.variants else None
+    key = None if folder is None else (
+        project.get("prj_pcb_path"), id(netlist), _netlist_last_updated, variant, folder,
+        pack_signature(root, path), path, pack, json.dumps(rules), run_plugins)
+    model = _custom_model(key, build)
+    header: dict = {
+        "project": project.get("name"),
+        "variant": variant,
+        "load": "netlist" if netlist is not None else "netlist_free",
+        "units": "mm",
+        "packs": [{"id": item["id"], "title": item["title"], "version": item["version"],
+                   "file": item["file"], "rules": len(item["rules"]),
+                   **({"rails": item["rails"]} if item.get("rails") else {})}
+                  for item in chosen_packs],
+    }
+    if pack_info.get("replaced"):
+        header["replaced"] = pack_info["replaced"]
+    if plugin_ids:
+        header["plugins"] = {"folder": f"{PACK_FOLDER}/{PLUGIN_FOLDER}", "found": plugin_ids,
+                             "run": bool(run_plugins and plugins),
+                             **({"reason": plugin_reason} if not run_plugins else {}),
+                             "note": PLUGIN_HINT}
+    return None, header, model
+
+
 @mcp.tool(
     title="Run Custom Checks",
     annotations=ToolAnnotations(readOnlyHint=True),
@@ -7526,76 +7620,9 @@ def run_custom_checks(
     from next_offset); the run is reused for the next pages for 5 minutes while the
     project folder and the pack files are unchanged. The checks are heuristics on names
     and text like the tools they reuse: confirm a finding before changing the design."""
-    try:
-        project, netlist, variant_state = _require_project(netlist=False)
-    except ProjectNotReady as error:
-        return json.dumps(error.payload)
-    root = project.get("root_dir")
-    tools = _custom_tools()
-    try:
-        packs, pack_info = load_check_packs(root, path, tools)
-    except PackError as error:
-        return json.dumps(error.error)
-    plugins = plugin_files(root) if root else []
-    plugin_ids = [plugin_id(item) for item in plugins]
-    if not packs and not plugins:
-        return json.dumps({
-            "error": "no_check_packs",
-            "message": f"No check pack was found: add {PACK_FILE} or {PACK_FOLDER}/*.json "
-                       "next to the .PrjPcb or in the root of the Git repository above it, "
-                       "or pass path= to a pack file.",
-            "hint": "The README's 'Custom check packs' section and examples/check_packs.json "
-                    "show the format."})
-    try:
-        chosen_packs, chosen, plugins_wanted = choose_custom_rules(packs, pack, rules,
-                                                                   plugin_ids)
-    except PackError as error:
-        return json.dumps(error.error)
-    if not plugins_wanted:
-        plugins = []
-    elif rules:
-        named = {name.strip().lower() for name in rules if isinstance(name, str)}
-        plugins = [item for item in plugins if plugin_id(item).lower() in named]
-    run_plugins, plugin_reason = plugins_allowed(allow_plugins)
-
-    def build() -> dict:
-        api, no_design = None, None
-        if netlist is None:
-            no_design = ("netlist_required: the project was loaded without a netlist, so "
-                         "parts, nets and pins cannot be selected (tool rules still run)")
-        elif _no_components_error(netlist):
-            no_design = "no_components_loaded: the netlist has no component data"
-        else:
-            plan, _, _ = _bom_plan(netlist, variant_state, None)
-            api = DesignAPI(netlist, plan, project.get("parameters") or {},
-                            pcb=lambda: _pcb_session.get(project, netlist))
-        return run_custom_rules(chosen, api=api, tools=tools, packs=chosen_packs,
-                                no_design=no_design, plugins=plugins,
-                                plugin_reason=None if run_plugins else plugin_reason)
-
-    folder = folder_signature(root or ".")
-    variant = variant_state.active.name if variant_state.variants else None
-    key = None if folder is None else (
-        project.get("prj_pcb_path"), id(netlist), _netlist_last_updated, variant, folder,
-        pack_signature(root, path), path, pack, json.dumps(rules), run_plugins)
-    model = _custom_model(key, build)
-    header: dict = {
-        "project": project.get("name"),
-        "variant": variant,
-        "load": "netlist" if netlist is not None else "netlist_free",
-        "units": "mm",
-        "packs": [{"id": item["id"], "title": item["title"], "version": item["version"],
-                   "file": item["file"], "rules": len(item["rules"]),
-                   **({"rails": item["rails"]} if item.get("rails") else {})}
-                  for item in chosen_packs],
-    }
-    if pack_info.get("replaced"):
-        header["replaced"] = pack_info["replaced"]
-    if plugin_ids:
-        header["plugins"] = {"folder": f"{PACK_FOLDER}/{PLUGIN_FOLDER}", "found": plugin_ids,
-                             "run": bool(run_plugins and plugins),
-                             **({"reason": plugin_reason} if not run_plugins else {}),
-                             "note": PLUGIN_HINT}
+    error, header, model = _custom_run(pack, rules, path, allow_plugins)
+    if error is not None:
+        return json.dumps(error)
     trailer: dict = {"elapsed_ms": model["elapsed_ms"]}
     if model["tool_runs"]:
         trailer["tool_runs"] = model["tool_runs"]
@@ -8118,10 +8145,10 @@ def package_for_xfn() -> str:
     return _package_for_xfn_impl(project, netlist, variant_state, _read_version(), _design_notes)
 
 
-if __name__ == "__main__":
-    if "--version" in sys.argv:
-        print(f"altium-copilot-kc v{_read_version()}")  # noqa: T201
-        sys.exit(0)
+# ---------- entry point ----------
+
+def _serve() -> None:
+    """Run the MCP server on stdio (and the daily release check)."""
     threading.Thread(target=_check_for_update, args=(_read_version(),), daemon=True).start()
     try:
         mcp.run()
@@ -8135,3 +8162,24 @@ if __name__ == "__main__":
             sys.stderr = open(os.devnull, "w")
         except Exception:
             pass
+
+
+def run_entry(argv: list[str]) -> int:
+    """The executable's entry point: 'check ...' runs the headless checks (cli.py, roadmap
+    #50: no MCP server, no update check, no registry or state file), --version prints the
+    version, anything else starts the MCP server exactly as before."""
+    if argv[:1] == ["check"]:
+        try:
+            import cli
+        except ImportError:
+            from server import cli
+        return cli.main(argv[1:], server=sys.modules[__name__])
+    if "--version" in argv:
+        print(f"altium-copilot-kc v{_read_version()}")  # noqa: T201
+        return 0
+    _serve()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(run_entry(sys.argv[1:]))

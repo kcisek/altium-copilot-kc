@@ -941,6 +941,20 @@ def run_custom_rules(runner: ToolRunner, rule_ids: list[str]) -> dict:
     return {"data": {"rules": []}, "pages": 0}
 
 
+def runner_needs(items: list[dict]) -> dict[tuple[str, str], set[str]]:
+    """The ToolRunner needs of these checklist items (of one checklist or several that
+    share a runner): each auto and assisted item's tool call -> the result lists its
+    conditions and anchors read. A call not listed (the custom items' run_custom_checks:
+    its rule rows come with every page) reads its first page only."""
+    needs: dict[tuple[str, str], set[str]] = {}
+    for item in items:
+        if item["kind"] in ("auto", "assisted"):
+            evidence = item["evidence"]
+            needs.setdefault(ToolRunner.key(evidence["tool"], evidence["args"]),
+                             set()).update(list_keys(evidence))
+    return needs
+
+
 def list_keys(evidence: dict) -> set[str]:
     """The top-level result keys whose lists the evidence's conditions and anchor
     selectors read (paging needs only these)."""
@@ -1382,15 +1396,7 @@ def run_review_checklist(project: dict, netlist: dict | None, checklist: dict, *
     custom_ids = sorted({item["rule"] for item in chosen if item["kind"] == "custom"},
                         key=str.lower)
     if runner is None:
-        needs: dict[tuple[str, str], set[str]] = {}
-        for item in chosen:
-            if item["kind"] in ("auto", "assisted"):
-                evidence = item["evidence"]
-                needs.setdefault(ToolRunner.key(evidence["tool"], evidence["args"]),
-                                 set()).update(list_keys(evidence))
-        if custom_ids:  # the rule rows come with every page: the first one is enough
-            needs.setdefault(ToolRunner.key(CUSTOM_TOOL, {"rules": custom_ids}), set())
-        runner = ToolRunner(tools, clock=clock, needs=needs)
+        runner = ToolRunner(tools, clock=clock, needs=runner_needs(chosen))
     custom = run_custom_rules(runner, custom_ids) if custom_ids else None
     rows = []
     for item in chosen:
