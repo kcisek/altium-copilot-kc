@@ -646,7 +646,7 @@ def _nearest_true_cores(first, second) -> tuple[float, tuple, tuple]:
     )
 
 
-def _point_distance(px: float, py: float, geometry) -> float:
+def point_distance(px: float, py: float, geometry) -> float:
     """Distance from a point to the copper (0 inside it)."""
     segment, radius, polygon, arc = geometry
     if arc is not None:
@@ -710,7 +710,7 @@ def _narrow_layers(record, cut: float):
     )
 
 
-class _Bands:
+class Bands:
     """Even-odd point in polygon over several rings, edges indexed by y band."""
 
     def __init__(self, rings, band: float = BAND_MIL):
@@ -773,7 +773,7 @@ class _AreaCopper:
         if not (minx <= x <= maxx and miny <= y <= maxy):
             return False
         if self._bands is None:
-            self._bands = _Bands(self.rings)
+            self._bands = Bands(self.rings)
         return self._bands.contains(x, y)
 
 
@@ -933,7 +933,7 @@ class _Model:
                         continue
                     geometry = None
                     if key not in groups:
-                        geometry = self._pad_geometry(index, row, copper, primitive)
+                        geometry = self.pad_geometry(index, row, copper, primitive)
                         if geometry is None:
                             bare.add(key)
                             continue
@@ -948,7 +948,7 @@ class _Model:
         self._items, self._row_items, self._overhang = items, row_items, overhang
 
     @staticmethod
-    def _pad_geometry(index, row, copper, primitive):
+    def pad_geometry(index, row, copper, primitive):
         """A pad's copper on a layer (copper None: its main copper). Where the copper is
         no larger than the hole, a plated hole's barrel, or None (no copper: the hole's
         wall, Model.walls). An octagonal pad is an octagon."""
@@ -2176,7 +2176,7 @@ class _Edge:
         self.has_outline = bool(outline_pieces)
         # (geometry, box, edge key, edge kind, cutout index, cutout component)
         self.pieces: list[tuple] = []
-        self.outline: _Bands | None = None
+        self.outline: Bands | None = None
         self.box: tuple | None = None  # the outline's box
         self.point: tuple | None = None  # a point of the outline
         self.cutout_shapes: list[tuple] = []  # (bands, box, contour, region)
@@ -2185,7 +2185,7 @@ class _Edge:
         for geometry, vertex in outline_pieces:
             self.pieces.append((geometry, _BOUNDS(geometry), (-1, vertex), "outline", None, None))
         points = contour(outline, max_sagitta=SNAP_MIL)
-        self.outline = _Bands([points])
+        self.outline = Bands([points])
         self.box = (min(point[0] for point in points), min(point[1] for point in points),
                     max(point[0] for point in points), max(point[1] for point in points))
         self.point = points[0]
@@ -2197,7 +2197,7 @@ class _Edge:
             xs = [point[0] for point in points]
             ys = [point[1] for point in points]
             self.cutout_shapes.append(
-                (_Bands([points]), (min(xs), min(ys), max(xs), max(ys)), points, region)
+                (Bands([points]), (min(xs), min(ys), max(xs), max(ys)), points, region)
             )
 
     def in_cutout(self, x: float, y: float):
@@ -2417,7 +2417,7 @@ class _EdgeRun:
                     self.note(area.side, [area.layer], 0.0, piece, point)
             for (row,) in index.db.execute(sql, (x, x, y, y)):
                 for copper, item, layers in self.model.row_items.get(row, ()):
-                    if _point_distance(x, y, copper) == 0.0:
+                    if point_distance(x, y, copper) == 0.0:
                         self.crossing.add(id(item))
                         self.note(item, layers, 0.0, piece, copper)
 

@@ -6,6 +6,87 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [Unreleased]
 
 ### Added
+- `check_return_path` (roadmap #29): a return-path and reference-plane review of the
+  PcbDoc, read-only and offline (`server/services/return_path.py` on the new reference
+  copper model `server/services/reference_planes.py`); a PcbDoc is required. A geometric
+  screen of the copper as saved, not a field solver; Altium's Return Path rule is not
+  decoded.
+  - Reference layers per signal layer: the references an impedance profile of the Layer
+    Stack Manager names for it (REF_TOP / REF_BOT of its enabled entries), else its nearest
+    copper layers above and below, each with the summed dielectric height between, the
+    copper layers skipped and its kind: internal plane, large pour (one net's area copper
+    covers at least 15% of the board outline) or signal layer; the stack neighbours are
+    listed too. A routed signal layer with no plane or large pour reference is flagged
+    (no_adjacent_reference: a warning when it carries selected nets, else info).
+  - Internal planes decoded as negative layers: the net from PLANEnNETNAME, the regions
+    from the saved Split Plane polygons with their nets (the innermost wins; one region of
+    the plane net without them), the pullback from the stack (new
+    `BoardInfo.plane_pullbacks`: V9_STACK_LAYERn_PULLBACKDISTANCE, PLANEnPULLBACK, the
+    layer cache; 20 mil default) along the outline and cutouts, tracks, arcs, regions and
+    fills on the plane as voids (split lines told from the boundary lines along the edge;
+    keepouts are not voids), and an anti-pad around every via, through-hole pad and bare
+    hole crossing it unconnected (another net, no net, or a No Connect Power Plane Connect
+    Style, VIA./PAD. keys read): its copper grown by the Power Plane Clearance rule (20 mil
+    without one). Signal layers: tracks, arcs, pads, vias and area copper as check_dfm's
+    copper model holds them; a hatched pour as its saved hatch tracks and arcs with the
+    openings of its grid bridged inside its outline (new `PolygonPour.grid_mil` and
+    `track_width_mil` from GRIDSIZE and TRACKWIDTH; its outline when they are missing), so
+    the channels a hatch leaves out are voids. Coverage along a segment cuts it exactly at
+    every boundary and names each piece by its net.
+  - Selected nets (with their reasons): net= (nets or differential pairs) and net_class=,
+    else the members of differential pairs, of net classes with a high-speed name, of
+    xSignals, of the scopes of impedance-profile-driven Width and DiffPairsRouting rules
+    and of Length and MatchedLengths rules (other than All, or than a scope taking in 90%
+    of the routed nets), and nets named like clocks or high-speed buses (PCIe, USB data,
+    SATA, HDMI, LVDS, MIPI, DDR, Ethernet, SerDes, RF ...) but not their sideband nets
+    (enables, resets, wake and clock requests, I2C/SMBus, debug ports, LEDs); power and
+    ground names (prefixed supplies such as AVDD, IOVDD, PGND, P3V3 and AUX rails
+    included) are left out.
+  - Segments: every track and arc of a selected net, chained where they meet, over the
+    copper of each plane or pour reference of its layer. Reference copper is a plane's
+    nets, or on a pour layer the nets with at least 5% of the board and supply or ground
+    nets; another net's copper (a signal net's fill or routing) is a gap, and so is a
+    reference net's routing copper with a gap on both sides (a GND via's pad in a PWR
+    pour). The net's own vias and pads (and its differential partner's) are left out with
+    their clearance: the anti-pad on a plane, on a pour the clearance measured in the
+    saved copper on eight rays from the hole; the cut-out measured under its own SMD pads
+    likewise. segment_crosses_split: the reference net changes under it across a gap of
+    at most 100 mil (warning); segment_over_void: no reference copper under part of it,
+    with length, both ends and cause (split line, drawn void, plane edge or pullback,
+    outside the split planes, merged via clearances, no copper, copper without a net,
+    another net's copper, a reference net's island; warning), info for one other via's or
+    pad's clearance (as measured), the cut-out under the net's own pad, or where a
+    stripline's other reference stays one net's copper across it;
+    segment_near_plane_edge: reference copper of another net, or none, within the edge
+    distance on either side (3x the dielectric height to that reference, edge_distance=
+    overrides; via clearances are not edges; info).
+  - plane_split (info): internal planes split among several nets with each region's area,
+    and pour layers used as a reference whose copper is split among nets with their
+    shares.
+  - Stitching: each layer change of a selected net (a via or through-hole pad its tracks
+    end on in two signal layers, via-in-pad included) whose layers share no reference
+    layer needs a via of the reference net through a reference layer of each side within
+    stitch_radius (1 mm default), or, where the reference net changes (GND to a power
+    plane), a capacitor between each pair of reference nets that changes with a pad
+    within it (designator C and a number, or a C-prefixed part whose comment or footprint
+    says capacitor or farads; never CN, CON or CR). missing_stitching_via: info, a warning
+    for a reference net change without a capacitor (pairs_without_capacitor); a
+    differential pair's two vias of one layer change are judged together. layer_changes
+    counts every outcome (stitched, shared_reference, missing, reference_net_change,
+    stitched_by_capacitor).
+  - Places resting on approximated copper (anti-pad sizes, default pullback, bridged hatch
+    openings, assumed pour outlines, a plane whose split lines are not partitioned) are
+    marked likely; approximations lists every assumption. Findings are grouped per net,
+    layer and reference with their places (longest first), paged, and the page shrinks to
+    fit.
+  - run_review_checklist: PCB-HS-06 (continuous reference plane, no plane splits, layer
+    changes next to a return via) is now assisted by check_return_path.
+  - Checked on Altium's examples (6 boards, 649 selected nets, 36,849 segments; MiniPC,
+    the largest, about 15 s) and a private set of 63 boards (no errors, at most 0.25 s
+    each): an independent point-in-polygon reading of the saved copper found no reference
+    copper inside any of the 864 voids reported, both nets' copper beside all 66 split
+    crossings, and the same outcome for 1,366 of 1,368 layer changes (the other 2: the
+    sampled rings differ).
 - `check_power_paths` (roadmap #31, phase 1): a power-path estimate per rail on the
   PcbDoc, read-only and offline (`server/services/power_paths.py`,
   `server/parsers/power_analyzer.py`); a PcbDoc is required (`no_pcb_document` without
@@ -2700,6 +2781,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
   89 boards
 
 ### Fixed
+- `check_connectivity`: a Power Plane Connect Style rule that sets its style only per
+  object kind (VIA.PLANECONNECTSTYLE, PAD.PLANECONNECTSTYLE) was read as no style, so a
+  via or pad its No Connect kept off a plane still joined the plane's net. The kind's own
+  style is now read first, then the plain one.
 - The rail voltage read from a net name (`pull_resistors.rail_voltage`, shared by
   `check_pull_resistors`, `get_power_tree`, `run_erc`'s rail advisories,
   `get_firmware_pin_map` and `check_derating`) read the digit before the V of a P-form

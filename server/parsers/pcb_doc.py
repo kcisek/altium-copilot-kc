@@ -1034,6 +1034,12 @@ class BoardInfo:
     # Internal plane net assignments (PLANEnNETNAME): v6 layer (38 + n) ->
     # net name; planes without a net ('(No Net)') are left out.
     plane_nets: dict[int, str] = field(default_factory=dict)
+    # Internal plane pullback from the board edge (Layer Stack Manager 'Pullback
+    # distance'): v6 layer (38 + n) -> (mil, where it was read): "stack" (the stack
+    # layer's V9_STACK_LAYERn_PULLBACKDISTANCE), else "plane" (PLANEnPULLBACK), else
+    # "cache" (the V9_CACHE_LAYERn_PULLBACKDISTANCE of the layer cache entry whose
+    # LAYERID is the plane's). Planes with none of them are left out.
+    plane_pullbacks: dict[int, tuple[float, str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1190,6 +1196,10 @@ class PolygonPour:
     # NAME, which IsNamedPolygon / InNamedPolygon and polygon class members
     # give; None when the record has none. Pours may share a name.
     name: str | None = None
+    # A hatched pour's hatch: GRIDSIZE (the spacing of its tracks, centre to
+    # centre) and TRACKWIDTH, mil; None when the record does not say.
+    grid_mil: float | None = None
+    track_width_mil: float | None = None
 
 
 @dataclass
@@ -1317,6 +1327,7 @@ def decode_board(records: list[dict[str, str]]) -> BoardInfo:
             name_to_v6[value.lower()] = int(match.group(1))
 
     layers: list[PcbLayer] = []
+    plane_pullbacks: dict[int, tuple[float, str]] = {}
     order = 0
     stackup_source = "legacy"
     while True:
@@ -1343,6 +1354,10 @@ def decode_board(records: list[dict[str, str]]) -> BoardInfo:
         dielectric_constant = properties.get(f"{prefix}DIELCONST")
         layer_id = _optional_int(properties.get(f"{prefix}LAYERID"))
         v6_id = _copper_v6(layer_id) if kind == "copper" else None
+        if v6_id is not None and _plane_layer(v6_id):
+            pullback = parse_dim_mil(properties.get(f"{prefix}PULLBACKDISTANCE"))
+            if pullback is not None and pullback >= 0:
+                plane_pullbacks[v6_id] = (pullback, "stack")
         layers.append(
             PcbLayer(
                 v6_id=v6_id if v6_id is not None else name_to_v6.get(name.lower()),
@@ -1415,6 +1430,18 @@ def decode_board(records: list[dict[str, str]]) -> BoardInfo:
         net_name = (value or "").strip()
         if match and 1 <= int(match.group(1)) <= 16 and net_name and net_name != "(No Net)":
             plane_nets[38 + int(match.group(1))] = net_name
+    for plane in range(1, 17):
+        pullback = parse_dim_mil(properties.get(f"PLANE{plane}PULLBACK"))
+        if pullback is not None and pullback >= 0:
+            plane_pullbacks.setdefault(38 + plane, (pullback, "plane"))
+    for key, value in properties.items():
+        match = re.fullmatch(r"V9_CACHE_LAYER(\d+)_PULLBACKDISTANCE", key)
+        if not match:
+            continue
+        v6_id = _copper_v6(_optional_int(properties.get(f"V9_CACHE_LAYER{match.group(1)}_LAYERID")))
+        pullback = parse_dim_mil(value)
+        if v6_id is not None and _plane_layer(v6_id) and pullback is not None and pullback >= 0:
+            plane_pullbacks.setdefault(v6_id, (pullback, "cache"))
 
     return BoardInfo(
         origin_x=parse_dim_mil(properties.get("ORIGINX")),
@@ -1435,6 +1462,7 @@ def decode_board(records: list[dict[str, str]]) -> BoardInfo:
         outline_shape=outline_shape,
         health_checks=_health_check_storage(properties.get("HEALTHCHECKSTORAGE")),
         plane_nets=plane_nets,
+        plane_pullbacks=plane_pullbacks,
     )
 
 
@@ -1588,6 +1616,8 @@ def decode_polygons(
             polygon_type=(record.get("POLYGONTYPE") or "").strip() or None,
             shape=shape,
             name=_polygon_name(record.get("NAME")),
+            grid_mil=parse_dim_mil(record.get("GRIDSIZE")),
+            track_width_mil=parse_dim_mil(record.get("TRACKWIDTH")),
         )
         pours.append(pour)
         if layer is None or len(vertices) < 3 or pour.shelved:
@@ -1615,6 +1645,11 @@ def _signal_layer(layer: int) -> bool:
     """A signal layer (1-32). Internal planes (39-54) are drawn in negative:
     a region or fill there is a void in the plane, not copper."""
     return 1 <= layer <= 32
+
+
+def _plane_layer(layer: int) -> bool:
+    """An internal plane layer (39-54, Internal Plane 1-16)."""
+    return 39 <= layer <= 54
 
 
 # Regions6 / Fills6 keepouts: flags2 (payload byte 2) is 2, as in KiCad's
@@ -1972,6 +2007,25 @@ def _fill_records(data: bytes):
         )
 
 
+def fill_outline(fill: PcbFill) -> list[tuple[float, float]] | None:
+    """A fill's rectangle rotated about its centre (mil); None for a fill with no
+    area or a rotation that is not finite."""
+    x1, y1, x2, y2, rotation = fill.x1, fill.y1, fill.x2, fill.y2, fill.rotation
+    if x1 == x2 or y1 == y2 or not math.isfinite(rotation):
+        return None
+    center_x, center_y = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    cosine = math.cos(math.radians(rotation))
+    sine = math.sin(math.radians(rotation))
+    outline = []
+    for x, y in ((x1, y1), (x2, y1), (x2, y2), (x1, y2)):
+        dx, dy = x - center_x, y - center_y
+        outline.append((
+            center_x + dx * cosine - dy * sine,
+            center_y + dx * sine + dy * cosine,
+        ))
+    return outline
+
+
 def decode_fills(data: bytes) -> tuple[list[CopperArea], int]:
     """Decode copper Fills6 records (_fill_records): fills on signal layers that
     are not keepouts, as their rotated rectangle."""
@@ -1983,19 +2037,9 @@ def decode_fills(data: bytes) -> tuple[list[CopperArea], int]:
             continue
         if not _signal_layer(fill.layer) or fill.keepout:
             continue
-        x1, y1, x2, y2, rotation = fill.x1, fill.y1, fill.x2, fill.y2, fill.rotation
-        if x1 == x2 or y1 == y2 or not math.isfinite(rotation):
+        outline = fill_outline(fill)
+        if outline is None:
             continue
-        center_x, center_y = (x1 + x2) / 2.0, (y1 + y2) / 2.0
-        cosine = math.cos(math.radians(rotation))
-        sine = math.sin(math.radians(rotation))
-        outline = []
-        for x, y in ((x1, y1), (x2, y1), (x2, y2), (x1, y2)):
-            dx, dy = x - center_x, y - center_y
-            outline.append((
-                center_x + dx * cosine - dy * sine,
-                center_y + dx * sine + dy * cosine,
-            ))
         areas.append(
             CopperArea(
                 kind="fill",

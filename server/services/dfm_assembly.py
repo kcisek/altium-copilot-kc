@@ -1370,7 +1370,7 @@ class _Model:
             for x, y in _ring(pad):
                 if any(area.contains(x, y) for area in near) or any(
                     box[0] <= x <= box[2] and box[1] <= y <= box[3]
-                    and geometry._point_distance(x, y, copper) == 0.0
+                    and geometry.point_distance(x, y, copper) == 0.0
                     for box, copper in pours
                 ):
                     covered += 1

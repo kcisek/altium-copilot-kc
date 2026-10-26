@@ -226,8 +226,15 @@
       "hint": "constraints_review audits each interface's rules against its layout guide."
     },
     {
-      "id": "PCB-HS-06", "section": "high_speed", "kind": "judgment",
-      "text": "Fast signals keep a continuous reference plane, avoid plane splits and change layers next to a return via."
+      "id": "PCB-HS-06", "section": "high_speed", "kind": "assisted",
+      "text": "Fast signals keep a continuous reference plane, avoid plane splits and change layers next to a return via.",
+      "evidence": {
+        "tool": "check_return_path", "args": {},
+        "na": [{"path": "summary.nets_selected", "op": "==", "value": 0, "label": "no fast net found (differential pairs, high-speed classes, rule scopes, clock or bus names)"}],
+        "no": [{"list": "findings", "where": {"check": ["segment_crosses_split", "segment_over_void", "no_adjacent_reference", "missing_stitching_via"], "severity": "warning"}, "label": "fast nets over splits or voids, layers without a reference plane, or reference net changes without a capacitor"}],
+        "judge": [{"list": "findings", "where": {"check": ["segment_crosses_split", "segment_over_void", "segment_near_plane_edge", "missing_stitching_via"]}, "label": "return-path notes (plane edges, single anti-pads, layer changes without a stitching via)"}]
+      },
+      "hint": "check_return_path picks the fast nets by reason: confirm them, or name others with net= or net_class=. Places marked likely rest on approximated copper."
     },
     {
       "id": "PCB-HS-07", "section": "high_speed", "kind": "judgment",
