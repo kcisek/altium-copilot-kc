@@ -1,0 +1,85 @@
+# Altium design checks on a Windows runner with the released executable instead of
+# Python (altium-copilot-kc's check command; README, "Continuous integration"). The same
+# offline checks as github-actions.yml: Altium Designer is not needed or used here
+# either (a self-hosted step that drives Altium itself is not part of this).
+# Copy this file to .github/workflows/altium-checks.yml and set PROJECT below.
+name: Altium design checks (Windows)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  checks: write  # the test report step publishes a check run
+
+env:
+  # Your .PrjPcb, or the folder holding exactly one, relative to the repository root.
+  PROJECT: hardware/Board.PrjPcb
+  # The altium-copilot-kc release whose altium-copilot-kc.exe runs the checks. Pin it.
+  ALTIUM_COPILOT_REF: v0.4.0
+  # Optional: the SHA256 of that release's altium-copilot-kc.exe; the download is
+  # refused when it differs. Leave empty to skip the check.
+  ALTIUM_COPILOT_SHA256: ""
+
+jobs:
+  altium-checks:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the design
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the history --diff-base reads the base revision from
+
+      - name: Download altium-copilot-kc.exe from the pinned release
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:RUNNER_TEMP "altium-copilot-kc.exe"
+          $url = "https://github.com/kcisek/altium-copilot-kc/releases/download/$env:ALTIUM_COPILOT_REF/altium-copilot-kc.exe"
+          Invoke-WebRequest -Uri $url -OutFile $exe
+          if ($env:ALTIUM_COPILOT_SHA256) {
+            $hash = (Get-FileHash $exe -Algorithm SHA256).Hash
+            if ($hash -ne $env:ALTIUM_COPILOT_SHA256.ToUpper()) {
+              throw "altium-copilot-kc.exe has SHA256 $hash, not $env:ALTIUM_COPILOT_SHA256"
+            }
+          }
+          & $exe --version
+
+      - name: Run the design checks
+        shell: pwsh
+        env:
+          # Set on pull requests only: pushes are checked without a design diff.
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          $exe = Join-Path $env:RUNNER_TEMP "altium-copilot-kc.exe"
+          $diff = @()
+          if ($env:BASE_SHA) { $diff = @('--diff-base', $env:BASE_SHA) }
+          & $exe check $env:PROJECT `
+            --checklist 'schematic,release' `
+            --checks 'run_erc,check_sch_pcb_sync' `
+            --drc-report `
+            @diff `
+            --junit altium-results/junit.xml `
+            --markdown altium-results/summary.md `
+            --json altium-results/result.json `
+            --fail-on error
+          exit $LASTEXITCODE
+
+      - name: Publish the test report
+        if: ${{ !cancelled() }}
+        # Pin third-party actions to a commit SHA in your repository.
+        uses: dorny/test-reporter@v1
+        with:
+          name: Altium design checks
+          path: altium-results/junit.xml
+          reporter: java-junit
+          fail-on-error: false  # the check step's exit code decides
+
+      - name: Keep the results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: altium-results
+          path: altium-results/

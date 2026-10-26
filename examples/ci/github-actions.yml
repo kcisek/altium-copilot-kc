@@ -1,0 +1,91 @@
+# Altium design checks on every push and pull request, on Ubuntu: no Altium Designer,
+# no licence and no Windows (altium-copilot-kc's check command; README, "Continuous
+# integration"). Copy this file to .github/workflows/altium-checks.yml in the repository
+# that holds your Altium project and set PROJECT below.
+#
+# The netlist is compiled offline from the committed sheets; the review checklists, your
+# check packs (check_packs.json next to the .PrjPcb or in the repository root, found on
+# their own), run_erc and check_sch_pcb_sync run in-process, the committed Batch DRC
+# report is read, and a pull request gets a design-diff summary against its base commit.
+# Results: JUnit XML (the test report below), a Markdown step summary (written to
+# $GITHUB_STEP_SUMMARY by the command itself) and JSON, kept as an artifact.
+name: Altium design checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  checks: write  # the test report step publishes a check run
+
+env:
+  # Your .PrjPcb, or the folder holding exactly one, relative to the repository root.
+  PROJECT: hardware/Board.PrjPcb
+  # The altium-copilot-kc release tag (or a commit SHA) to run: the first release with the
+  # check command or a later one. Pin it, and change it on purpose: a new version can add
+  # checks and so new failures.
+  ALTIUM_COPILOT_REF: v0.4.0
+
+jobs:
+  altium-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the design
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the history --diff-base reads the base revision from
+
+      # Outside the design's work tree, so nothing of it is read as part of the design
+      # (its test fixtures, an untracked folder in the design state).
+      - name: Get altium-copilot-kc at the pinned ref
+        run: |
+          git init -q "$RUNNER_TEMP/altium-copilot"
+          git -C "$RUNNER_TEMP/altium-copilot" fetch -q --depth 1 \
+            https://github.com/kcisek/altium-copilot-kc.git "$ALTIUM_COPILOT_REF"
+          git -C "$RUNNER_TEMP/altium-copilot" checkout -q FETCH_HEAD
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install
+        run: pip install -r "$RUNNER_TEMP/altium-copilot/requirements.txt"
+
+      - name: Run the design checks
+        env:
+          # Set on pull requests only: pushes are checked without a design diff.
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          python "$RUNNER_TEMP/altium-copilot/server/main.py" check "$PROJECT" \
+            --checklist schematic,release \
+            --checks run_erc,check_sch_pcb_sync \
+            --drc-report \
+            ${BASE_SHA:+--diff-base "$BASE_SHA"} \
+            --junit altium-results/junit.xml \
+            --markdown altium-results/summary.md \
+            --json altium-results/result.json \
+            --fail-on error
+        # Exit 1: a check failed at or above --fail-on; 2: a usage, load or configuration
+        # problem (a pack file that does not validate, an unknown base revision, nothing
+        # checked ...). The reports are written either way.
+
+      - name: Publish the test report
+        if: ${{ !cancelled() }}
+        # Pin third-party actions to a commit SHA in your repository. A pull request from
+        # a fork gets a read-only token: this step cannot publish its check run there.
+        uses: dorny/test-reporter@v1
+        with:
+          name: Altium design checks
+          path: altium-results/junit.xml
+          reporter: java-junit
+          fail-on-error: false  # the check step's exit code decides
+
+      - name: Keep the results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: altium-results
+          path: altium-results/
