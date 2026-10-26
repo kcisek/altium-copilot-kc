@@ -80,6 +80,7 @@ Part of the [ee-in-a-box](https://github.com/ee-in-a-box) suite.
 | *"Do my footprints still match the library? Run the component rule check. Can I swap U3 to another footprint? Where else is this part used?"* | The libraries behind the parts, read offline (the project's SchLibs, PcbLibs and IntLibs, the installed libraries and its search paths, searched in that order as Altium does): parts placed from a library the project no longer has (with a same-name symbol found elsewhere), names not found, footprints taken from another library than the named one; each placed footprint against its library footprint, as Altium's Footprint Comparison Report (pad count, pads missing or extra, every pad offset from the reference point, the footprint turned or mirrored, pads moved, pad size, angle, shape, hole, slot, plating and layer; Height, 3D bodies and other primitives as info), with a bottom-side part flipped back (mask and paste expansions, hole offsets and texts are not compared); every pin on a net having a copper pad on the board and in the library (a bare hole does not count), and whether a proposed footprint keeps them all; Altium's SchLib and PcbLib Component Rule Checks on the items the project uses or on a whole library (duplicate or missing pin and pad designators, pin numbering gaps, pins without pads and pads without pins, an exposed pad with no pin, duplicate primitives, mirrored footprints, shorted and unconnected copper, missing description, default designator, footprint or courtyard); net-tie footprints (their copper joins the pads, schematic, PCB and library agree on the type) and parts that are not net ties whose footprint joins pads on different nets (on the board now, or after an update from the library); parts with a 3D model, only the fallback Height or neither; where-used across the registered projects, optionally only parts placed from one library. A symbol or footprint, its pins with electrical types and its pads with their sizes and holes: `get_library_part`. Workspace (Altium 365) and DbLib parts cannot be read offline: they are listed as such | `check_libraries` |
 | *"Is my fab drawing complete? Does it match the board? Is it up to date?"* | Each Draftsman drawing classified (fabrication, assembly or other) and checked for what a fabricator or assembler needs: IPC class, laminate, Tg, UL 94 flammability, surface finish, mask and silkscreen colours, board thickness and tolerance, copper weights, impedance, drill table, registration and tolerances, electrical test and, on a flex stack, the rigid-flex items (IPC-A-610 class, BOM table and both-side views for assembly drawings). Each item is found (the note line quoted, with its page, note and line) or missing (with a suggested note line using the design's numbers, `<...>` where a value must be agreed). Cross-checks what the drawing states or caches against the design: thickness and layer count against the layer stack, materials, copper weights, impedance notes and the impedance table against the Layer Stack Manager profiles, the drill table against the board's holes, the layer stack legend against the stack, the BOM table's variant against the OutJob and its parts against the BOM (with a netlist), the board it was made from, a board saved after its last update, and notes that contradict each other. Works without Altium (the BOM parts comparison needs the netlist) | `check_fab_drawing` |
 | *"Is this ready to release? Is it ready for review or fab?"* | One table of release gates modelled on Altium's Project Releaser, each pass, fail, warn, not verified or not applicable, with a blocking flag, one line of evidence and the tool to ask for details: Batch DRC report clean and newer than the board, ERC (never verifiable from the files: it cites the offline ERC's counts from `run_erc` as evidence and says whether an OutJob ERC validation output makes the Releaser run it), netlist newer than the sheets, schematic and PCB in sync, no unrouted nets, polygons repoured, board outline, fiducials, mounting holes, Not Fitted parts left out of the BOM and pick-and-place outputs, OutJob complete for every variant and its outputs newer than the design, Draftsman fab notes against the stackup, title-block revision and date, project integrity, the Altium 365 copy and test access (advisory, on ICT guidance); footprints against the libraries, lifecycle and compliance, teardrops, via stitching and the team template are listed as not verified. One failed blocking gate fails the release; a missing data source is never reported as passed | `check_release_readiness` |
+| *"Run our team checks. Does the board pass our rules? Run rule TB-HV-01."* | Your team's own deterministic rules, kept with the design as check packs (see [Custom check packs](#custom-check-packs)): select parts, nets or pins (designator, kind such as capacitor, TVS, IC or connector, fitted in the active variant, parameters, text, PCB side, case size, net class such as rail, ground, I2C, differential pair, off-board or user-facing connector, voltage) and assert on each one (a parameter present or matching, a count of parts of a kind on the net, a part of a kind within N series parts, the nearest part of a kind on the PCB within N mm, a capacitor's rated voltage at least N times the voltage across it, side, case size, or none allowed), or run an existing tool and turn its findings into a pass/fail gate with your severity. ERC-style findings (rule, severity, designators, nets, sheet and PCB position) with a verdict and a status per rule, including the rules that could not be evaluated and why. Opt-in Python plugins. A review checklist item can be a pack rule | `run_custom_checks` |
 | *"Run the schematic checklist. What is left before sign-off? Write the review record. What changed since the last review?"* | A design-review checklist run against the saved project: schematic (power, signals and interfaces, components and ratings, connectors and protection, testability and production, style and documentation), PCB (placement, power and thermal, high speed and constraints, manufacturing, testability), manufacturing and release, and supply chain (BOM), written in this project's own words on the topics of Altium's schematic and PCB review checklists, or your team's own (see [Review checklists](#review-checklists)). Each item is auto (a deterministic tool decides: Yes, No or N/A), assisted (a tool gives the evidence and leans yes or no; the datasheet or the reviewer decides) or judgment (a person decides), and carries its evidence: the tool and arguments, the finding ids and the designators, nets and sheets they name. A coverage table counts the items by status per section; the design state is the Git commit (and whether design files changed since it) or the SHA1s of the project files, so a sign-off belongs to one state. The review record is Markdown with a sign-off table and a machine-readable block: given back as `previous=`, the next run says what newly fails, what was fixed and what is still open. Nothing is written | `run_review_checklist` |
 | *"What changed since the last release? What did this commit change?"* | An ECO-style changelog between two revisions of the project's Git clone (commits, tags, branches or the files on disk; with none given, the recent commits to pick from) or two project folders: parts added, removed, re-designated or revalued, footprint and parameter changes, variant and per-variant BOM line changes, nets added, removed, renamed, merged or split and pins moved (from the PcbDoc), parts moved, rotated or flipped, rule, class, diff-pair and stackup changes, and routed-length and via deltas per net. Warns about ICT-fixture hazards: nets that kept their name while their pins changed, and designators now on another part. Revisions are read with read-only `git` commands into a temporary folder; the clone is never written. Works without Altium | `diff_design` |
 | *"Is my copy of this Altium 365 project up to date?"* | Where the local Git clone stands, read offline: when it was last updated from Altium 365, commits ahead or behind as of that update, design files changed locally, the last commit. Never fetches | `get_clone_status` |
@@ -155,6 +156,7 @@ Everything comes from the files Altium saves. Nothing is written back to your de
 | `.Annotation` | Board designators of board-annotated and multi-channel designs |
 | `.PcbDoc` | Tracks, arcs, vias, pads, saved pour outlines (shelved or not), the copper a pour was last poured into (solid pours' regions, hatched pours' tracks and arcs), copper regions and fills, internal plane nets, components and designators, stackup, impedance profiles, rules, classes, differential pairs, xSignals, DRC settings; for the health check also region shapes, the board shape and Health Check settings; for the DFM check also pad holes (plated or not, a slot's angle, whether the hole is offset from the pad), bare holes such as mounting holes, board cutouts and the number of embedded board arrays (panels) |
 | `review_checklists.json`, `review_checklists/*.json` (optional) | A team's changes to the bundled review checklists for `run_review_checklist`, from the project folder or the root of the Git repository above it. See [Review checklists](#review-checklists) |
+| `check_packs.json`, `check_packs/*.json` (optional) | A team's deterministic rules for `run_custom_checks`, from the project folder or the root of the Git repository above it; `check_packs/plugins/*.py` (project folder only) are Python plugins, run only when allowed twice. See [Custom check packs](#custom-check-packs) |
 | `fab_profile.json` (optional) | A fabricator's limits for `check_dfm`, from the project folder (or `<name>.json` named in the chat): name, source, `based_on` and limits in mm or mil. See [examples/fab_profile.json](examples/fab_profile.json) |
 | `.PCBDwf` (Draftsman) | Notes, free text, tables, view titles, pictures, drill table, layer stack notes, the drawing's variant and the views' own variants; for `check_fab_drawing` also the layer stack (materials, thicknesses, weights, Tg), impedance lines and BOM table rows the drawing cached at its last update, and the BOM views' data source |
 | `.OutJob` | Containers and their path and naming settings, outputs with their category, data source, variant, container links and order, and the setup of Gerber, Gerber X2, ODB++, IPC-2581, NC Drill, pick-and-place and ERC outputs (`get_output_jobs`). Generated output files are only listed for their dates, never opened |
@@ -202,8 +204,11 @@ files by name). Template: [examples/review_checklists.json](examples/review_chec
 - `add_sections` and `add`: sections and items for an existing checklist (`checklist`
   names it). Item ids are unique across all checklists.
 - `disable`: item ids to leave out; the record lists them.
-- An item: `id`, `section`, `text` (your words), `kind` (`auto`, `assisted` or
-  `judgment`), optional `hint` and `source`, and for auto and assisted items `evidence`:
+- An item: `id`, `section`, `text` (your words), `kind` (`auto`, `assisted`, `judgment`
+  or `custom`), optional `hint` and `source`; a custom item names a rule of your check
+  packs (`"rule": "TB-HV-01"`): its pass is Yes, its fail No, not applicable N/A, and a
+  rule that could not be evaluated needs judgment (plugins are not run from a checklist);
+  auto and assisted items have `evidence`:
   `tool` (a read-only tool such as `run_erc`, `check_bom`, `check_dfm` or
   `check_release_readiness`), `args` (that tool's arguments) and condition lists tried in
   order: `na` (N/A), `no` (No), `judge` (needs judgment), then `yes` (all must hold; left
@@ -223,6 +228,145 @@ Each file is checked like a fab profile: an unknown key, tool, operator, section
 id, a duplicate id (ids ignore case), an argument the tool does not take or bad JSON is
 reported with the file, the place in it and what to fix, and the review does not run
 until it is fixed; `overrides=false` runs the bundled checklists only.
+
+### Custom check packs
+
+`run_custom_checks` runs your team's own rules: JSON check packs kept with the design,
+`check_packs.json` or any `*.json` in a `check_packs` folder, next to the `.PrjPcb` or in
+the root of the Git repository above it (the repository's files first, then the project
+folder's; a pack whose `id` was already loaded replaces it), plus a pack file passed as
+`path=`. Template, with the six example rules below and a tool rule:
+[examples/check_packs.json](examples/check_packs.json).
+
+```json
+{
+  "id": "team-basics",
+  "title": "Team basics",
+  "version": "1",
+  "rails": {"VIN": 24},
+  "rules": [
+    {"id": "TB-BOM-01", "title": "Every part has a manufacturer and an MPN",
+     "select": {"parts": {"needs_mpn": true, "not": {"kind": ["test_point", "fiducial"]}}},
+     "assert": [{"has": ["manufacturer", "mpn"]}]},
+    {"id": "TB-HV-01", "title": "Capacitors above 24 V are rated at least 2x", "severity": "error",
+     "select": {"parts": {"kind": "capacitor", "net_voltage": {"above": 24}}},
+     "assert": [{"rating_ratio": {"min": 2}}],
+     "message": "{designator} on {net}: rated {rated_voltage} V for {voltage} V ({ratio:.2f}x)"},
+    {"id": "TB-TOOL-01", "title": "No user-facing line without ESD", "severity": "error",
+     "tool": "check_interfaces", "args": {"checks": ["no_esd"]},
+     "fail": [{"list": "findings", "where": {"check": "no_esd", "exposure": "external"},
+               "label": "user-facing lines without ESD"}]}
+  ]
+}
+```
+
+- A pack: `id` (lower case), `title`, `version`, optional `description`, `source` and
+  `rails` (net voltages its rules assume, which win over the voltages read from net names
+  and the power tree), and `rules`. Keys starting with `_` are comments.
+- A rule: `id` (unique across packs, ignoring case; a checklist item names it), `title`,
+  optional `description`, `severity` (`error`, `warning` (default) or `info`), `message`
+  (a template: `{designator}`, `{net}`, `{pin}`, `{pin_name}`, `{value}`, `{footprint}`,
+  `{mpn}`, `{case_size}`, `{side}`, `{voltage}`, `{rated_voltage}`, `{ratio}`,
+  `{distance_mm}`, `{nearest}`, `{count}`, `{missing}`, `{connectors}` (those its nets
+  leave the board through, the user-facing ones first), `{failed}` (what failed, in
+  words) ...; `{ratio:.2f}` formats; a value not known shows `?`), `on_unknown` (`skip`,
+  the default, counts an object that cannot be evaluated as not evaluated; `fail` makes
+  it a finding) and `disabled` (runs only when named in `rules=`).
+- Select-and-assert rules: `select` is `{"parts": filter}`, `{"nets": filter}` or
+  `{"pins": filter}`; `assert` lists what every selected object must meet.
+  - Part filters: `designator`, `value`, `comment`, `description`, `footprint`, `mpn`,
+    `manufacturer`, `lib_reference`, `sheet`, `text` (regular expressions, any case),
+    `prefix`, `kind` (resistor, capacitor, inductor, ferrite, choke, diode, zener, led,
+    tvs (ESD and TVS parts, varistors), ic, connector, transistor, transformer, crystal,
+    fuse, switch, relay, test_point, fiducial, mechanical, battery, jumper, thermistor,
+    other: check_interfaces' reading of the designator prefix and the part's words),
+    `fitted` (default true: fitted in the active variant; `null` for every part),
+    `in_bom`, `needs_mpn` (in the BOM, not mechanical, not marked N/A on purpose, as
+    `check_bom` reads it), `parameter` (`{"Name": "regex"}`, `true` present, `false`
+    missing), `side` (`top` or `bottom`, from the PcbDoc; without one the part is not
+    evaluated), `case_size` (`"0402"`, a list, or `{"in", "not_in", "min", "max"}` of
+    imperial codes, read from a Case/Package parameter, the text or the footprint name
+    of passives and diodes), `net` (a net filter: a part on
+    such a net), `net_voltage` (`{"min", "max", "above", "below"}` on the highest
+    voltage of its nets, as `check_derating` resolves them) and `not` (a filter the part
+    must not match). A part, net or pin on a rail whose voltage neither its name, the
+    power tree nor the pack's `rails` gives is counted as not evaluated when that could
+    change the answer, wherever the voltage filter sits (a pin's or part's net,
+    `has_part`, `not`, an assertion's parts filter), never as in or out of range; signal
+    nets of unknown voltage do not count (a part on such nets only is in no range).
+  - Net filters: `name`, `class` (ground, rail, supply (a rail, or a net a GPIO switches
+    that feeds two or more pull-ups), signal, i2c, open_drain, diff_pair (signals only,
+    never a split rail such as V+ and V-), connector, connector_power (a connector's power
+    pin), off_board (a line into the board: a connector signal pin whose line reaches an
+    IC, a transistor or another active part, the lines `check_interfaces`' no_esd asks
+    ESD protection for; not a line into a transformer or another connector, not a LED or
+    centre-tap pin), external (the same on a connector `check_interfaces` judges
+    user-facing), single_pin), `voltage`, `has_part` (a part filter), `pin_count`, `not`,
+    and `one_per_line` (`true`, in the rule's own nets filter: one net of each line, a
+    line being the net and the nets joined to it by fitted series resistors under 1 kohm,
+    as `check_pull_resistors` joins a signal; a net named by the designer is kept before
+    an automatic Net... name).
+  - Pin filters: `name`, `number`, `type` (Input, IO, Output, OpenCollector, Passive,
+    HiZ, OpenEmitter, Power), `role` (supply, ground, ref, cap, out, in, other, none:
+    the pin name's first function), `part` (a part filter), `net` (a net filter),
+    `connected` (default true), `not`.
+  - Assertions: `has_parameter` (a name or a list, all non-empty; `{"any": [...]}` for
+    spellings), `has` (fields: value, comment, description, footprint, mpn, manufacturer,
+    lib_reference, sheet, case_size), `parameter_matches` and `matches` (`{"name":
+    "regex"}`), `count` (`{"parts": filter, "min", "max", "within_hops", "through",
+    "on_line"}`: the parts of a kind on the net, or on the nets joined to it through that
+    many series parts; `"on_line": true` starts from every net of its line, so a pull-up
+    behind a 0 ohm link or a damping resistor counts), `connected` (`{"parts": filter,
+    "within_hops": 1, "through": [...], "on_line"}`: at
+    least one such part; series parts are 0 ohm links and resistors, ferrites, inductors,
+    common-mode chokes and series capacitors, fitted; rails and grounds are never
+    crossed), `nearest` (`{"parts": filter, "max_mm", "same_net": true}`: the nearest
+    such part on the PCB, pad edge to pad edge, straight line), `rating_ratio`
+    (`{"min": 2}`: a capacitor's rated voltage over the voltage across it, as
+    `check_derating` reads both), `side`, `case_size`, and `none` (every selected object
+    is a finding). In an assertion's parts filter, `other_end` tests the far side of a
+    part found on the net (`"other_end": "ground"` for a capacitor to ground,
+    `"supply"` for a pull-up).
+- Tool rules: `tool` (a read-only tool a review checklist can call, such as `run_erc`,
+  `check_interfaces`, `check_bom`, `check_dfm` or `check_pull_resistors`), `args`, and
+  the review checklists' conditions: `fail` (each matching row of a `list` condition is a
+  finding with its designators and nets; a `path` condition that holds is one), `pass`
+  (all must hold), `na` (the rule does not apply) and `na_errors` (tool errors that mean
+  it does not apply, default `no_pcb_document`). The tool runs in-process with the active
+  variant, as a direct call would. A count missing from a summary of counts (tools list
+  only the checks that found something, `{}` on a clean board) is 0, named in the row's
+  `counted_as_zero`; any other field a condition reads that the tool does not give leaves
+  the rule could_not_evaluate, never passed (the findings other conditions read still
+  count).
+- Python plugins: `check_packs/plugins/*.py` in the project folder (never anywhere
+  else: a `check_packs` or `plugins` folder linked to another place gives none) each
+  define `check(api)`, which returns a list of findings: dicts with
+  `message`, optional `severity`, `designators`, `nets`, `pins`, `location` and `check`.
+  `api` is the read-only design API (`server/services/design_api.py`: `api.parts`,
+  `api.nets`, `api.part("U1")`, `api.net("3V3")`, each part's kind, fitted, parameters,
+  pins, case size, side and position, each net's classes, voltage, line and connectors,
+  `api.reachable`, `api.pads`, `api.distance_mm` and `api.nearest`). **Plugins run
+  repository code with the server's
+  permissions**, so they run only when the call passes `allow_plugins=true` **and** the
+  server was started with `ALTIUM_COPILOT_ALLOW_PLUGINS=1` in its environment (set it
+  where the server is configured, for example the MCP client's `env`); otherwise they are
+  listed, never imported. A plugin that raises, calls `sys.exit`, returns something else
+  or prints is reported in its rule row; it never stops the server. A plugin has no time
+  limit (one that never returns blocks the call) and output it writes past
+  `sys.stdout` (`os.write`, `sys.__stdout__`) is not captured: review plugins as you
+  review the rest of the repository's code. A pack cannot be named `plugins`.
+
+Results: `verdict` (fail: an error finding; warn; incomplete: a rule could not be
+evaluated or left objects not evaluated; pass), `severity_counts`, a summary by pack and
+severity, one row per rule (status pass, fail, not_applicable, could_not_evaluate with
+the reason, objects checked and not evaluated; every rule keeps its row on every page,
+shortened when a page must shrink) and the findings, errors first, paginated (the run is
+reused for the next pages for 5 minutes while the project folder and the packs are
+unchanged). Each pack file is checked
+like a checklist override: an unknown key, kind, class, assertion, message field, tool or
+argument, a bad regular expression or bad JSON is reported with the file and the place
+in it, and nothing runs until it is fixed. Run on Altium's public examples, the example
+pack's rules each select what they describe: see the calibration notes in CHANGELOG.
 
 ### Offline netlist
 

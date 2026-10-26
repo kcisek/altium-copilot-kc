@@ -1,0 +1,72 @@
+{
+  "_comment": "An example check pack for run_custom_checks: copy it next to your .PrjPcb (or to the root of the Git repository) as check_packs.json, or into a check_packs folder, and change the rules to your team's. Keys starting with '_' are comments.",
+  "id": "team-basics",
+  "title": "Team basics: the roadmap's example rules",
+  "version": "1",
+  "description": "Protection on off-board lines, decoupling distance, capacitor voltage headroom, I2C pull-ups, small parts on the bottom side, manufacturer part numbers, and one tool rule.",
+  "rails": {},
+  "rules": [
+    {
+      "id": "TB-ESD-01",
+      "title": "Every off-board connector signal has a TVS or ESD diode",
+      "description": "The lines into the board of connectors check_interfaces judges user-facing (signal pins whose line reaches an IC, a transistor or another active part: the lines its no_esd asks protection for; not grounds, supplies, LED or centre-tap pins) reach a TVS/ESD part on the net or across one series part (0 ohm link, resistor, ferrite, choke, series capacitor). Use the class off_board for every connector, board-to-board ones too.",
+      "severity": "warning",
+      "select": {"nets": {"class": "external"}},
+      "assert": [{"connected": {"parts": {"kind": "tvs"}, "within_hops": 1, "label": "TVS/ESD part"}}],
+      "message": "{net} (connector {connectors}): {failed}"
+    },
+    {
+      "id": "TB-DEC-01",
+      "title": "Every IC power pin has a decoupling capacitor within 5 mm",
+      "description": "Each supply pin of a fitted IC on a rail has a fitted capacitor to ground on the same net within 5 mm, pad edge to pad edge (needs the PcbDoc).",
+      "severity": "warning",
+      "select": {"pins": {"part": {"kind": "ic"}, "role": "supply", "net": {"class": "rail"}}},
+      "assert": [{"nearest": {"parts": {"kind": "capacitor", "other_end": "ground"}, "max_mm": 5,
+                              "label": "capacitor to ground"}}]
+    },
+    {
+      "id": "TB-HV-01",
+      "title": "Capacitors on nets above 24 V are rated at least twice the voltage",
+      "description": "Rated voltage over the voltage across the capacitor (check_derating's reading of both); give the pack's rails for inputs whose voltage the net name does not say.",
+      "severity": "error",
+      "select": {"parts": {"kind": "capacitor", "net_voltage": {"above": 24}}},
+      "assert": [{"rating_ratio": {"min": 2}}],
+      "message": "{designator} on {net}: rated {rated_voltage} V for {voltage} V across it ({ratio:.2f}x, 2x wanted)"
+    },
+    {
+      "id": "TB-I2C-01",
+      "title": "Every I2C line has exactly one pull-up",
+      "description": "Each SDA and SCL line (the net with the nets joined to it by series resistors under 1 kohm, as check_pull_resistors joins them; one finding per line) has exactly one fitted resistor to a supply (a rail, or a net a GPIO switches that feeds two or more pull-ups): one pull-up pair per bus.",
+      "severity": "warning",
+      "select": {"nets": {"class": "i2c", "one_per_line": true}},
+      "assert": [{"count": {"parts": {"kind": "resistor", "other_end": "supply"}, "min": 1, "max": 1,
+                            "on_line": true, "label": "pull-up"}}]
+    },
+    {
+      "id": "TB-ASM-01",
+      "title": "No 0201 or smaller parts on the bottom side",
+      "severity": "warning",
+      "select": {"parts": {"case_size": ["01005", "0201"]}},
+      "assert": [{"side": "top"}],
+      "message": "{designator} ({case_size}) is on the bottom side"
+    },
+    {
+      "id": "TB-BOM-01",
+      "title": "Every part has a manufacturer and a manufacturer part number",
+      "description": "Fitted BOM parts that should carry one (check_bom's reading: not an Altium mechanical part, not marked N/A on purpose; heat sinks and screws placed as standard parts are bought too), other than test points and fiducials.",
+      "severity": "warning",
+      "select": {"parts": {"needs_mpn": true, "not": {"kind": ["test_point", "fiducial"]}}},
+      "assert": [{"has": ["manufacturer", "mpn"]}]
+    },
+    {
+      "id": "TB-TOOL-01",
+      "title": "No user-facing connector line without ESD protection (check_interfaces)",
+      "description": "A tool rule: check_interfaces' no_esd findings on connectors it judges external become errors of this pack.",
+      "severity": "error",
+      "tool": "check_interfaces",
+      "args": {"checks": ["no_esd"]},
+      "fail": [{"list": "findings", "where": {"check": "no_esd", "exposure": "external"},
+                "label": "user-facing connector lines without ESD protection"}]
+    }
+  ]
+}

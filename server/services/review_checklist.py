@@ -11,6 +11,9 @@ gives the evidence and which of its findings or summary fields mean Yes, No or N
   check_interfaces) and Claude, the datasheets or the reviewer decide: needs judgment,
   with the way the evidence leans (lean yes or no), or N/A.
 - judgment: a person decides; the item is listed with a hint.
+- custom: a rule of the team's check packs (run_custom_checks) decides: its pass is Yes,
+  its fail No, not applicable N/A; a rule that could not be evaluated (or checked some
+  objects only) needs judgment. Plugins are not run from a checklist.
 
 Each tool runs in-process through the same function the MCP tool is (main.py passes them
 in), with the same arguments, defaults and active variant as a direct call, once per
@@ -49,7 +52,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 from typing import Any, Callable
 
-KINDS = ("auto", "assisted", "judgment")
+KINDS = ("auto", "assisted", "judgment", "custom")
 SCOPES = ("schematic", "pcb", "release", "bom")
 STATUSES = ("yes", "no", "n/a", "needs_judgment")
 STATUS_LABELS = {"yes": "Yes", "no": "No", "n/a": "N/A", "needs_judgment": "Needs judgment"}
@@ -71,6 +74,7 @@ EVIDENCE_TOOLS = (
     "get_board_info", "get_design_notes", "get_clone_status",
 )
 RESERVED_ARGS = ("offset", "format")
+CUSTOM_TOOL = "run_custom_checks"  # answers the custom items
 DEFAULT_NA_ERRORS = ("no_pcb_document",)
 OPS = ("==", "!=", ">", ">=", "<", "<=", "in", "not_in", "exists", "missing", "truthy",
        "falsy", "empty", "nonempty")
@@ -96,7 +100,7 @@ _ITEM_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}")
 _CHECKLIST_KEYS = ("id", "title", "scope", "version", "description", "source", "sections",
                    "items")
 _SECTION_KEYS = ("id", "title")
-_ITEM_KEYS = ("id", "section", "text", "kind", "scope", "evidence", "hint", "source")
+_ITEM_KEYS = ("id", "section", "text", "kind", "scope", "evidence", "rule", "hint", "source")
 _EVIDENCE_KEYS = ("tool", "args", "na", "no", "judge", "yes", "na_errors", "anchors")
 _CONDITION_KEYS = ("list", "where", "path", "op", "value", "label", "all", "any")
 _OVERRIDE_KEYS = ("name", "comment", "checklists", "add_sections", "add", "disable")
@@ -148,7 +152,7 @@ class ChecklistError(ValueError):
         self.error = error
 
 
-def _clip(text: str, limit: int) -> str:
+def clip(text: str, limit: int) -> str:
     text = " ".join(str(text).split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
@@ -181,7 +185,7 @@ def load_bundled(folder: Path | None = None) -> dict[str, dict]:
         raise ChecklistError({"error": "checklists_missing",
                               "message": f"No bundled checklist was found in {folder}."})
     for path in paths:
-        data = _read_json(path, f"bundled {path.name}")
+        data = read_json(path, f"bundled {path.name}")
         checklist = validate_checklist(data, f"bundled {path.name}", "bundled")
         if checklist["id"] in checklists:
             raise ChecklistError(_invalid(f"bundled {path.name}", "id",
@@ -205,7 +209,7 @@ def _no_duplicates(pairs: list) -> dict:
     seen: dict = {}
     for key, value in pairs:
         if key in seen:
-            raise ValueError(f"duplicate key '{_clip(key, 60)}'")
+            raise ValueError(f"duplicate key '{clip(key, 60)}'")
         seen[key] = value
     return seen
 
@@ -214,7 +218,7 @@ def _no_constants(text: str):
     raise ValueError(f"{text} is not allowed in a checklist")
 
 
-def _read_json(path: Path, origin: str, folder: Path | None = None) -> dict:
+def read_json(path: Path, origin: str, folder: Path | None = None) -> dict:
     """The JSON object in path: UTF-8 (a BOM is fine), no duplicate keys, at most
     MAX_OVERRIDE_BYTES; with folder, only a file that resolves inside it (no link out)."""
     try:
@@ -248,7 +252,7 @@ def _read_json(path: Path, origin: str, folder: Path | None = None) -> dict:
 def _keys(data: dict, allowed: tuple, origin: str, where: str) -> None:
     for key in data:
         if not isinstance(key, str) or (key not in allowed and not key.startswith("_")):
-            raise ChecklistError(_invalid(origin, where, f"unknown key '{_clip(key, 60)}'.",
+            raise ChecklistError(_invalid(origin, where, f"unknown key '{clip(key, 60)}'.",
                                           valid_keys=list(allowed)))
 
 
@@ -272,7 +276,7 @@ def _text(data: dict, key: str, origin: str, where: str, required: bool = False)
 
 def _identifier(value, pattern: re.Pattern, origin: str, where: str, what: str) -> str:
     if not isinstance(value, str) or not pattern.fullmatch(value):
-        shown = _clip(value, 60) if isinstance(value, str) else type(value).__name__
+        shown = clip(value, 60) if isinstance(value, str) else type(value).__name__
         rule = ("lower-case letters, digits, '_' and '-', starting with a letter, at most 40"
                 if pattern is _CHECKLIST_ID else
                 "letters, digits, '_', '.' and '-', at most 40")
@@ -322,7 +326,7 @@ def validate_condition(cond, origin: str, where: str, depth: int = 0) -> dict:
         out["where"] = _validate_where(cond["where"], origin, f"{where}.where")
     op = cond.get("op", ">" if shape == "list" else "truthy")
     if op not in OPS:
-        raise ChecklistError(_invalid(origin, f"{where}.op", f"'{_clip(op, 20)}' is not an "
+        raise ChecklistError(_invalid(origin, f"{where}.op", f"'{clip(op, 20)}' is not an "
                                       f"operator; valid: {', '.join(OPS)}."))
     out["op"] = op
     if op in _UNARY_OPS:
@@ -362,7 +366,7 @@ def _validate_where(where_spec, origin: str, where: str) -> dict:
             op = spec.get("op", "==")
             if op not in OPS:
                 raise ChecklistError(_invalid(origin, f"{where}.{field}.op",
-                                              f"'{_clip(op, 20)}' is not an operator."))
+                                              f"'{clip(op, 20)}' is not an operator."))
             if op in _UNARY_OPS:
                 if "value" in spec or "field" in spec:
                     raise ChecklistError(_invalid(origin, f"{where}.{field}",
@@ -401,7 +405,7 @@ def validate_evidence(evidence, origin: str, where: str) -> dict:
     tool = evidence.get("tool")
     if tool not in EVIDENCE_TOOLS:
         raise ChecklistError(_invalid(
-            origin, f"{where}.tool", f"'{_clip(tool, 60)}' is not a tool a checklist can "
+            origin, f"{where}.tool", f"'{clip(tool, 60)}' is not a tool a checklist can "
                                      "call.", valid_tools=list(EVIDENCE_TOOLS)))
     args = evidence.get("args", {})
     if not isinstance(args, dict):
@@ -450,21 +454,30 @@ def validate_item(item, origin: str, where: str, sections: set[str], scope: str,
     section = item.get("section")
     if section not in sections:
         raise ChecklistError(_invalid(origin, f"{where}.section",
-                                      f"'{_clip(section, 40)}' is not a section of the "
+                                      f"'{clip(section, 40)}' is not a section of the "
                                       "checklist.", valid_sections=sorted(sections)))
     out["section"] = section
     out["text"] = _text(item, "text", origin, where, required=True)
     kind = item.get("kind")
     if kind not in KINDS:
-        raise ChecklistError(_invalid(origin, f"{where}.kind", f"'{_clip(kind, 20)}' is not a "
+        raise ChecklistError(_invalid(origin, f"{where}.kind", f"'{clip(kind, 20)}' is not a "
                                       f"kind; valid: {', '.join(KINDS)}."))
     out["kind"] = kind
     item_scope = item.get("scope", scope)
     if item_scope not in SCOPES:
-        raise ChecklistError(_invalid(origin, f"{where}.scope", f"'{_clip(item_scope, 20)}' "
+        raise ChecklistError(_invalid(origin, f"{where}.scope", f"'{clip(item_scope, 20)}' "
                                       f"is not a scope; valid: {', '.join(SCOPES)}."))
     out["scope"] = item_scope
-    if kind == "judgment":
+    if kind == "custom":
+        if "evidence" in item:
+            raise ChecklistError(_invalid(origin, f"{where}.evidence", "a custom item names "
+                                          "a check-pack rule ('rule'), not evidence."))
+        out["rule"] = _identifier(item.get("rule"), _ITEM_ID, origin, f"{where}.rule",
+                                  "rule id")
+    elif "rule" in item:
+        raise ChecklistError(_invalid(origin, f"{where}.rule", "'rule' (a check-pack rule id) "
+                                      "goes with kind 'custom'."))
+    elif kind == "judgment":
         if "evidence" in item:
             raise ChecklistError(_invalid(origin, f"{where}.evidence", "a judgment item has "
                                           "no evidence; make it 'assisted' to call a tool."))
@@ -495,7 +508,7 @@ def validate_checklist(data, origin: str, origin_label: str, where: str = "") ->
     checklist["title"] = _text(data, "title", origin, where, required=True)
     scope = data.get("scope")
     if scope not in SCOPES:
-        raise ChecklistError(_invalid(origin, at("scope"), f"'{_clip(scope, 20)}' is not a "
+        raise ChecklistError(_invalid(origin, at("scope"), f"'{clip(scope, 20)}' is not a "
                                       f"scope; valid: {', '.join(SCOPES)}."))
     checklist["scope"] = scope
     for key in ("version", "description", "source"):
@@ -640,7 +653,7 @@ def apply_overrides(bundled: dict[str, dict], files: list[tuple[Path, Path, str]
                   for key, value in bundled.items()}
     applied: list[dict] = []
     for path, folder, label in files:
-        data = _read_json(path, label, folder)
+        data = read_json(path, label, folder)
         _keys(data, _OVERRIDE_KEYS, label, "")
         summary: dict = {"file": label}
         name = _text(data, "name", label, "")
@@ -679,7 +692,7 @@ def apply_overrides(bundled: dict[str, dict], files: list[tuple[Path, Path, str]
                     for item in checklist["items"] if item["id"].lower() == item_id.lower()]
             if not hits:
                 raise ChecklistError(_invalid(label, "disable", f"no item has the id "
-                                              f"'{_clip(item_id, 40)}'."))
+                                              f"'{clip(item_id, 40)}'."))
             for checklist, item in hits:
                 checklist["items"].remove(item)
                 checklist.setdefault("disabled", []).append(
@@ -704,7 +717,7 @@ def _target(entry, checklists: dict[str, dict], label: str, where: str) -> dict:
     target = entry.get("checklist")
     if target not in checklists:
         raise ChecklistError(_invalid(label, f"{where}.checklist",
-                                      f"'{_clip(target, 40)}' is not a checklist.",
+                                      f"'{clip(target, 40)}' is not a checklist.",
                                       valid_checklists=sorted(checklists)))
     return checklists[target]
 
@@ -788,7 +801,7 @@ def parse_decisions(decisions: dict | None, items: list[dict]) -> dict[str, dict
         item_id = by_id.get(str(key).strip().lower())
         if item_id is None:
             raise ChecklistError({"error": "invalid_decision",
-                                  "message": f"decisions names '{_clip(key, 40)}', which is not "
+                                  "message": f"decisions names '{clip(key, 40)}', which is not "
                                              "an item of this run.",
                                   "items": [item["id"] for item in items][:200]})
         match = _DECISION.match(value) if isinstance(value, str) else None
@@ -798,7 +811,7 @@ def parse_decisions(decisions: dict | None, items: list[dict]) -> dict[str, dict
                                              "'yes', 'no' or 'n/a' (then ': note')."})
         word = match[1].lower()
         status = "n/a" if word in ("n/a", "na", "not applicable") else word
-        out[item_id] = {"status": status, "note": _clip(match[2], DECISION_NOTE_CHARS)}
+        out[item_id] = {"status": status, "note": clip(match[2], DECISION_NOTE_CHARS)}
     return out
 
 
@@ -875,7 +888,8 @@ class ToolRunner:
                 if merged is None:
                     if "error" in data:
                         return {"error": str(data["error"]), "pages": pages,
-                                "message": _clip(data.get("message") or data["error"], 300)}
+                                "message": clip(data.get("message") or data["error"], 300),
+                                "payload": data}
                     merged = data
                     first_lists = {k: list(v) for k, v in data.items() if isinstance(v, list)}
                 else:
@@ -905,11 +919,26 @@ class ToolRunner:
                     "message": f"{tool} did not return JSON."}
         except Exception as error:  # a tool failing must not stop the checklist
             return {"error": "tool_failed", "exception": type(error).__name__, "pages": pages,
-                    "message": f"{tool} failed: {type(error).__name__}: {_clip(error, 200)}"}
+                    "message": f"{tool} failed: {type(error).__name__}: {clip(error, 200)}"}
         result = {"data": merged, "pages": pages}
         if merged.get("truncated"):
             result["truncated"] = True
         return result
+
+
+def run_custom_rules(runner: ToolRunner, rule_ids: list[str]) -> dict:
+    """run_custom_checks on the custom items' rules, once. Rule ids no pack defines are
+    left out and run again without them (those items say unknown_rule)."""
+    result = runner.run(CUSTOM_TOOL, {"rules": rule_ids})
+    if result.get("error") != "unknown_rule":
+        return result
+    unknown = {str(name).lower() for name in (result.get("payload") or {}).get("unknown") or []}
+    known = [rule for rule in rule_ids if rule.lower() not in unknown]
+    if not unknown:
+        return result
+    if known:
+        return runner.run(CUSTOM_TOOL, {"rules": known})
+    return {"data": {"rules": []}, "pages": 0}
 
 
 def list_keys(evidence: dict) -> set[str]:
@@ -990,20 +1019,39 @@ def _matches(row, where: dict) -> bool:
 _ABSENCE_OPS = {"exists", "missing", "truthy", "falsy"}
 
 
-def evaluate(cond: dict, data: dict) -> dict:
+def _absent_count(data: dict, path: str, op: str, expected) -> bool:
+    """Whether a missing path is a count of zero: its parent is an object of counts (a
+    tool's summary by check, which lists only the checks that found something; {} on a
+    clean board) and it is compared with a number."""
+    if op not in (*_NUMERIC_OPS, "==", "!=") or isinstance(expected, bool) or             not isinstance(expected, (int, float)):
+        return False
+    head, _, _ = path.rpartition(".")
+    parent = resolve(data, head) if head else data
+    return isinstance(parent, dict) and all(
+        isinstance(value, (int, float)) and not isinstance(value, bool)
+        for value in parent.values())
+
+
+def evaluate(cond: dict, data: dict, absent_counts: bool = False) -> dict:
     """{"hit", "count" or "value", "items" (matching rows), "label", "unresolved" (paths
-    and lists not in data)}."""
+    and lists not in data)}. With absent_counts a path missing from an object of counts
+    is compared as 0 and listed in "zero" (check packs' tool rules)."""
     if "all" in cond or "any" in cond:
-        members = [evaluate(member, data) for member in cond.get("all") or cond.get("any")]
+        members = [evaluate(member, data, absent_counts)
+                   for member in cond.get("all") or cond.get("any")]
         hit = all(m["hit"] for m in members) if "all" in cond else any(m["hit"] for m in members)
         items = [row for m in members if m["hit"] or "all" in cond for row in m["items"]]
         label = cond.get("label") or (" and " if "all" in cond else " or ").join(
             m["label"] for m in members)
         shown = [m for m in members if m["hit"]] or members
-        return {"hit": hit, "items": items, "label": label,
-                "count": sum(m.get("count", 0) for m in shown if "count" in m)
-                if all("count" in m for m in shown) else None,
-                "unresolved": [path for m in members for path in m["unresolved"]]}
+        out = {"hit": hit, "items": items, "label": label,
+               "count": sum(m.get("count", 0) for m in shown if "count" in m)
+               if all("count" in m for m in shown) else None,
+               "unresolved": [path for m in members for path in m["unresolved"]]}
+        zero = [path for m in members for path in m.get("zero", [])]
+        if zero:
+            out["zero"] = zero
+        return out
     if "list" in cond:
         found = resolve(data, cond["list"])
         rows = found if isinstance(found, list) else []
@@ -1016,6 +1064,11 @@ def evaluate(cond: dict, data: dict) -> dict:
                 "unresolved": [] if isinstance(found, list) else [cond["list"]]}
     value = resolve(data, cond["path"])
     label = cond.get("label") or _default_label(cond)
+    if value is _MISSING and absent_counts and _absent_count(data, cond["path"], cond["op"],
+                                                             cond.get("value")):
+        return {"hit": _compare(0, cond["op"], cond.get("value")), "op": cond["op"],
+                "value": 0, "items": [], "label": label, "unresolved": [],
+                "zero": [cond["path"]]}
     return {"hit": _compare(value, cond["op"], cond.get("value")), "op": cond["op"],
             "value": None if value is _MISSING else value, "items": [], "label": label,
             "unresolved": [cond["path"]] if value is _MISSING
@@ -1094,14 +1147,14 @@ def finding_ids(rows: list[dict]) -> dict[str, int]:
     return dict(counts.most_common(FINDING_IDS_LISTED))
 
 
-def _row_text(rows: list[dict]) -> str | None:
+def row_text(rows: list[dict]) -> str | None:
     """The first row's own words (its issue, message or evidence: a sentence, not a
     code)."""
     for row in rows:
         for key in FINDING_TEXT_KEYS:
             value = row.get(key)
             if isinstance(value, str) and " " in value.strip():
-                return _clip(value, ITEM_TEXT_CHARS)
+                return clip(value, ITEM_TEXT_CHARS)
     return None
 
 
@@ -1112,7 +1165,7 @@ def _hit_text(hit: dict, clean: bool = False) -> str | None:
     """One evidence phrase for a condition: 'label: count (ids) - the first finding's
     text' for a list, 'label: value' for a numeric threshold, else the label. clean (the
     Yes summary of conditions that did not hit) keeps counts and numbers only."""
-    quoted = _row_text(hit["items"])
+    quoted = row_text(hit["items"])
     if "value" in hit:
         numeric = hit.get("op") in _NUMERIC_OPS and isinstance(hit["value"], (int, float))
         if clean and not numeric:
@@ -1190,8 +1243,8 @@ def evaluate_item(item: dict, result: dict | None) -> dict:
                     "tool.")
     if hits:
         if decided == "n/a":
-            text = "; ".join(hit["label"] + (f" — {_row_text(hit['items'])}"
-                                             if _row_text(hit["items"]) else "")
+            text = "; ".join(hit["label"] + (f" — {row_text(hit['items'])}"
+                                             if row_text(hit["items"]) else "")
                              for hit in hits[:3])
         else:
             text = "; ".join(_hit_text(r) for r in hits[:3])
@@ -1211,13 +1264,81 @@ def evaluate_item(item: dict, result: dict | None) -> dict:
     if result.get("truncated") and decided == "yes":
         decided = "needs_judgment"
         text += "; the tool's result had more pages than were read: confirm with the tool."
-    row["evidence"] = _clip(text, EVIDENCE_CHARS)
+    row["evidence"] = clip(text, EVIDENCE_CHARS)
     if item["kind"] == "assisted" and decided != "n/a":
         row["status"] = "needs_judgment"
         if decided in ("yes", "no"):
             row["lean"] = decided
     else:
         row["status"] = decided
+    return _finish(row, item)
+
+
+_CUSTOM_STATUS = {"pass": "yes", "fail": "no", "not_applicable": "n/a",
+                  "could_not_evaluate": "needs_judgment"}
+
+
+def evaluate_custom_item(item: dict, result: dict | None) -> dict:
+    """A custom item's row from run_custom_checks' result: its rule's pass is Yes, fail
+    No, not applicable N/A; a rule that could not be evaluated, or left objects not
+    evaluated, needs judgment (could_not_run names why), as does a rule no pack defines
+    or a plugin that was not run."""
+    rule_id = item["rule"]
+    row: dict = {"id": item["id"], "section": item["section"], "text": item["text"],
+                 "kind": "custom", "tool": CUSTOM_TOOL, "args": {"rules": [rule_id]},
+                 "rule": rule_id}
+    if result is None or "error" in result:
+        result = result or {"error": "not_run", "message": "the check packs did not run"}
+        code = result["error"]
+        row.update(status="needs_judgment", could_not_run=result.get("exception") or code,
+                   evidence=clip(f"Could not run: {result.get('message') or code}",
+                                 EVIDENCE_CHARS))
+        return _finish(row, item)
+    data = result["data"]
+    rule = next((r for r in data.get("rules") or [] if isinstance(r, dict)
+                 and str(r.get("id", "")).lower() == rule_id.lower()), None)
+    if rule is None:  # a result too large for even the shortest rows gives statuses only
+        status = next((value for key, value in (data.get("rule_status") or {}).items()
+                       if str(key).lower() == rule_id.lower()), None)
+        if status is not None:
+            rule = {"id": rule_id, "status": status}
+    if rule is None:
+        plugins = data.get("plugins") or {}
+        if rule_id.lower() in {str(p).lower() for p in plugins.get("found") or []}:
+            row.update(status="needs_judgment", could_not_run="plugins_not_run",
+                       evidence=clip(f"Plugin {rule_id} was not run (plugins run only from "
+                                     "run_custom_checks with allow_plugins=true): "
+                                     f"{plugins.get('reason') or ''}", EVIDENCE_CHARS))
+        else:
+            row.update(status="needs_judgment", could_not_run="unknown_rule",
+                       evidence=f"No check pack defines the rule {rule_id}.")
+        return _finish(row, item)
+    status = _CUSTOM_STATUS.get(rule.get("status"), "needs_judgment")
+    name = f"{rule_id} ({rule['pack']})" if rule.get("pack") else rule_id
+    checked, count = rule.get("checked", 0), rule.get("findings", 0)
+    if status == "no":
+        levels = ", ".join(f"{level} x{n}" for level, n in (rule.get("severity_counts")
+                                                           or {}).items())
+        text = f"{name}: {count} finding(s)" + (f" ({levels})" if levels else "")
+        if rule.get("first"):
+            text += f" — {clip(rule['first'], ITEM_TEXT_CHARS)}"
+        if rule.get("anchors"):
+            row["anchors"] = rule["anchors"]
+        row["findings"] = {rule_id: count}
+    elif status == "yes":
+        text = f"{name}: {checked} checked, none failed"
+        if rule.get("not_evaluated"):
+            status = "needs_judgment"
+            text += (f"; {rule['not_evaluated']} could not be evaluated "
+                     f"({', '.join(rule.get('not_evaluated_reasons') or {})})")
+    elif status == "n/a":
+        text = f"{name}: not applicable ({rule.get('reason') or 'nothing selected'})"
+    else:
+        reason = str(rule.get("reason") or "could_not_evaluate")
+        row["could_not_run"] = reason.split(":")[0].split(" (")[0].split(" on ")[0]
+        text = f"{name}: could not be evaluated ({rule.get('reason') or 'unknown'})"
+    row["status"] = status
+    row["evidence"] = clip(text, EVIDENCE_CHARS)
     return _finish(row, item)
 
 
@@ -1258,16 +1379,24 @@ def run_review_checklist(project: dict, netlist: dict | None, checklist: dict, *
     record are rendered from."""
     start = clock()
     chosen = select(checklist, sections, items)
+    custom_ids = sorted({item["rule"] for item in chosen if item["kind"] == "custom"},
+                        key=str.lower)
     if runner is None:
         needs: dict[tuple[str, str], set[str]] = {}
         for item in chosen:
-            if item["kind"] != "judgment":
+            if item["kind"] in ("auto", "assisted"):
                 evidence = item["evidence"]
                 needs.setdefault(ToolRunner.key(evidence["tool"], evidence["args"]),
                                  set()).update(list_keys(evidence))
+        if custom_ids:  # the rule rows come with every page: the first one is enough
+            needs.setdefault(ToolRunner.key(CUSTOM_TOOL, {"rules": custom_ids}), set())
         runner = ToolRunner(tools, clock=clock, needs=needs)
+    custom = run_custom_rules(runner, custom_ids) if custom_ids else None
     rows = []
     for item in chosen:
+        if item["kind"] == "custom":
+            rows.append(evaluate_custom_item(item, custom))
+            continue
         result = None
         if item["kind"] != "judgment":
             evidence = item["evidence"]
@@ -1557,9 +1686,9 @@ def render_record(model: dict, *, generated_utc: str, generator: str | None = No
             if row.get("decided_in_review"):
                 evidence = f"Review: {row['decided_in_review']}. Tool: {evidence}"
             lines.append(
-                f"| {row['id']} | {_md(_clip(row['text'], text_chars))} | {row['kind']} | "
+                f"| {row['id']} | {_md(clip(row['text'], text_chars))} | {row['kind']} | "
                 f"{_status_text(row)} | "
-                f"{_md(_clip(evidence, evidence_chars))} | {row.get('tool', '')} | "
+                f"{_md(clip(evidence, evidence_chars))} | {row.get('tool', '')} | "
                 f"{_md(_anchor_text(row.get('anchors'), anchors_shown))} |")
         lines.append("")
     open_rows = [row for row in model["items"] if row["status"] in ("no", "needs_judgment")]
@@ -1569,9 +1698,9 @@ def render_record(model: dict, *, generated_utc: str, generator: str | None = No
             if not open_detail:
                 lines.append(f"- [ ] {row['id']} ({STATUS_LABELS[row['status']]})")
                 continue
-            hint = f" ({_clip(row['hint'], 160)})" if row.get("hint") else ""
+            hint = f" ({clip(row['hint'], 160)})" if row.get("hint") else ""
             lines.append(f"- [ ] {row['id']} ({STATUS_LABELS[row['status']]}): "
-                         f"{_clip(row['text'], 160)}{hint}")
+                         f"{clip(row['text'], 160)}{hint}")
         lines.append("")
     lines += ["## Sign-off", "",
               "| Role | Name | Decision (approve / approve with actions / reject) | Date | Signature |",

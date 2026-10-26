@@ -287,7 +287,7 @@ class _Context:
     comment: dict[str, str]
 
 
-def _part_text(meta: dict, part) -> str:
+def part_text(meta: dict, part) -> str:
     params = meta.get("params") or {}
     extra = [value for key, value in params.items()
              if isinstance(value, str) and any(word in key.lower() for word in _PARAM_KEYS)]
@@ -342,7 +342,7 @@ def has_magnetics(text: str) -> bool:
     return bool(_TRANSFORMER_TEXT.search(_NO_MAGNETICS.sub(" ", text)))
 
 
-def _categorize(prefix: str, text: str, pins: int, pin_types=()) -> str:
+def categorize(prefix: str, text: str, pins: int, pin_types=()) -> str:
     if is_resistor(prefix, text):
         return "resistor"
     if is_capacitor(prefix, text):
@@ -386,9 +386,9 @@ def build_context(netlist: dict, plan, project_params: dict | None) -> _Context:
             continue
         meta = components.get(ref) or {}
         part = parts.get(ref)
-        texts[ref] = _part_text(meta, part)
+        texts[ref] = part_text(meta, part)
         designators[ref] = [pin for pin in meta.get("pin_designators") or pins if pin]
-        kinds[ref] = _categorize(designator_prefix(ref), texts[ref],
+        kinds[ref] = categorize(designator_prefix(ref), texts[ref],
                                  max(len(designators[ref]), len(pins)),
                                  [design.pin_type(ref, pin) for pin in pins])
         comments[ref] = (part.comment if part else None) or (compiled.get(ref) or {}).get(
@@ -611,6 +611,14 @@ class _Connector:
         """Signal pins that are lines into the board: not LED or centre-tap pins."""
         return [pin for pin in self.signal_pins()
                 if not {"led", "centre_tap"} & set(pin.tags) and pin.walk]
+
+
+def exposed_lines(ctx: _Context, connector: _Connector) -> list[_Pin]:
+    """The connector's lines into the board whose walk reaches a part ESD can damage (an
+    IC, a transistor or another active part; not a transformer, switch or connector): the
+    pins no_esd asks protection for."""
+    return [pin for pin in connector.line_pins() if pin.walk.first()
+            and ctx.kind.get(pin.walk.first()[0]) in _VULNERABLE]
 
 
 def _position_count(text: str) -> int | None:
@@ -1002,8 +1010,7 @@ def _connector_findings(ctx: _Context, connector: _Connector, variant: str) -> l
     ref = connector.ref
     exposure = connector.exposure
     lines = connector.line_pins()
-    reaching = [pin for pin in lines if pin.walk.first()
-                and ctx.kind.get(pin.walk.first()[0]) in _VULNERABLE]
+    reaching = exposed_lines(ctx, connector)
     unprotected = [pin for pin in reaching if not pin.walk.esd]
     if unprotected:
         targets = sorted({pin.walk.first()[0] for pin in unprotected}, key=natural_key)
@@ -1338,8 +1345,7 @@ def _connector_row(ctx: _Context, connector: _Connector) -> dict:
     counts: dict[str, int] = defaultdict(int)
     for pin in connector.pins:
         counts[pin.cls] += 1
-    reaching = [pin for pin in connector.line_pins() if pin.walk.first()
-                and ctx.kind.get(pin.walk.first()[0]) in _VULNERABLE]
+    reaching = exposed_lines(ctx, connector)
     row: dict = {
         "designator": connector.ref,
         "part": (ctx.comment.get(connector.ref) or "")[:80] or None,
@@ -1572,12 +1578,10 @@ def _overview(ctx: _Context, connectors: list[_Connector]) -> dict:
                 entry["power_pins_with_esd"] += "esd" in pin.power
                 entry["power_pins_through_series_part"] += "feeds" in pin.power
         entry["signal_pins"] += len(connector.signal_pins())
-        for pin in connector.line_pins():
-            first = pin.walk.first()
-            if first and ctx.kind.get(first[0]) in _VULNERABLE:
-                entry["reaching_a_part"] += 1
-                entry["with_esd"] += bool(pin.walk.esd)
-                entry["with_series_element"] += bool(pin.walk.series)
+        for pin in exposed_lines(ctx, connector):
+            entry["reaching_a_part"] += 1
+            entry["with_esd"] += bool(pin.walk.esd)
+            entry["with_series_element"] += bool(pin.walk.series)
     return {
         "connectors": len(connectors),
         "by_exposure": {key: dict(value) for key, value in by_exposure.items()},

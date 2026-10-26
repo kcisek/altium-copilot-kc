@@ -6,6 +6,104 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [Unreleased]
 
 ### Added
+- `run_custom_checks`: team-defined deterministic check packs, run offline (roadmap #49,
+  `services/custom_checks.py` on a new read-only design API, `services/design_api.py`).
+  Works on a netlist-free load (tool rules run; the select rules and plugins say
+  netlist_required) and without a PcbDoc (distance and side assertions and side filters
+  are not evaluated, never passed).
+  - Packs: `check_packs.json` or `check_packs/*.json` next to the .PrjPcb or in the Git
+    repository root above it (the repository's first; a pack whose id was loaded replaces
+    it), plus `path=`. A pack has an id (not `plugins`), title, version, optional rails
+    (net voltages its rules assume) and rules with an id unique across packs, a title, a
+    severity (error, warning, info), a message template and `on_unknown`. Every file is
+    validated like a checklist override (keys, kinds, classes, regular expressions,
+    assertions per object, message fields, tools and the arguments they take, conditions,
+    duplicate ids, JSON line and column); a problem is `invalid_check_pack` with the file
+    and the place.
+  - Select-and-assert rules select parts, nets or pins (designator, prefix, kind, fitted in
+    the active variant, BOM, parameters, text fields, PCB side, case size, net, net voltage;
+    net name, class, voltage, parts on it, pin count, one net per line; pin name, number,
+    electrical type, role, part and net; `not` everywhere) and assert has_parameter, has,
+    parameter_matches, matches, count (parts of a kind on the net, its line or within N
+    series parts), connected, nearest (PCB, pad edge to pad edge), rating_ratio (rated
+    over applied voltage, as check_derating reads both), side, case_size or none;
+    `other_end` tests the far side of a part found on a net (a capacitor to ground, a
+    pull-up to a supply). Selection is three-valued: an object that only a rail of
+    unknown voltage or a side without a PcbDoc could select, at any depth of the filter
+    (a pin's or part's net, `has_part`, `not`, an assertion's parts filter), is counted
+    as not evaluated, with the rails named, never as selected or left out.
+  - Tool rules run any checklist evidence tool in-process through review_checklist's runner
+    (cached per tool and arguments, the pages their conditions read) and map its rows with
+    the checklist conditions: `fail` rows become findings with the tool's designators and
+    nets, `pass` must hold, `na` and `na_errors` make the rule not applicable. A count
+    missing from a tool's summary of counts (a clean board lists none) is 0 and named in
+    the row; any other field the tool does not give leaves the rule could_not_evaluate,
+    unless other conditions read findings (they count).
+  - Python plugins (`check_packs/plugins/*.py` in the project folder only; a `check_packs`
+    or `plugins` folder linked to another place gives none) define `check(api)`; they run
+    only with `allow_plugins=true` and `ALTIUM_COPILOT_ALLOW_PLUGINS=1` in the server's
+    environment, compiled from source in a fresh module (no bytecode is written), with
+    standard output captured; an exception, `sys.exit`, a missing `check` or a bad result
+    is reported in the plugin's rule row. They have no time limit, and output written past
+    `sys.stdout` is not captured (README).
+  - Results: ERC-style findings as check_bom's (check is the rule id, pack, severity,
+    designators, nets, pins, location with sheet and PCB side and position in mm, issue),
+    errors first and paginated with the size shrink loop; every rule keeps a row on every
+    page (status pass, fail, not_applicable, could_not_evaluate with the reason, objects
+    checked and not evaluated), shortened to compact and then minimal rows when a page
+    must shrink, so a checklist always reads its rule's status; a verdict (fail, warn,
+    incomplete when a rule could not be evaluated or left objects not evaluated, pass) and
+    counts by pack and severity. The run is reused for the next pages for 5 minutes while
+    the project folder, the pack files and the call's choices are unchanged.
+  - The design API (`DesignAPI`, version 1): frozen parts (kind from check_interfaces'
+    reading, fitted, in BOM, parameters with the variant's variations, value, comment,
+    description, footprint, manufacturer and MPN as get_bom reads them, case size, pins
+    with name, electrical type, role and net, side and position), nets (classes ground,
+    rail, supply, signal, i2c, open_drain, diff_pair (signals only), connector,
+    connector_power, off_board, external, single_pin from check_decoupling,
+    check_pull_resistors and check_interfaces; voltage with source and confidence from
+    check_derating; the line, joined by series resistors under 1 kohm as
+    check_pull_resistors joins a signal; the connectors it leaves the board through),
+    rated voltage and voltage across, walks through series parts, pads, distances and the
+    nearest of many parts (pad bounding boxes skip the parts that cannot be nearer: a
+    board-wide nearest search on the MiniPC takes 7 s instead of 66 s). Helpers made
+    public where they were: `review_checklist.read_json`, `clip`, `row_text` (and
+    `evaluate` takes `absent_counts`); `interfaces.categorize`, `part_text`,
+    `exposed_lines`; `pull_resistors.classify_net`, `merged_signals`, `open_drain_nets`,
+    `pull_supply`.
+  - Review checklists take `custom` items naming a pack rule (`"rule": "TB-HV-01"`), from
+    a team's overrides too: the rule's pass is Yes, fail No (with its findings' anchors),
+    not applicable N/A; a rule that could not be evaluated, left objects not evaluated, is
+    not defined or is a plugin needs judgment (plugins are not run from a checklist). A run
+    is reused only while the pack files are unchanged. `schematic_review` calls
+    `run_custom_checks` when the project has packs.
+  - `examples/check_packs.json`: the roadmap's six examples (a TVS on every off-board
+    signal, decoupling within 5 mm of every IC supply pin, capacitors above 24 V rated 2x,
+    one pull-up per I2C line, no 0201 on the bottom side, manufacturer and MPN on every
+    part) and a tool rule (check_interfaces' no_esd on user-facing connectors as an error).
+    Calibration: on Altium's 11 public AD25 examples every rule ran; TB-HV-01 could not be
+    evaluated on the 4 boards whose rails carry no voltage in their names (VBAT, VDD_DDR,
+    VCCINT ..., named in the reason) and selected nothing on the other 7; the MiniPC gave
+    41 TB-ESD-01 lines on its user-facing connectors (the 41 lines check_interfaces'
+    no_esd flags on them), 48 TB-DEC-01 supply pins farther than 5 mm from a capacitor to
+    ground on their net or with none, 7 TB-I2C-01 lines without exactly one pull-up (the
+    lines check_pull_resistors reports, 9 of 9 on the examples) and 223 bottom-side 0201s;
+    at most 6 s for a first call and 49 k characters on a first page. On 63 private boards
+    (after the load): verdicts 15 fail, 33 warn, 4 incomplete, 11 pass; TB-HV-01 could not
+    be evaluated on 42 boards (410 capacitors on rails of unknown voltage) and selected
+    nothing on 21; findings TB-ESD-01 78 on 15 boards (all 78 are check_interfaces'
+    external no_esd lines, and it has no other), TB-DEC-01 54 on 32, TB-I2C-01 52 on 25
+    (the same lines as check_pull_resistors), TB-ASM-01 2 on 1, TB-BOM-01 400 on 22,
+    TB-TOOL-01 18 errors on 15; no exception, median 0.1 s and at most 0.8 s per board,
+    first pages at most 31 k characters. Tuned on them: off_board and external take only
+    the connector lines that reach an IC, a transistor or another active part (as no_esd;
+    not lines into a transformer or another connector, power, LED or centre-tap pins: a new
+    connector_power class), and a finding names the connectors the line leaves through;
+    I2C lines follow check_pull_resistors (one finding per line, `one_per_line` and
+    `on_line`; a supply a GPIO switches counts behind a series resistor too); a voltage
+    range on a rail of unknown voltage is not evaluated instead of silently out of range;
+    TB-BOM-01 asks heat sinks and screws placed as standard parts for their MPN, as
+    check_bom does.
 - `run_review_checklist`: design-review checklists run against the saved project, offline
   (roadmap #46 phase 1, `services/review_checklist.py`). Works on a netlist-free load (the
   schematic tools' items then say they could not run) and without a PcbDoc (board items
