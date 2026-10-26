@@ -6,6 +6,142 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [Unreleased]
 
 ### Added
+- `check_power_paths` (roadmap #31, phase 1): a power-path estimate per rail on the
+  PcbDoc, read-only and offline (`server/services/power_paths.py`,
+  `server/parsers/power_analyzer.py`); a PcbDoc is required (`no_pcb_document` without
+  one). Every result is labelled an estimate: Power Analyzer by Keysight, the datasheets
+  or a measurement decide.
+  - Currents per rail, each with its source: current= wins ('VIN=3,3V3=0.5' amps per rail;
+    'U5=0.3' per load designator, on its supply rail, the one holding most of its supply
+    pins; 'U5@3V3' picks the rail; a converter's designator is its output current, so the
+    rail it makes carries it and its input rail its input current, as check_thermal's load=
+    does, while 'U3@5V' on its input rail is its input current only; a connector's,
+    battery's or series part's designator is the current it supplies or passes).
+    Otherwise a rail carries the sum of what draws from it: its power-tree loads, its
+    outlet connectors (connector power pins on a rail made on the board: an SFP cage, a
+    PCIe slot's auxiliary rail) and the parts current= or the setup name with a pin on it.
+    A load's current comes from current=, from a Power Analyzer or PDN Analyzer setup
+    (used unasked only when it is the one setup with load currents and names this PcbDoc,
+    or names no board and sits in the project folder; setup= names one; its resistive
+    loads draw V / R, its converters what it lists on their input, '<id>|x|y|U1' part names
+    read as U1), or from a 'Current Consumption' (or Supply Current, Operating Current,
+    Icc, Idd ... with a unit in the value or the name, the largest current the value
+    states) part parameter; a converter on the rail draws its output current (linear
+    regulators, load switches, eFuses) or Vout x Iout / (eta x Vin) (switchers, charge
+    pumps; eta= parsed as check_thermal's, voltages from rails=, names and the power tree
+    as check_derating's); a series part (ferrite, fuse, 0 ohm link, diode, FET) carries
+    the current of the rail it feeds. With some loads unknown the known sum is a lower
+    bound (partial, with how many are known, carried through converters and series parts);
+    what is missing is listed (needs), and current= or setup entries that apply to no rail
+    are listed in notes.
+  - Copper per rail net: tracks and arcs per layer with widths and routed length, vias with
+    their drills, pads, the area of pour, region and fill copper (hatched pours' tracks
+    count as pour) and the internal planes assigned to it. A rail whose pours, regions and
+    fills hold more than half its copper area, or that has a plane, is pour-fed: its
+    resistance and drop are not estimated (pour_fed_not_estimated) and its narrowest track
+    is still listed with the rise if the whole rail current used it; a rail with less pour
+    says its paths' resistance is an upper bound (pour_note).
+  - Narrowest routed width per layer and overall, leaving out stubs into pads (pieces
+    shorter than stub_length, default 1 mm, with an end on a pad; the narrowest stub is
+    listed), with its layer's copper thickness from the stackup (Altium stores one thickness
+    per layer; 1 oz labelled assumed where the stack gives none; copper_oz= '2',
+    'outer=2,inner=1' or per layer name) and its current capacity at 10 and 20 C rise.
+  - IPC-2221 (section 6.2, the curve fit of its charts): dT = (I / (k x A^0.725))^(1/0.44),
+    A in mil^2, k 0.048 external and 0.024 internal; it reproduces the trace-width
+    calculators' 11.8 mil (external) and 30.7 mil (internal) for 1 A at a 10 C rise in 1 oz
+    copper. Its charts end at a 100 C rise: a rise beyond is reported as beyond_chart, not
+    as a figure. The fit assumes a long conductor, so stubs into pads are not judged
+    (hottest_neck lists the worst). IPC-2152 is chart-based and often less conservative
+    (mainly inside): cited, not applied.
+  - Resistance: tracks and arcs (true length) rho x L / (w x t) over their length outside
+    the pads and vias they join (that copper is at its pad's potential, 0 ohm: a track
+    ending in a pad, or touching one and running over it, counts from the pad's far edge),
+    rho 1.72e-8 ohm m at 20 C with 0.00393 /C (temperature=); via barrels rho x h / (pi x
+    ((d/2 + p)^2 - (d/2)^2)), h the barrel between the layers the current enters and leaves
+    from the stackup (a 1.6 mm board, labelled assumed, when the stack has no heights),
+    plating p 25 um (plating=), plated through-hole pads alike. The copper graph is
+    check_lengths' NetGraph: nodes joined by 0 ohm edges merge, and barrels or tracks
+    between the same two nodes combine in parallel.
+  - IR drop, phase 1 (no resistor-network solver): from the rail's source pads (a
+    converter's output pins, or the inductor, diode or FET its output passes through; a
+    connector's or battery's power pins; the series part feeding the rail) to each load's
+    farthest supply pad (each pad reached at its nearest layer), the least-resistance path
+    (Dijkstra) with its resistance (tracks and vias apart), track length, physical vias,
+    layers, narrowest width and layer changes (a via crossed in several barrel pieces is
+    one change). The paths form a tree from the sources: each piece carries the currents
+    of the loads downstream of it and the drop to a load is the sum of R x I along its path
+    (drop_mv); where some of those loads' currents are unknown it is a range, from the
+    known loads' currents to the rail's current through every piece whose loads are unknown
+    (drop_low_mv, drop_high_mv; a piece every load's path uses carries the whole rail
+    current). Loads with no track path (reached through pour or plane copper, or not
+    routed) are listed apart.
+  - Findings, each judged at the current its copper carries, where only an upper bound
+    crosses a threshold at most info: temp_rise_high (above rise_info, default 10 C: info;
+    above rise_warning, default 20 C: warning; one per rail, its hottest track),
+    ir_drop_high (above drop_info, default 2%, or drop_warning, default 5%, of the rail
+    voltage), path_through_few_vias (a set of vias, counting those within one via's
+    resistance of the path's copper on both layers as parallel, carrying more than
+    IPC-2221's external formula on their barrels allows at those rises; with the vias
+    needed and the loads whose current crosses it; one per set of vias),
+    power_analyzer_fail (a Power Analyzer report's failing net: warning; its warning
+    status: info), needs_current, needs_voltage (rails with a drop in mV and no known
+    voltage to judge it against) and pour_fed_not_estimated (info). Rails that cannot be
+    estimated say why: no_source (the power tree finds none), no_source_pads, no_loads,
+    own_supply (a part's own regulator feeding its own pins), no_load_pads, no_routing.
+  - Power Analyzer by Keysight: a <Project>.pdnaK document is reported (read only when it
+    is plain text); the earlier PDN Analyzer's setups (*.pdna XML, *.pidc_config JSON, as
+    Altium's SpiritLevel-SL1 example ships them) are listed with their sources, loads,
+    series parts and VRMs; HTML reports under PowerAnalyzerByKeysight_Output\HTMLReport
+    (Report.html and the per-net pages, as Altium documents them) are parsed generically
+    (tables by their header cells, label/value pairs). A report whose folder
+    ('<Project> [PDNA]_<date>') or pages name this project or PcbDoc replaces the
+    estimate for the rails it covers with its Vdrop, Idensity, Ivia_max and status (the
+    estimate and the counts of its findings kept beside them; a failing net is a finding);
+    another project's report is listed, not applied.
+  - The tool takes rail=, net=, checks=, current=, eta=, rails=, copper_oz=, plating=,
+    temperature=, stub_length=, rise_info=, rise_warning=, drop_info=, drop_warning=,
+    setup= and units= (mm default, or mil); one threshold given past the other's default
+    moves that default. Findings and rails page together and the page shrinks to fit; the
+    prepared result is kept on the PCB index (the last four argument sets). Listed among
+    the netlist tools, the review checklists' evidence tools (so check packs can gate on
+    it), the server instructions and the manifest. thermal.parse_values reads current=.
+  - NetGraph (check_lengths, get_signal_length) now joins copper that touches exactly:
+    its containment tests allow 0.01 mil, so float rounding of stored coordinates no longer
+    leaves tangent end caps, pad edges and touching vias apart (on MiniPC this joins 51
+    more stitching vias on GND; no other example net's length changes). Its pad test is
+    public as pcb_length.pad_contains.
+  - Calibrated on the 11 public Altium example projects (5 with a PcbDoc) and 53 private
+    boards (aggregates only). Of 102 rails on the examples and 450 on the private boards
+    (452 in their power trees, 2 not on the board): estimated 44 / 179, pour- or
+    plane-fed 37 / 110 (36% / 24%), no load 6 / 60, a part's own regulator 11 / 30, no
+    source 3 / 62, no routing 0 / 9, loads without pads 1 / 0; outlet connectors are 5 of
+    the examples' 58 paths and 74 of the private boards' 301. No private board has a
+    current-consumption parameter (none of its 107 current-like parameters is a
+    consumption name: most are fuse, connector and other ratings) or a Power Analyzer
+    file; MiniPC's three ISupply(mA) parameters sit on LDOs, whose input current comes from
+    their outputs; SpiritLevel-SL1's six PDN Analyzer setups are listed and, with
+    setup='ALL_PWR_Nominal', give VCCINT 0.9 A, VCCO 0.88 A (6 of 7 loads, resistive ones
+    as V / R) and 5V 1.80 A (a lower bound through the LDOs). Narrowest routed widths
+    (stubs into pads left out): on the examples mostly 0.2-0.3 mm (65 of 100), on the
+    private boards 139 at 0.2-0.3 mm, 95 at 0.3-0.5, 81 at 0.5-1 and 54 of 1 mm or more (of
+    381), on outer layers 94% and 91% of the time. Path resistances on the private boards:
+    57 below 1 mOhm, 116 at 1-5, 67 at 5-20, 52 at 20-50 and 7 above 50 mOhm. Against an
+    independent model of the copper (raw stack, own joins and clipping, own Dijkstra) the
+    examples' 58 paths agree within 1% for 49 and within 6% (0.31 mOhm) for all. With 1 A
+    on every rail: 9 temperature-rise and 3 drop warnings on 10 private boards (22 and 8
+    infos), 23 boards asking for rail voltages; with 3 A: 64 rise warnings (28 beyond the
+    charts), 9 drop and 62 few-via warnings on 25 boards. Runtime on the private boards: a
+    median of 0.02 s and at most 0.15 s per board once the copper graphs are built; on
+    MiniPC (84 rails) about 0.7 s for the first call and 0.6 s after. The default page
+    (indent 2) has a median of 11,300 characters on the private boards; 5 of 53 shrink to
+    15 rails, as MiniPC does.
+  - Not covered (phase 1): a resistor-network solution (parallel copper off the
+    least-resistance path, pours, regions and planes only lower the true resistance, and a
+    load's other supply pads share its current), current spreading and density in pours,
+    ground return paths and their drop, IPC-2152's charts, AC and transient current,
+    copper roughness and plating thickness variation, the copper's own heating feeding back
+    into its resistance, and the Power Analyzer by Keysight .pdnaK format when it is not
+    plain text (its HTML reports are read instead).
 - `check_pin_table` (roadmap #22): a pin table from a datasheet or a vendor pinout file
   compared with a part's pins, pin by pin, offline.
   - The table (`server/parsers/pin_table.py`): pasted text (tabs, commas, semicolons,

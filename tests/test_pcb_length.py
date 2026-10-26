@@ -434,22 +434,22 @@ def test_rounded_rectangle_pad_contains_keeps_its_corners():
     pad = {"x": 0.0, "y": 0.0, "w": 40.0, "h": 60.0, "rot": 0.0, "shape": 9,
            "corner": 10.0}
     # Inside the sharp corner, 3.4 mil outside the rounded one.
-    assert not pcb_length._pad_contains(pad, 19.5, 29.5, 0.0)
-    assert pcb_length._pad_contains(pad, 19.5, 29.5, 3.5)
-    assert pcb_length._pad_contains(pad, 19.5, 0.0, 0.0)
-    assert pcb_length._pad_contains(pad, 21.0, 0.0, 1.0)
-    assert not pcb_length._pad_contains(pad, 21.0, 0.0, 0.5)
+    assert not pcb_length.pad_contains(pad, 19.5, 29.5, 0.0)
+    assert pcb_length.pad_contains(pad, 19.5, 29.5, 3.5)
+    assert pcb_length.pad_contains(pad, 19.5, 0.0, 0.0)
+    assert pcb_length.pad_contains(pad, 21.0, 0.0, 1.0)
+    assert not pcb_length.pad_contains(pad, 21.0, 0.0, 0.5)
     turned = {**pad, "rot": 90.0}
-    assert pcb_length._pad_contains(turned, 29.5, 0.0, 0.0)
-    assert not pcb_length._pad_contains(turned, 29.5, 19.5, 0.0)
+    assert pcb_length.pad_contains(turned, 29.5, 0.0, 0.0)
+    assert not pcb_length.pad_contains(turned, 29.5, 19.5, 0.0)
     # Without a corner radius it is the rectangle; past half the short side,
     # the oblong.
-    assert pcb_length._pad_contains({**pad, "corner": None}, 19.5, 29.5, 0.0)
+    assert pcb_length.pad_contains({**pad, "corner": None}, 19.5, 29.5, 0.0)
     oblong = {**pad, "shape": 1}
     for x, y in [(19.0, 15.0), (19.0, 21.0), (5.0, 29.0), (0.0, 30.5)]:
-        assert pcb_length._pad_contains(
+        assert pcb_length.pad_contains(
             {**pad, "corner": 35.0}, x, y, 0.5
-        ) == pcb_length._pad_contains(oblong, x, y, 0.5)
+        ) == pcb_length.pad_contains(oblong, x, y, 0.5)
 
 
 def test_track_end_in_a_rounded_pad_corner_does_not_connect(length_data):
@@ -473,11 +473,11 @@ def test_pad_contains_uses_the_copper_on_the_layer():
     pad = {"x": 0.0, "y": 0.0, "w": 20.0, "h": 20.0, "rot": 0.0, "shape": 1,
            "copper": {PAD_INNER_LAYERS: PadCopper(60.0, 60.0, PAD_SHAPE_ROUND),
                       32: PadCopper(30.0, 80.0, PAD_SHAPE_RECT)}}
-    assert not pcb_length._pad_contains(pad, 25.0, 0.0, 0.0)
-    assert not pcb_length._pad_contains(pad, 25.0, 0.0, 0.0, 1)
-    assert pcb_length._pad_contains(pad, 25.0, 0.0, 0.0, 2)
-    assert not pcb_length._pad_contains(pad, 25.0, 0.0, 0.0, 32)
-    assert pcb_length._pad_contains(pad, 0.0, 35.0, 0.0, 32)
+    assert not pcb_length.pad_contains(pad, 25.0, 0.0, 0.0)
+    assert not pcb_length.pad_contains(pad, 25.0, 0.0, 0.0, 1)
+    assert pcb_length.pad_contains(pad, 25.0, 0.0, 0.0, 2)
+    assert not pcb_length.pad_contains(pad, 25.0, 0.0, 0.0, 32)
+    assert pcb_length.pad_contains(pad, 0.0, 35.0, 0.0, 32)
 
 
 def test_through_hole_pad_connects_with_its_copper_on_the_track_layer(length_data):

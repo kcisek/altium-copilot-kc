@@ -180,17 +180,22 @@ _ITEM = re.compile(r"\s*([^=:,]+?)\s*[=:]\s*([+-]?\d+(?:\.\d+)?)\s*([^\d\s,][^,]
 _ONE = re.compile(r"\s*([+-]?\d+(?:\.\d+)?)\s*([^\d\s,][^,]*?)?\s*")
 _UNITS = {
     "load": {"": 1.0, "a": 1.0, "ma": 1e-3},
+    "current": {"": 1.0, "a": 1.0, "ma": 1e-3, "ua": 1e-6, "µa": 1e-6, "μa": 1e-6},
     "power": {"": 1.0, "w": 1.0, "mw": 1e-3},
     "iq": {"": 1.0, "a": 1.0, "ma": 1e-3, "ua": 1e-6, "µa": 1e-6, "μa": 1e-6},
     "theta": {"": 1.0, "c/w": 1.0, "°c/w": 1.0, "k/w": 1.0, "cw": 1.0},
     "tj_max": {"": 1.0, "c": 1.0, "°c": 1.0},
     "eta": {"": 1.0, "%": 0.01},
 }
-_LIMITS = {"load": (0.0, 1000.0), "power": (0.0, 1000.0), "iq": (0.0, 10.0),
-           "theta": (0.0, 1000.0), "tj_max": (40.0, 250.0), "eta": (0.05, 1.0)}
+_LIMITS = {"load": (0.0, 1000.0), "current": (0.0, 1000.0), "power": (0.0, 1000.0),
+           "iq": (0.0, 10.0), "theta": (0.0, 1000.0), "tj_max": (40.0, 250.0),
+           "eta": (0.05, 1.0)}
 _EXAMPLES = {
     "load": "output or part currents in amps per designator or output rail, e.g. "
             "'U5=0.3,3V3=0.5' (or '300mA')",
+    "current": "currents in amps per rail or per load designator (a converter's designator "
+               "gives its output current; 'U5@3V3' picks the rail of a part on several), e.g. "
+               "'VIN=3,3V3=0.5,U5=0.3' (or '300mA')",
     "power": "dissipation in watts per designator, e.g. 'U1=1.2,Q3=0.4' (or '400mW')",
     "iq": "quiescent (ground) currents per regulator designator, e.g. 'U5=0.005' or '5mA'",
     "theta": "thetaJA in C/W per designator, e.g. 'U5=45,Q3=62'",
@@ -221,7 +226,7 @@ def parse_values(text: str | None, arg: str) -> tuple[dict[str, float] | float |
         if arg == "eta" and not key and 1.0 < amount <= 100.0:
             amount /= 100.0  # 'U7=88': a percentage
         amount = float(f"{amount:.12g}")  # '700mA' is 0.7, not 0.7000000000000001
-        if not (low < amount <= high) and not (arg == "load" and amount == 0.0):
+        if not (low < amount <= high) and not (arg in ("load", "current") and amount == 0.0):
             return None
         return amount
 
