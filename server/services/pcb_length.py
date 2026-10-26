@@ -106,6 +106,10 @@ _GRAPH_SQL = (
 )
 _SPLIT_EPS_MIL = 0.01
 _MERGE_MIN_MIL = 0.01
+# Copper exactly touching (tangent end caps, a track end on a pad's edge) joins: the
+# containment tests allow this much so float rounding of the stored coordinates does not
+# decide it.
+_TOUCH_EPS_MIL = 0.01
 _XSIGNAL_FUNCTIONS = frozenset(
     {"inxsignal", "inxsignalclass", "inanyxsignal", "isxsignal"}
 )
@@ -180,7 +184,7 @@ def stack_z(index) -> dict[int, float] | None:
 # ---------- geometry helpers ----------
 
 
-def _pad_contains(
+def pad_contains(
     pad: dict, x: float, y: float, tolerance: float, layer: int | None = None
 ) -> bool:
     """Is (x, y) inside the pad's copper on layer grown by tolerance? Round/
@@ -499,7 +503,7 @@ class NetGraph:
                         distance = math.hypot(
                             end_x[other] - end_x[end], end_y[other] - end_y[end]
                         )
-                        if distance <= max(end_half[end], end_half[other]):
+                        if distance <= max(end_half[end], end_half[other]) + _TOUCH_EPS_MIL:
                             key = (min(node_a, node_b), max(node_a, node_b))
                             if distance < self._cap_links.get(key, math.inf):
                                 self._cap_links[key] = distance
@@ -538,7 +542,7 @@ class NetGraph:
                 if host == own or node in (node_of_end[2 * host], node_of_end[2 * host + 1]):
                     continue
                 hit = _project(segments[host], end_x[end], end_y[end])
-                if hit is not None and hit[3] <= max(segments[host][5], end_half[end]):
+                if hit is not None and hit[3] <= max(segments[host][5], end_half[end]) + _TOUCH_EPS_MIL:
                     splits[host].append((hit[0], node))
 
         def ends_near(x: float, y: float, reach: float):
@@ -571,12 +575,14 @@ class NetGraph:
                 if end_layer[end] not in via["layer_set"]:
                     continue
                 distance = math.hypot(end_x[end] - x, end_y[end] - y)
-                if distance <= radius + end_half[end]:
+                if distance <= radius + end_half[end] + _TOUCH_EPS_MIL:
                     owner = self._owner_node(nodes, x, y, end_layer[end])
                     self._attach(node_of_end[end], owner, distance)
             body_attach(
                 nodes, x, y, via["layers"],
-                lambda px, py, distance, half, layer, radius=radius: distance <= radius + half,
+                lambda px, py, distance, half, layer, radius=radius: (
+                    distance <= radius + half + _TOUCH_EPS_MIL
+                ),
             )
         for pad in pads:
             nodes = self.pad_nodes[pad["pid"]]
@@ -584,7 +590,9 @@ class NetGraph:
             for end in ends_near(x, y, pad["reach"] + max_half):
                 if end_layer[end] not in pad["layer_set"]:
                     continue
-                if _pad_contains(pad, end_x[end], end_y[end], end_half[end], end_layer[end]):
+                if pad_contains(
+                    pad, end_x[end], end_y[end], end_half[end] + _TOUCH_EPS_MIL, end_layer[end]
+                ):
                     owner = self._owner_node(nodes, x, y, end_layer[end])
                     self._attach(
                         node_of_end[end], owner,
@@ -592,8 +600,8 @@ class NetGraph:
                     )
             body_attach(
                 nodes, x, y, pad["layers"],
-                lambda px, py, distance, half, layer, pad=pad: _pad_contains(
-                    pad, px, py, half, layer
+                lambda px, py, distance, half, layer, pad=pad: pad_contains(
+                    pad, px, py, half + _TOUCH_EPS_MIL, layer
                 ),
             )
 
@@ -611,7 +619,7 @@ class NetGraph:
                         common = [
                             layer for layer in via["layers"]
                             if layer in pad["layer_set"]
-                            and _pad_contains(pad, via["x"], via["y"], via["r"], layer)
+                            and pad_contains(pad, via["x"], via["y"], via["r"] + _TOUCH_EPS_MIL, layer)
                         ]
                         if not common:
                             continue
@@ -630,7 +638,7 @@ class NetGraph:
                         other = vias[other_number]
                         distance = math.hypot(other["x"] - via["x"], other["y"] - via["y"])
                         common = [layer for layer in via["layers"] if layer in other["layer_set"]]
-                        if not common or distance > via["r"] + other["r"]:
+                        if not common or distance > via["r"] + other["r"] + _TOUCH_EPS_MIL:
                             continue
                         for layer in common:
                             self._attach(

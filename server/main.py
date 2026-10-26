@@ -75,6 +75,10 @@ try:
         parse_min_distance as parse_hv_min_distance,
         parse_working_voltage as parse_hv_working_voltage, prepare_hv_cached, render_hv,
     )
+    from services.power_paths import (
+        DEFAULTS as POWER_DEFAULTS, parse_copper_oz, parse_currents as parse_power_currents,
+        prepare_power_paths_cached, render_power_paths,
+    )
     from services.via_checks import page_result as page_via_result, review_vias
     from services.testpoints import (
         build_profile as build_testpoint_profile, marked_testpoint_nets,
@@ -213,6 +217,10 @@ except ImportError:
         Options as HvOptions, parse_groups as parse_hv_groups, parse_hv,
         parse_min_distance as parse_hv_min_distance,
         parse_working_voltage as parse_hv_working_voltage, prepare_hv_cached, render_hv,
+    )
+    from server.services.power_paths import (
+        DEFAULTS as POWER_DEFAULTS, parse_copper_oz, parse_currents as parse_power_currents,
+        prepare_power_paths_cached, render_power_paths,
     )
     from server.services.via_checks import page_result as page_via_result, review_vias
     from server.services.testpoints import (
@@ -897,6 +905,18 @@ component locations, distances):
     60664-1 figure; unknown_voltage_pairs lists what to ask about. It is a screening tool
     measuring straight-line clearance (creepage around slots is not computed): say so,
     and that the product's spacing and safety standards decide.
+25. check_power_paths — "is this power trace wide enough?", "how hot does this track
+    get?", "what is the IR drop to U5?", "enough vias for 3 A?", high-current routing, or
+    the power-integrity part of a layout review: per rail its current (with its source),
+    copper (tracks per layer, vias, pour share), narrowest width, IPC-2221 temperature
+    rise, and the least-resistance track and via path from its source to each load with
+    its resistance and drop. Currents come from current= ('3V3=0.5' or 'U5=0.3' amps), a
+    Power Analyzer setup or 'Current Consumption' parameters: ask the user for
+    needs_current's rails (and needs_voltage's voltages), never guess. A drop given as a
+    low-high range, or a finding called an upper bound, needs the loads' own currents.
+    Pour- and plane-fed rails are not estimated (say so); Power Analyzer by Keysight HTML
+    results for this project, when present, replace the estimate: quote them first.
+    IPC-2152 is chart-based and not applied. Present every number as an estimate.
 
 get_board_info lists the stack manager's impedance profiles: target, solved width/gap and
 calculated impedance per layer, reference layers, the rules using each, and issues. Quote
@@ -1017,8 +1037,8 @@ NETLIST_TOOLS = (
     "query_net", "get_component", "search_components", "get_sheet_context", "get_bom",
     "check_bom", "check_decoupling", "check_pull_resistors", "check_interfaces",
     "get_power_tree", "check_derating", "check_logic_levels", "get_circuit_calculations",
-    "check_thermal", "check_hv_clearance", "get_firmware_pin_map", "run_erc",
-    "check_sch_pcb_sync", "schematic_review", "package_for_xfn",
+    "check_thermal", "check_hv_clearance", "check_power_paths", "get_firmware_pin_map",
+    "run_erc", "check_sch_pcb_sync", "schematic_review", "package_for_xfn",
 )
 
 
@@ -4883,6 +4903,203 @@ def check_hv_clearance(
         result = _convert_units({**context, **render_hv(prepared, offset=offset, limit=step)},
                                 to_mm)
         if step != HV_STEPS[0]:
+            result["page_limited_to"] = step
+        rendered = json.dumps(result, indent=2)
+        if len(rendered) <= QUERY_NET_MAX_RESULT_SIZE_CHARS:
+            break
+    return rendered
+
+
+# Rails and findings per page, tried in turn until the result fits.
+POWER_PATH_STEPS = (100, 60, 40, 25, 15, 10, 5, 2, 1)
+
+
+def _in_range(value: float | None, low: float, high: float) -> bool:
+    return value is None or (math.isfinite(value) and low <= value <= high)
+
+
+@mcp.tool(
+    title="Check Power Paths",
+    annotations=ToolAnnotations(readOnlyHint=True),
+    meta={"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS},
+)
+def check_power_paths(
+    rail: str | None = None,
+    net: str | None = None,
+    checks: list[str] | None = None,
+    current: str | None = None,
+    eta: str | None = None,
+    rails: str | None = None,
+    copper_oz: str | None = None,
+    plating: float | None = None,
+    temperature: float | None = None,
+    stub_length: float | None = None,
+    rise_info: float | None = None,
+    rise_warning: float | None = None,
+    drop_info: float | None = None,
+    drop_warning: float | None = None,
+    setup: str | None = None,
+    units: PcbUnits | None = None,
+    offset: int = 0,
+) -> str:
+    """Power path estimate on the PcbDoc, offline: per rail its current, its copper (tracks
+    and arcs per layer with widths and lengths, vias with drills, pads, pour and plane
+    share), the narrowest routed width, IPC-2221 temperature rise of its tracks, and the DC
+    resistance and IR drop from its source to each load. Call it when the user asks whether
+    a power trace is wide enough, how hot a track gets, how much current a trace or via
+    carries, the IR or voltage drop to a part, high-current or power routing, enough vias
+    for a current, or for the power-integrity part of a layout review.
+
+    Currents per rail, each with its source: current= wins ('VIN=3,3V3=0.5' amps per rail;
+    'U5=0.3' per load designator, on its supply rail; 'U5@3V3' picks the rail; a
+    converter's designator is its output current, so its output rail carries it ('U3@5V' on
+    its input rail is its input current); a connector's, battery's or series part's
+    designator is the current it supplies or passes); else the sum of what draws from the
+    rail: the power tree's loads, outlet connectors (power pins on a rail made on the board)
+    and parts current= or the setup name with a pin on it: a load's current from current=,
+    from a Power Analyzer or PDN Analyzer setup in the project (used when there is one for
+    this board, or setup= names it; resistive loads V / R; converters listed there on their
+    input), or from a 'Current Consumption' (or similar) part parameter; a converter draws
+    its output current (linear regulators, switches) or Vout x Iout / (eta x Vin)
+    (switchers, eta= as in check_thermal); a rail fed through a ferrite, fuse, 0 ohm link,
+    diode or FET carries the current of the rail it feeds. Some loads unknown: a partial sum
+    (lower bound). Entries applying to no rail are listed in notes. rails= gives voltages
+    ('VIN=24') as in check_derating.
+
+    Copper: rails whose pours, regions or planes hold most of their copper area are
+    pour-fed: their resistance and drop are not estimated (pour_fed_not_estimated), their
+    narrowest track still listed. Narrowest width per layer and overall leaves out stubs
+    into pads shorter than stub_length (default 1 mm, in units; 0 keeps them); stubs are not
+    judged for their rise either (hottest_neck lists the worst). Copper thickness per layer
+    from the stackup (1 oz assumed where it gives none; copper_oz= '2', 'outer=2,inner=1' or
+    per layer name). IPC-2221: dT = (I / (k x A^0.725))^(1/0.44), A in mil^2, k 0.048
+    external, 0.024 internal, with the capacity at 10 C and 20 C rise; a rise past its
+    charts' 100 C is reported as beyond_chart, not as a figure. IPC-2152 differs
+    (chart-based, often less conservative) and is not applied: say so.
+
+    Resistance: tracks and arcs rho x L / (w x t) over their length outside the pads and vias
+    they end on (pad and via copper 0 ohm), rho = 1.72e-8 ohm m at 20 C x (1 + 0.00393 x
+    (temperature - 20)) (temperature in C, default 20); vias rho x h / (pi x ((d/2 + p)^2 -
+    (d/2)^2)), h from the stackup, plating p in um (default 25), parallel vias between the
+    same copper combined. IR drop: the least-resistance track and via path (Dijkstra) from
+    the source pads (converter output or its inductor, connector power pins, the series part
+    feeding the rail) to each load's farthest supply pad. The paths form a tree: each piece
+    carries the currents of the loads downstream of it and the drop is the sum of R x I
+    along the path (drop_mv); with loads' currents unknown it is a range (drop_low_mv: the
+    known loads; drop_high_mv: the rail's current through the pieces whose loads are
+    unknown; a piece every load's path uses carries the whole rail current). Findings, each
+    judged at the current its pieces carry (an upper bound alone gives at most info):
+    temp_rise_high (rise above rise_info C, default 10: info; above rise_warning, default
+    20: warning), ir_drop_high (above drop_info % of the rail voltage, default 2: info;
+    above drop_warning, default 5: warning), path_through_few_vias (a layer change whose
+    vias, counting parallel ones nearby, carry more than IPC-2221 allows on their barrels at
+    those rises; one per set of vias), power_analyzer_fail (a report's failing net: warning;
+    its warning status: info), needs_current, needs_voltage (a drop in mV on a rail of
+    unknown voltage: ask for rails=) and pour_fed_not_estimated (info; also lists loads with
+    no track path).
+
+    Power Analyzer by Keysight: a <Project>.pdnaK setup is reported (read when plain text),
+    the PDN Analyzer's .pdna / .pidc_config setups are listed (sources, loads, VRMs), and
+    HTML reports under PowerAnalyzerByKeysight_Output\\HTMLReport are parsed: those whose
+    folder (<Project> [PDNA]_<date>) or pages name this project or PcbDoc replace the
+    estimate for the rails they cover with their Vdrop, Idensity, Ivia_max and status
+    (quote them first); others are listed, not applied. Everything else is an estimate: say
+    so, never guess a current (ask for needs_current's rails), and let Power Analyzer, the
+    datasheets or a measurement decide. rail (comma-separated rails) or net (PCB nets)
+    narrow it; checks to names in checks_run. Findings and rails page together (offset from
+    next_offset). Lengths in
+    units, default mm."""
+    try:
+        project, netlist, variant_state = _require_project()
+    except ProjectNotReady as error:
+        return json.dumps(error.payload)
+    no_components = _no_components_error(netlist)
+    if no_components:
+        return json.dumps(no_components)
+    if units not in (None, "mm", "mil"):
+        return json.dumps({"error": "invalid_units", "message": "units must be 'mil' or 'mm'."})
+    resolved = units or "mm"
+    to_mm = resolved == "mm"
+    checks_of = (
+        ("plating", plating, 5.0, 100.0, "plating is the via barrel's plating thickness in "
+                                         "um, 5 to 100 (default 25)."),
+        ("temperature", temperature, -55.0, 200.0, "temperature is the copper temperature "
+                                                   "in C for its resistivity, -55 to 200 "
+                                                   "(default 20)."),
+        ("stub_length", stub_length, 0.0, 2000.0 if resolved == "mil" else 50.0,
+         "stub_length is the length in units below which a track into a pad is left out "
+         "of the narrowest width (0 keeps every track; default 1 mm)."),
+        ("rise_info", rise_info, 1.0, 200.0, "rise_info is a temperature rise in C, 1 to "
+                                             "200 (default 10)."),
+        ("rise_warning", rise_warning, 1.0, 200.0, "rise_warning is a temperature rise in "
+                                                   "C, 1 to 200 (default 20)."),
+        ("drop_info", drop_info, 0.01, 100.0, "drop_info is a drop in % of the rail "
+                                              "voltage, 0.01 to 100 (default 2)."),
+        ("drop_warning", drop_warning, 0.01, 100.0, "drop_warning is a drop in % of the "
+                                                    "rail voltage, 0.01 to 100 (default 5)."),
+    )
+    for name, value, low, high, message in checks_of:
+        if not _in_range(value, low, high):
+            return json.dumps({"error": f"invalid_{name}", "message": message})
+    currents, error = parse_power_currents(current)
+    if error:
+        return json.dumps(error)
+    etas, error = parse_thermal_values(eta, "eta")
+    if error:
+        return json.dumps(error)
+    ounces, error = parse_copper_oz(copper_oz)
+    if error:
+        return json.dumps(error)
+    user_rails, error = parse_rail_map(rails)
+    if error:
+        return json.dumps(error)
+    if not project.get("pcb_doc_paths"):
+        return json.dumps({"error": "no_pcb_document",
+                           "message": "check_power_paths measures copper on the PcbDoc and the "
+                                      "project lists none: add the board to the project."})
+    index, error = _pcb_session.get(project, netlist)
+    if error:
+        return json.dumps(error)
+    plan, _, _ = _bom_plan(netlist, variant_state, None)
+    # One threshold given past the other's default moves that default with it.
+    info = POWER_DEFAULTS["rise_info_c"] if rise_info is None else float(rise_info)
+    warning = POWER_DEFAULTS["rise_warning_c"] if rise_warning is None else float(rise_warning)
+    if warning < info:
+        if rise_warning is None:
+            warning = info
+        elif rise_info is None:
+            info = warning
+    drop_low = POWER_DEFAULTS["drop_info_pct"] if drop_info is None else float(drop_info)
+    drop_high = POWER_DEFAULTS["drop_warning_pct"] if drop_warning is None else \
+        float(drop_warning)
+    if drop_high < drop_low:
+        if drop_warning is None:
+            drop_high = drop_low
+        elif drop_info is None:
+            drop_low = drop_high
+    prepared = prepare_power_paths_cached(
+        netlist, plan, project.get("parameters") or {}, index=index, rails=user_rails,
+        current=currents, eta=etas, copper_oz=ounces,
+        plating_um=25.0 if plating is None else float(plating),
+        temperature_c=20.0 if temperature is None else float(temperature),
+        stub_mil=POWER_DEFAULTS["stub_mil"] if stub_length is None else
+        _input_to_mil(float(stub_length), resolved),
+        rise_info_c=info, rise_warning_c=warning, drop_info_pct=drop_low,
+        drop_warning_pct=drop_high, rail_names=_split_names(rail), nets=_split_names(net),
+        checks=checks, setup=setup, root_dir=project.get("root_dir"),
+        pcb_doc=Path(project["pcb_doc_paths"][0]).name, project_name=project.get("name"),
+        units=resolved)
+    if "error" in prepared:
+        return json.dumps(prepared)
+    paths = project["pcb_doc_paths"]
+    context: dict = {"netlist_updated_utc": _netlist_last_updated,
+                     "pcb_doc": Path(paths[0]).name, "units": resolved}
+    if len(paths) > 1:
+        context["note"] = f"Project lists {len(paths)} PcbDocs; measured on '{Path(paths[0]).name}'."
+    for step in POWER_PATH_STEPS:
+        result = _convert_units({**context, **render_power_paths(prepared, offset=offset,
+                                                                 limit=step)}, to_mm)
+        if step != POWER_PATH_STEPS[0]:
             result["page_limited_to"] = step
         rendered = json.dumps(result, indent=2)
         if len(rendered) <= QUERY_NET_MAX_RESULT_SIZE_CHARS:

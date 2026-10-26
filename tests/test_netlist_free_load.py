@@ -52,6 +52,7 @@ NETLIST_TOOL_CALLS = {
     "get_circuit_calculations": lambda: main.get_circuit_calculations(),
     "check_thermal": lambda: main.check_thermal(),
     "check_hv_clearance": lambda: main.check_hv_clearance(),
+    "check_power_paths": lambda: main.check_power_paths(),
     "get_firmware_pin_map": lambda: main.get_firmware_pin_map(),
     "run_erc": lambda: main.run_erc(),
     "check_sch_pcb_sync": lambda: main.check_sch_pcb_sync(),
