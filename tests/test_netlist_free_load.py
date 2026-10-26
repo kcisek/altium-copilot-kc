@@ -93,6 +93,8 @@ WORKING_TOOL_CALLS = {
     "verify_outputs": lambda: main.verify_outputs(),
     "get_library_part": lambda: main.get_library_part("R1"),
     "check_libraries": lambda: main.check_libraries(),
+    # A library symbol needs no netlist: one installed library holding it.
+    "check_pin_table": lambda: _check_pin_table(),
     "check_release_readiness": lambda: main.check_release_readiness(),
     "release_review": lambda: main.release_review(),
     "run_review_checklist": lambda: main.run_review_checklist("pcb"),
@@ -106,6 +108,18 @@ WORKING_TOOL_CALLS = {
     "compare_variants": lambda: main.compare_variants("Prod"),
     "get_clone_status": lambda: main.get_clone_status(),
 }
+
+
+def _check_pin_table() -> str:
+    """check_pin_table on a made-up symbol of an installed library written beside the
+    project (the environment restores the installed library list afterwards)."""
+    from tests.library_fixture import binary_pin, sch_component, sch_lib_streams, write_ole
+
+    library = Path(main._project["root_dir"]) / "Installed.SchLib"
+    write_ole(library, sch_lib_streams(("PARTX", sch_component(
+        "PARTX", [binary_pin("1", "IN"), binary_pin("2", "OUT")]))))
+    main._installed_library_paths = [str(library)]
+    return main.check_pin_table(lib_reference="PARTX", table="Pin\tName\n1\tIN\n2\tOUT\n")
 
 
 def _write_project(root: Path, prj_text: str = PRJ_TEXT) -> Path:

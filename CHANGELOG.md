@@ -6,6 +6,66 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [Unreleased]
 
 ### Added
+- `check_pin_table` (roadmap #22): a pin table from a datasheet or a vendor pinout file
+  compared with a part's pins, pin by pin, offline.
+  - The table (`server/parsers/pin_table.py`): pasted text (tabs, commas, semicolons,
+    pipes, or the runs of spaces or single spaces a PDF copy gives, whichever reads the
+    most rows; CSV quoting; with single spaces a header's two-word names such as "Pin
+    Number" are joined back and a row's extra words go to the name, the type or a last
+    description column, whichever leaves a pin number and a type word in their columns,
+    other rows listed as unread; header row optional, the columns inferred from the
+    values without one) or a
+    file (`.csv`, `.tsv`, `.txt`, `.xlsx` through `verify_outputs`' workbook reader;
+    `.xls` and PDF are refused with what to do). Columns are found by their header names
+    (pin number or ball, name, alternate functions, type or direction, bank or unit); a
+    cell listing pins ("4, 9, 15", "12-15") gives one row per pin. Vendor formats are
+    recognised by their header row: AMD/Xilinx package pin files (types from the names,
+    since I/O Type is the bank type; the No-Connect column; the Total Number of Pins
+    footer), Intel pin-out files (one section per package, each with its own header, or
+    several package columns; Optional, Configuration, HPS and Tx/Rx channel functions kept
+    as alternates), STM32CubeMX pinout CSVs (Signal and Label as alternates) and datasheet
+    tables with a column per package. Rows that could not be read are listed with their
+    line and reason; rows a package does not have are counted. Footnote marks are dropped
+    from names, except an attached (n) the table uses as a bus index (D(0), D(1)).
+  - Names are normalised (case, separators, `I/O`, `N/C`, leading zeros, `D(3)` as `D3`,
+    Unicode dashes and minus signs, and `nRESET`, `RESETn`, `~RESET`, `!RESET`, `/RESET`,
+    `RESET#`, `RESET_N`, `RESET_B`, Altium's `R\E\S\E\T\` and a Unicode overline as one
+    active-low RESET); a name holding several functions ("PA9/SERX9_TXO", "I/O, VREF 7,
+    L49P_Y", "IO (DIN, D0)", "OE/R\E\S\E\T\") is split into them.
+  - The comparison (`server/services/pin_table.py`): the placed part (every pin's name and
+    electrical type from the netlist, units merged, the nets of connected pins) and its
+    library symbol (resolved as `get_library_part` does; every unit's pins, hidden ones
+    marked), or any symbol by `lib_reference=`; `compare='both'|'placed'|'library'`.
+    Pins pair by number (BGA balls in natural order; a prefix every number of one side
+    carries, such as P1..P208 against 1..208, is dropped or added when that pairs them).
+    Names are classed exact, equivalent (counted, with examples), likely_same (info,
+    grouped by reason: an alternate function, functions added, active-low marking,
+    another ground or NC name, tokens reordered, an index, voltage or qualifier more such
+    as VSS_1 / VSS or VREF 7 / VREF Bank 7, an abbreviation of three letters or more such
+    as RST / RESET; functions paired one to one) or different. Names close enough to be
+    other pins are different: a polarity or channel suffix (CLK_P / CLK_N, OUT_A / OUT_B),
+    a word added (CLK / CLK_EN), a short or one-letter abbreviation (CE / CEO, IN / INT,
+    DQ0 / DQS0, VDD / VDDA), and a resembling name that is another pin's own name on the
+    other side (`why` says which pin). Findings: shifted runs (three or more names offset
+    by a constant), swapped pins (names exchanged exactly first), different names, pins
+    missing in the design (NC pins as info) or extra (shield, mounting and NC pins exempt,
+    not signals such as SH_CP; an exposed pad numbered differently paired; a table of
+    fewer than half the design's pins lists the others once, as `not_in_partial_table`
+    info), duplicated numbers and names (over the pins both sides have), type mismatches
+    (power vs signal, input vs output; milder differences as info), hidden signal and
+    power pins, power pins on no net and NC pins on a net. With several packages the one
+    matching the part best is used unless `package=` names one, with each package's
+    score. A finding both sides have is reported once (`in`, the placed pin's net and the
+    symbol's hidden mark kept), and `placed_vs_library` says how the placed part differs
+    from its symbol. The verdict is match, differences, or poor_match when fewer than half
+    the table's pins match a name of the part (another part or package, or another
+    numbering).
+  - Calibrated on the public examples: tables built from their own symbols match with no
+    name or number finding in five text layouts, and dropped, added, renamed, swapped,
+    shifted and retyped pins are all found, as are swaps of differential pairs, channels,
+    complements and near names; the Spartan-IIE PQ208 pinout of the datasheet
+    and the Arria 10 NF40 pin-out match the examples' FPGA symbols (naming-style
+    differences as likely_same info, the NF40 package picked by its score).
 - Headless CI mode with JUnit output (roadmap #50): a `check` subcommand of the same
   entry point (`python server/main.py check <project>` or `altium-copilot-kc.exe check
   <project>`, dispatched by `main.run_entry` to the new `server/cli.py`; without a
