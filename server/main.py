@@ -132,9 +132,14 @@ try:
         page_verify_outputs, run_verify_outputs,
     )
     from services.libraries import (
-        LibraryCheckInputs, installed_libraries, library_part, page_library_checks,
-        page_library_part, project_files, project_libraries, registry_projects,
-        run_library_checks,
+        ItemLoader, LibraryCheckInputs, LibraryResolver, installed_libraries, library_part,
+        page_library_checks, page_library_part, project_files, project_libraries,
+        registry_projects, run_library_checks,
+    )
+    from parsers.pin_table import PinTableError, parse_pin_file, parse_pin_text
+    from services.pin_table import (
+        check_pins as check_pin_rows, page as page_pin_table, placed_pins, symbol_pins,
+        table_description,
     )
     from services.release_gate import (
         ReleaseInputs, build_release_readiness, build_release_review,
@@ -268,9 +273,14 @@ except ImportError:
         page_verify_outputs, run_verify_outputs,
     )
     from server.services.libraries import (
-        LibraryCheckInputs, installed_libraries, library_part, page_library_checks,
-        page_library_part, project_files, project_libraries, registry_projects,
-        run_library_checks,
+        ItemLoader, LibraryCheckInputs, LibraryResolver, installed_libraries, library_part,
+        page_library_checks, page_library_part, project_files, project_libraries,
+        registry_projects, run_library_checks,
+    )
+    from server.parsers.pin_table import PinTableError, parse_pin_file, parse_pin_text
+    from server.services.pin_table import (
+        check_pins as check_pin_rows, page as page_pin_table, placed_pins, symbol_pins,
+        table_description,
     )
     from server.services.release_gate import (
         ReleaseInputs, build_release_readiness, build_release_review,
@@ -525,6 +535,20 @@ DNP reasons, fabrication requirements. Use it.
   library). A drift finding says the board and the library differ, not which is right:
   ask the user before suggesting Update From PCB Libraries. Workspace (Altium 365) and
   DbLib parts are not readable offline: say so instead of calling them missing.
+
+## Pin Tables
+
+- check_pin_table — "does U5's symbol match the datasheet pinout?", "check this pin table
+  against the FPGA", "are any pins swapped?", when the user pastes or points to a pin table
+  (table= the text as pasted, path= a .csv/.tsv/.txt/.xlsx or a vendor pinout file): the
+  placed part (designator=) and its library symbol, or a symbol (lib_reference=), pin by
+  pin. Quote errors first (swapped, shifted, different_name, missing_in_design), then
+  warnings; likely_same_name is info: say why it differs (reason), not that it is wrong.
+  Check table.columns, package, notes and unread_rows before trusting the result: a wrong
+  column or package reads as many differences (verdict poor_match; package= picks
+  another), and a partial table leaves pins unchecked (not_in_partial_table). The table
+  is what the user gave: never invent one from memory; ask for the datasheet's pin table
+  instead.
 
 ## Fabrication Drawings
 
@@ -7203,6 +7227,238 @@ def check_libraries(
         "findings_omitted": "The result is too large even at 1 finding per page: call again "
                             "with checks= narrowed to one check or part= to a few parts."}
     return json.dumps(_convert_units(brief, to_mm), indent=2)
+
+
+# ---------- check_pin_table (roadmap #22) ----------
+
+PIN_TABLE_STEPS = (200, 100, 50, 20, 10, 5)
+PIN_TABLE_MAX_TEXT = 8 << 20  # characters of a pasted table
+
+
+def _netlist_component(netlist: dict | None, designator: str) -> tuple[str | None, dict | None]:
+    """(netlist designator, component) for a designator (any case; a sheet designator of a
+    board-annotated part when it names one part)."""
+    components = (netlist or {}).get("components") or {}
+    wanted = designator.strip().casefold()
+    name = next((k for k in components if k.casefold() == wanted), None)
+    if name is None:
+        placed = [k for k, comp in components.items()
+                  if (comp.get("logical_refdes") or "").casefold() == wanted]
+        name = placed[0] if len(placed) == 1 else None
+    return name, components.get(name) if name else None
+
+
+def _pin_table_symbol(project: dict, netlist: dict | None, designator: str | None,
+                      component: dict | None, lib_reference: str | None) -> tuple:
+    """(SchLibComponent or None, what was looked up and where it was found or why not)."""
+    libraries = project_libraries(project["prj_pcb_path"], installed=_installed_libraries())
+    resolver = LibraryResolver(libraries)
+    if lib_reference:
+        hit, reason = resolver.find_symbol([lib_reference])
+        looked_up = {"lib_reference": lib_reference}
+    elif component is not None:
+        names = [component.get("design_item_id") or "", component.get("lib_reference") or ""]
+        hit, reason = resolver.find_symbol(
+            names, component.get("library") or "", bool(component.get("workspace_part")),
+            bool(component.get("database_table")))
+        looked_up = {"lib_reference": component.get("lib_reference"),
+                     "library": component.get("library")}
+    else:
+        # A netlist-free load: the PCB's part names its library component.
+        index = None
+        if project.get("pcb_doc_paths"):
+            index, _ = _pcb_session.get(project, netlist)
+        wanted = (designator or "").strip().casefold()
+        board = next((c for c in (index.pcb.components if index is not None else [])
+                      if (c.designator or c.refdes or "").casefold() == wanted), None)
+        if board is None:
+            return None, {"found": False, "reason": "the part is not on the PCB and no netlist "
+                                                    "is loaded"}
+        result = resolver.resolve_pcb([board])[0]
+        hit, reason = result.symbol, result.symbol_reason
+        looked_up = {"lib_reference": board.lib_reference, "library": board.component_library}
+    if hit is None:
+        return None, {**looked_up, "found": False, "reason": reason}
+    loader = ItemLoader()
+    symbol = loader.symbol(hit)
+    if symbol is None:
+        error = loader.errors.get(hit.path)
+        return None, {**looked_up, "found": False,
+                      "reason": f"library unreadable: {error}" if error else "name not found"}
+    found = {**looked_up, "found": True, "name": hit.name, "library_file": Path(hit.path).name,
+             "origin": hit.origin, "parts": symbol.part_count}
+    if not hit.named:
+        found["in_named_library"] = False
+    return symbol, found
+
+
+def _pin_table_target(project, netlist, variant_state, designator, lib_reference, compare):
+    """(sides, target description, notes) or an error dict."""
+    target: dict = {}
+    notes: list[str] = []
+    sides = []
+    component = None
+    if designator:
+        name, component = _netlist_component(netlist, designator)
+        if netlist is not None and component is None:
+            return {"error": "component_not_found",
+                    "message": f"Component '{designator}' not found. Use search_components to "
+                               "find it."}
+        target["designator"] = name or designator
+        if component is not None:
+            target["lib_reference"] = component.get("lib_reference")
+            if compare in ("both", "placed"):
+                sides.append(placed_pins(component))
+            _, changes = shown_variant_values(variant_state, name, component)
+            alternate = (changes or {}).get("alternate_part")
+            if alternate:
+                notes.append(
+                    f"The active variant {changes.get('variant')} fits the alternate part "
+                    f"{alternate.get('lib_reference') or '?'} here: compared is the base "
+                    "design's part (pass lib_reference= to check the alternate's symbol).")
+        elif compare == "placed":
+            return _netlist_required_error()
+        else:
+            notes.append("No netlist is loaded: the placed part's pins were not compared, only "
+                         "its library symbol.")
+    if compare in ("both", "library"):
+        try:
+            symbol, found = _pin_table_symbol(project, netlist, designator, component,
+                                              lib_reference)
+        except Exception as error:  # an unreadable library is reported, not raised
+            logging.warning("check_pin_table symbol lookup failed: %s", error)
+            symbol, found = None, {"found": False, "reason": f"{type(error).__name__}: {error}"}
+        target["library_symbol"] = found
+        if symbol is not None:
+            sides.append(symbol_pins(symbol))
+        elif compare == "library" or not sides:
+            return {"error": "library_symbol_not_found",
+                    "message": "The library symbol could not be read offline ("
+                               f"{found.get('reason')}): Workspace (Altium 365) and database "
+                               "library parts are not readable offline. Pass designator= with "
+                               "compare='placed' to check the placed part's pins.",
+                    "library_symbol": found}
+        else:
+            notes.append(f"The library symbol was not compared ({found.get('reason')}): only "
+                         "the placed part's pins were.")
+    target["compared"] = [side.side for side in sides]
+    return sides, target, notes
+
+
+@mcp.tool(
+    title="Check Pin Table",
+    annotations=ToolAnnotations(readOnlyHint=True),
+    meta={"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS},
+)
+def check_pin_table(
+    designator: str | None = None,
+    lib_reference: str | None = None,
+    table: str | None = None,
+    path: str | None = None,
+    package: str | None = None,
+    compare: Literal["both", "placed", "library"] = "both",
+    offset: int = 0,
+) -> str:
+    """Compare a datasheet or vendor pin table with a part's pins, offline: "does U5's
+    symbol match the datasheet pinout?", "check this pin table against the FPGA", "are
+    any pins swapped or misnamed?", before the board is built or after a library change.
+
+    The part: designator= (the placed part: every pin's name and electrical type, units
+    merged, with the nets of connected pins; and its library symbol, resolved as
+    get_library_part does), or lib_reference= (a library symbol in the project's
+    libraries; with designator= it replaces the placed part's own symbol). compare: both
+    (default), placed or library. The table: table= (text pasted from a datasheet or
+    spreadsheet: tabs, commas, semicolons, pipes or runs of spaces; header row optional)
+    or path= (.csv, .tsv, .txt or .xlsx; relative to the project folder). Vendor pinout
+    files are recognised: AMD/Xilinx package files, Intel pin-out files (a section or
+    column per package), STM32CubeMX pinout CSVs and datasheet tables with a column per
+    package; package= picks one (default: the package that matches the part best, with
+    each package's score).
+
+    Pins are paired by number (BGA balls in natural order; a prefix such as P1..P208 on
+    one side only is dropped or added). Names are compared after normalisation (case,
+    separators, I/O, active-low notations nRESET, RESETn, RESET#, RESET_N, ~RESET,
+    overline, alternate functions): exact, equivalent (summary count), likely_same (info,
+    grouped by reason: an alternate function, an index or qualifier more, an abbreviation)
+    or different; a name that resembles its pin's but is another pin's own name
+    (CLK_P / CLK_N, CE / CEO) is different. Findings (errors first; in: the sides that
+    have them, each finding once): swapped (two pins' names exchanged), shifted (a run of
+    names offset by a constant), different_name (why: when another pin holds the name),
+    missing_in_design, extra_in_design (shield, mounting and NC pins exempt; a table of
+    fewer than half the pins lists the rest once as not_in_partial_table info),
+    duplicate_number, duplicate_name, type_mismatch (power vs signal, input vs output;
+    milder differences as type_differs info), hidden_signal_pin and hidden_power_pins
+    (symbol), power_pin_unconnected and nc_pin_connected (placed), nc_not_in_design,
+    exposed_pad_numbered_differently. table says how the table was read
+    (format, columns, packages, unread_rows with line and reason); placed_vs_library
+    says how the placed part differs from its symbol. Findings page with offset
+    (next_offset). Workspace (Altium 365) and database-library symbols are not readable
+    offline: compare='placed' checks the placed part."""
+    try:
+        project, netlist, variant_state = _require_project(netlist=False)
+    except ProjectNotReady as error:
+        return json.dumps(error.payload)
+    if not (designator or lib_reference):
+        return json.dumps({"error": "nothing_to_check",
+                           "message": "Pass designator= (a placed part) or lib_reference= (a "
+                                      "library symbol)."})
+    if bool(table) == bool(path):
+        return json.dumps({"error": "invalid_arguments",
+                           "message": "Pass the pin table as table= (pasted text) or path= (a "
+                                      "file), one of them."})
+    if compare not in ("both", "placed", "library"):
+        return json.dumps({"error": "invalid_arguments",
+                           "message": "compare must be 'both', 'placed' or 'library'."})
+    if compare == "placed" and not designator:
+        return json.dumps({"error": "invalid_arguments",
+                           "message": "compare='placed' needs designator= (a placed part)."})
+    try:
+        if table:
+            if len(table) > PIN_TABLE_MAX_TEXT:
+                raise PinTableError("table_too_large", "The pasted table is too large: pass "
+                                    "the file as path= instead.")
+            source = parse_pin_text(table)
+        else:
+            file = Path(path)
+            if not file.is_absolute():
+                file = Path(project["root_dir"]) / file
+            source = parse_pin_file(str(file))
+    except PinTableError as error:
+        return json.dumps({"error": error.code, "message": str(error)})
+    target = _pin_table_target(project, netlist, variant_state, designator, lib_reference,
+                               compare)
+    if isinstance(target, dict):
+        return json.dumps(target)
+    sides, described, notes = target
+    try:
+        model = check_pin_rows(source, sides, package)
+    except ValueError as error:
+        return json.dumps({"error": "package_not_found",
+                           "message": f"No package '{package}' in the table; it lists: {error}.",
+                           "packages": source.packages})
+    model["notes"] = notes + model["notes"]
+    table_info = table_description(source, model.pop("_table"))
+    selection = {key: value for key, value in model.pop("table_used").items()
+                 if key in ("how", "pins_matched_by_package", "note")}
+    if selection:
+        table_info["package_selection"] = selection
+    header = {"project": project.get("name"), "target": described, "table": table_info}
+    if not netlist:
+        header["netlist"] = "Not loaded (netlist-free load): placed pins are not read."
+    for limit in PIN_TABLE_STEPS:
+        result = {**header, **page_pin_table(model, offset, limit)}
+        if limit != PIN_TABLE_STEPS[0]:
+            result["findings_limited_to"] = limit
+        rendered = json.dumps(result, indent=2)
+        if len(rendered) <= QUERY_NET_MAX_RESULT_SIZE_CHARS:
+            return rendered
+    table_info.pop("unread_rows", None)
+    brief = {**header, "summary": model["summary"], "notes": model["notes"],
+             "findings_total": len(model["findings"]),
+             "findings_omitted": "The result is too large even at 5 findings per page: the "
+                                 "summary counts each kind; call again with compare='placed' "
+                                 "or 'library', or a smaller table."}
+    return json.dumps(brief, indent=2)
 
 
 # ---------- check_release_readiness ----------
