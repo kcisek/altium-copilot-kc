@@ -96,6 +96,9 @@ WORKING_TOOL_CALLS = {
     "check_release_readiness": lambda: main.check_release_readiness(),
     "release_review": lambda: main.release_review(),
     "run_review_checklist": lambda: main.run_review_checklist("pcb"),
+    # The example pack: its select rules say netlist_required, its tool rule runs.
+    "run_custom_checks": lambda: main.run_custom_checks(
+        path=str(Path(__file__).parents[1] / "examples" / "check_packs.json")),
     # The project folder against itself: no Git clone is needed in folder mode.
     "diff_design": lambda: main.diff_design(project_dir_a=main._project["root_dir"]),
     "list_variants": lambda: main.list_variants(),

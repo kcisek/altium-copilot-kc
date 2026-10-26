@@ -282,19 +282,19 @@ def test_nested_conditions_validate_and_depth_is_limited():
 
 def test_read_json_reports_line_and_column_and_duplicates(tmp_path):
     bad = write(tmp_path / "a.json", '{\n  "name": "x",\n  "disable": [1,\n}')
-    error = invalid(rc._read_json, bad, "a.json")
+    error = invalid(rc.read_json, bad, "a.json")
     assert error["line"] == 4 and "not valid JSON at line 4" in error["message"]
     dup = write(tmp_path / "b.json", '{"name": "x", "name": "y"}')
-    assert "duplicate key 'name'" in invalid(rc._read_json, dup, "b.json")["message"]
+    assert "duplicate key 'name'" in invalid(rc.read_json, dup, "b.json")["message"]
     nan = write(tmp_path / "c.json", '{"name": NaN}')
-    assert "NaN is not allowed" in invalid(rc._read_json, nan, "c.json")["message"]
+    assert "NaN is not allowed" in invalid(rc.read_json, nan, "c.json")["message"]
     array = write(tmp_path / "d.json", "[]")
-    assert "one JSON object" in invalid(rc._read_json, array, "d.json")["message"]
+    assert "one JSON object" in invalid(rc.read_json, array, "d.json")["message"]
     big = write(tmp_path / "e.json", '{"x": "' + "a" * rc.MAX_OVERRIDE_BYTES + '"}')
-    assert "larger than" in invalid(rc._read_json, big, "e.json")["message"]
+    assert "larger than" in invalid(rc.read_json, big, "e.json")["message"]
     latin = tmp_path / "f.json"
     latin.write_bytes(b'{"name": "\xe9"}')
-    assert "not UTF-8" in invalid(rc._read_json, latin, "f.json")["message"]
+    assert "not UTF-8" in invalid(rc.read_json, latin, "f.json")["message"]
 
 
 # ---------- overrides ----------
@@ -1271,7 +1271,7 @@ def test_readme_documents_the_override_format():
     block = re.search(r"### Review checklists.*?```json\n(.*?)```", readme, re.DOTALL)[1]
     override = json.loads(block)
     bundled = {"schematic": rc.load_bundled(BUNDLED)["schematic"]}
-    with patch.object(rc, "_read_json", lambda path, label, folder=None: override):
+    with patch.object(rc, "read_json", lambda path, label, folder=None: override):
         checklists, _ = rc.apply_overrides(bundled, [(Path("x.json"), Path("."), "readme")])
     assert any(i["id"] == "TEAM-01" for i in checklists["schematic"]["items"])
 

@@ -147,6 +147,13 @@ try:
         page_review, parse_decisions, read_previous as read_previous_record, render_record,
         run_review_checklist as build_review_checklist, select as select_checklist_items,
     )
+    from services.custom_checks import (
+        PLUGIN_FOLDER, PLUGIN_HINT, PACK_FILE, PACK_FOLDER, TOOL_RULE_TOOLS, PackError,
+        choose as choose_custom_rules, load_packs as load_check_packs,
+        page as page_custom_checks, pack_signature, plugin_files, plugin_id,
+        plugins_allowed, rule_row, run_rules as run_custom_rules,
+    )
+    from services.design_api import DesignAPI
     from export import export_project, HIGH_FANOUT_THRESHOLD
 except ImportError:
     from server.altium import AltiumClient, is_netlist_fresh, netlist_sources
@@ -276,6 +283,13 @@ except ImportError:
         page_review, parse_decisions, read_previous as read_previous_record, render_record,
         run_review_checklist as build_review_checklist, select as select_checklist_items,
     )
+    from server.services.custom_checks import (
+        PLUGIN_FOLDER, PLUGIN_HINT, PACK_FILE, PACK_FOLDER, TOOL_RULE_TOOLS, PackError,
+        choose as choose_custom_rules, load_packs as load_check_packs,
+        page as page_custom_checks, pack_signature, plugin_files, plugin_id,
+        plugins_allowed, rule_row, run_rules as run_custom_rules,
+    )
+    from server.services.design_api import DesignAPI
     from server.export import export_project, HIGH_FANOUT_THRESHOLD
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s — %(message)s")
@@ -553,6 +567,23 @@ DNP reasons, fabrication requirements. Use it.
   decisions={"ID": "no: reason"} and format='markdown' for the review record (sign-off
   belongs to the design state it names; save it only where the user agrees).
   previous=<a saved record> says what newly fails, what was fixed and what is still open.
+  A team's overrides can add custom items: a check-pack rule decides them.
+
+## Custom Check Packs
+
+- run_custom_checks — "run our team checks", "run the check packs", "does it pass our
+  rules?", in schematic_review when the project has packs, before a release: the team's
+  own deterministic rules (check_packs.json or check_packs/*.json next to the .PrjPcb or
+  in the repository root; path= for another pack file). Select-and-assert rules check
+  parts, nets or pins (MPN present, TVS on off-board lines, decoupling within N mm, rated
+  voltage headroom, one pull-up per I2C line, no small parts on the bottom side ...);
+  tool rules turn an existing tool's findings into a pass/fail gate with the team's
+  severity. Quote verdict and the failing rules first; could_not_evaluate and
+  not_evaluated say what was missing (netlist, PCB, a voltage or rating): say so, never
+  count them as passed. Python plugins (check_packs/plugins) run repository code: pass
+  allow_plugins=true only when the user asks for them, and they run only if the user also
+  started the server with ALTIUM_COPILOT_ALLOW_PLUGINS=1. A pack problem
+  (invalid_check_pack) names the file and the place to fix.
 
 ## Project Tour
 
@@ -7248,8 +7279,11 @@ def _checklists_bundled() -> dict:
 
 def _review_tools() -> dict:
     """The evidence tools, as the MCP tool functions themselves: a checklist item gets
-    exactly what a direct call with its arguments returns."""
-    return {name: globals()[name] for name in REVIEW_EVIDENCE_TOOLS}
+    exactly what a direct call with its arguments returns; run_custom_checks answers the
+    custom items (check-pack rules)."""
+    tools = {name: globals()[name] for name in REVIEW_EVIDENCE_TOOLS}
+    tools["run_custom_checks"] = run_custom_checks
+    return tools
 
 
 def _review_model(project: dict, netlist: dict | None, variant: str | None, checklist: dict,
@@ -7262,7 +7296,8 @@ def _review_model(project: dict, netlist: dict | None, variant: str | None, chec
     folder = folder_signature(project.get("root_dir") or ".")
     key = (project.get("prj_pcb_path"), json.dumps(checklist, sort_keys=True),
            tuple(sections or ()), tuple(items or ()), state.get("id"),
-           state.get("fingerprint"), folder, variant, id(netlist), _netlist_last_updated)
+           state.get("fingerprint"), folder, variant, id(netlist), _netlist_last_updated,
+           pack_signature(project.get("root_dir")))
     now = datetime.now(timezone.utc).timestamp()
     for old in [k for k, (stamp, _) in _review_cache.items()
                 if now - stamp > REVIEW_CACHE_SECONDS]:
@@ -7307,8 +7342,9 @@ def run_review_checklist(
     sourcing, variants), or a team's own; none lists the checklists with their sections
     and item counts. sections= and items= (ids, in any case) narrow it. Each item is auto
     (a deterministic tool decides), assisted (a tool gives evidence: status needs
-    judgment with lean yes or no, the datasheet or the reviewer decides) or judgment (a
-    person). The tools run in-process with the arguments the item names, as a direct call
+    judgment with lean yes or no, the datasheet or the reviewer decides), judgment (a
+    person) or custom (a rule of the team's check packs decides, through
+    run_custom_checks). The tools run in-process with the arguments the item names, as a direct call
     would (active variant, every page an item needs read), once per call; each item row
     gives status (yes, no, n/a, needs_judgment), evidence (counts and the first finding's
     text; for a Yes, what was checked), tool and args, findings (finding ids with
@@ -7330,8 +7366,8 @@ def run_review_checklist(
     reused for 5 minutes while the design files and every file in the project folder are
     unchanged. Team overrides: review_checklists.json or review_checklists/*.json next to
     the .PrjPcb or in the Git repository root above it (replace a checklist, add sections
-    and items, disable items by id; arguments are checked against the tool's
-    parameters); overrides=false ignores them. Items are paginated (offset from
+    and items, custom items naming a check-pack rule among them, disable items by id;
+    arguments are checked against the tool's parameters); overrides=false ignores them. Items are paginated (offset from
     next_offset)."""
     try:
         project, netlist, variant_state = _require_project(netlist=False)
@@ -7405,6 +7441,188 @@ def run_review_checklist(
     return json.dumps(brief, indent=2)
 
 
+# ---------- run_custom_checks (roadmap #49) ----------
+
+# (rule row detail, findings per page), tried in turn until the result fits. Every rule
+# keeps a row (id, pack, status and counts at least) on every page: a checklist's custom
+# item reads its rule's status from it.
+CUSTOM_CHECK_STEPS = (("full", 100), ("full", 40), ("full", 15), ("compact", 15),
+                      ("compact", 5), ("minimal", 5), ("minimal", 1))
+CUSTOM_CACHE_SECONDS = 300
+CUSTOM_CACHE_SIZE = 4
+_custom_cache: dict = {}  # key -> (time, model)
+
+
+def _custom_tools() -> dict:
+    """The tools a pack's tool rule may run, as the MCP tool functions themselves."""
+    return {name: globals()[name] for name in TOOL_RULE_TOOLS}
+
+
+def _custom_model(key: tuple | None, build) -> dict:
+    """The rules' run, reused for CUSTOM_CACHE_SECONDS while the key (project, netlist,
+    variant, every file in the project folder, the pack and plugin files, the call's
+    choices) is the same, so the next pages do not run the rules again. key None (a
+    project folder too large to sign) is not cached."""
+    now = datetime.now(timezone.utc).timestamp()
+    for old in [k for k, (stamp, _) in _custom_cache.items()
+                if now - stamp > CUSTOM_CACHE_SECONDS]:
+        del _custom_cache[old]
+    if key is not None and key in _custom_cache:
+        return _custom_cache[key][1]
+    model = build()
+    if key is not None:
+        while len(_custom_cache) >= CUSTOM_CACHE_SIZE:
+            del _custom_cache[next(iter(_custom_cache))]
+        _custom_cache[key] = (now, model)
+    return model
+
+
+@mcp.tool(
+    title="Run Custom Checks",
+    annotations=ToolAnnotations(readOnlyHint=True),
+    meta={"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS},
+)
+def run_custom_checks(
+    pack: str | None = None,
+    rules: list[str] | None = None,
+    path: str | None = None,
+    allow_plugins: bool = False,
+    offset: int = 0,
+) -> str:
+    """Run the team's own deterministic checks (check packs) on the saved project,
+    offline: "run our team checks", "run the check packs", "does the board pass our
+    rules?", "run rule X", before a review or a release.
+
+    Packs are JSON files the team keeps with the design: check_packs.json or
+    check_packs/*.json next to the .PrjPcb or in the Git repository root above it, plus
+    path= (a pack file, absolute or relative to the project folder). Each has an id,
+    title, version, optional rails (net voltages its rules assume) and rules of two kinds.
+    Select-and-assert rules select parts, nets or pins (designator, prefix, kind such as
+    capacitor, tvs, ic or connector, fitted in the active variant, parameters, text, side,
+    case size, net class such as rail, ground, i2c, diff_pair, off_board or external,
+    voltage, one net per line) and assert on each (has_parameter, has, parameter_matches,
+    matches, count of parts of a kind on the net or its line, connected within N series
+    parts, nearest part of a kind on the PCB in mm pad edge to pad edge, rating_ratio of a
+    capacitor's rated voltage to the voltage across it, side, case_size, none). Tool rules
+    run a read-only tool in-process (run_erc, check_interfaces, check_bom, check_dfm ...)
+    with arguments and test its findings or summary with the review checklists'
+    conditions (fail, pass, na), so any check becomes a pass/fail gate with the team's
+    severity. Python plugins (check_packs/plugins/*.py next to the project) run only with
+    allow_plugins=true AND ALTIUM_COPILOT_ALLOW_PLUGINS=1 in the server's environment:
+    they are repository code run with the server's permissions, so never pass
+    allow_plugins without the user's say-so.
+
+    pack= narrows to pack ids (comma-separated; 'plugins' for the plugin files), rules= to
+    rule ids (a disabled rule runs only when named). Findings are ERC-style, errors first:
+    check (the rule id), pack, severity, designators, nets, pins, location (sheet, PCB
+    side and position in mm) and issue (the rule's message). rules gives each rule's
+    status (pass, fail, not_applicable, could_not_evaluate with the reason: no netlist, no
+    PCB, a rail of unknown voltage, a tool error), how many objects it checked and could
+    not evaluate (no PCB placement, voltage or rating read); every rule keeps a row on
+    every page (shortened, rule_detail, when the page must shrink). verdict is fail (an
+    error finding), warn, incomplete (a rule could not be evaluated or left objects not
+    evaluated) or pass; summary counts findings by pack and severity. A pack problem is
+    invalid_check_pack with the file and the place in it. Findings are paginated (offset
+    from next_offset); the run is reused for the next pages for 5 minutes while the
+    project folder and the pack files are unchanged. The checks are heuristics on names
+    and text like the tools they reuse: confirm a finding before changing the design."""
+    try:
+        project, netlist, variant_state = _require_project(netlist=False)
+    except ProjectNotReady as error:
+        return json.dumps(error.payload)
+    root = project.get("root_dir")
+    tools = _custom_tools()
+    try:
+        packs, pack_info = load_check_packs(root, path, tools)
+    except PackError as error:
+        return json.dumps(error.error)
+    plugins = plugin_files(root) if root else []
+    plugin_ids = [plugin_id(item) for item in plugins]
+    if not packs and not plugins:
+        return json.dumps({
+            "error": "no_check_packs",
+            "message": f"No check pack was found: add {PACK_FILE} or {PACK_FOLDER}/*.json "
+                       "next to the .PrjPcb or in the root of the Git repository above it, "
+                       "or pass path= to a pack file.",
+            "hint": "The README's 'Custom check packs' section and examples/check_packs.json "
+                    "show the format."})
+    try:
+        chosen_packs, chosen, plugins_wanted = choose_custom_rules(packs, pack, rules,
+                                                                   plugin_ids)
+    except PackError as error:
+        return json.dumps(error.error)
+    if not plugins_wanted:
+        plugins = []
+    elif rules:
+        named = {name.strip().lower() for name in rules if isinstance(name, str)}
+        plugins = [item for item in plugins if plugin_id(item).lower() in named]
+    run_plugins, plugin_reason = plugins_allowed(allow_plugins)
+
+    def build() -> dict:
+        api, no_design = None, None
+        if netlist is None:
+            no_design = ("netlist_required: the project was loaded without a netlist, so "
+                         "parts, nets and pins cannot be selected (tool rules still run)")
+        elif _no_components_error(netlist):
+            no_design = "no_components_loaded: the netlist has no component data"
+        else:
+            plan, _, _ = _bom_plan(netlist, variant_state, None)
+            api = DesignAPI(netlist, plan, project.get("parameters") or {},
+                            pcb=lambda: _pcb_session.get(project, netlist))
+        return run_custom_rules(chosen, api=api, tools=tools, packs=chosen_packs,
+                                no_design=no_design, plugins=plugins,
+                                plugin_reason=None if run_plugins else plugin_reason)
+
+    folder = folder_signature(root or ".")
+    variant = variant_state.active.name if variant_state.variants else None
+    key = None if folder is None else (
+        project.get("prj_pcb_path"), id(netlist), _netlist_last_updated, variant, folder,
+        pack_signature(root, path), path, pack, json.dumps(rules), run_plugins)
+    model = _custom_model(key, build)
+    header: dict = {
+        "project": project.get("name"),
+        "variant": variant,
+        "load": "netlist" if netlist is not None else "netlist_free",
+        "units": "mm",
+        "packs": [{"id": item["id"], "title": item["title"], "version": item["version"],
+                   "file": item["file"], "rules": len(item["rules"]),
+                   **({"rails": item["rails"]} if item.get("rails") else {})}
+                  for item in chosen_packs],
+    }
+    if pack_info.get("replaced"):
+        header["replaced"] = pack_info["replaced"]
+    if plugin_ids:
+        header["plugins"] = {"folder": f"{PACK_FOLDER}/{PLUGIN_FOLDER}", "found": plugin_ids,
+                             "run": bool(run_plugins and plugins),
+                             **({"reason": plugin_reason} if not run_plugins else {}),
+                             "note": PLUGIN_HINT}
+    trailer: dict = {"elapsed_ms": model["elapsed_ms"]}
+    if model["tool_runs"]:
+        trailer["tool_runs"] = model["tool_runs"]
+    for detail, limit in CUSTOM_CHECK_STEPS:
+        result = {**header, **page_custom_checks(model, offset, limit, rows=detail),
+                  **trailer}
+        if (detail, limit) != CUSTOM_CHECK_STEPS[0]:
+            result["findings_limited_to"] = limit
+        rendered = json.dumps(result, indent=2)
+        if len(rendered) <= QUERY_NET_MAX_RESULT_SIZE_CHARS:
+            return rendered
+    # Not even one finding fits: the verdict and every rule's status, no findings.
+    brief = {**header, "verdict": model["verdict"],
+             "severity_counts": model["severity_counts"], "summary": model["summary"],
+             "rules": [rule_row(row, "minimal") for row in model["rules"]],
+             "rule_detail": "minimal", "total": len(model["findings"]),
+             "omitted": "The findings do not fit even one per page: call again with pack= "
+                        "or rules= to narrow it."}
+    brief.pop("packs", None)
+    rendered = json.dumps(brief, indent=2)
+    if len(rendered) > QUERY_NET_MAX_RESULT_SIZE_CHARS:
+        brief.pop("rules")
+        brief["rule_status"] = {row["id"]: row["status"] for row in model["rules"]}
+        rendered = json.dumps(brief, indent=2)
+    return rendered
+
+
 SCHEMATIC_REVIEW_PROMPT = """\
 Project: {name}
 Sheets: {sheets}
@@ -7420,7 +7638,9 @@ listing every warning. These are the review's first evidence, not its conclusion
 
 Then call run_review_checklist(checklist="schematic") once and show its coverage table
 and its No items. Auto items are answered by the tools; the needs-judgment items (with
-their evidence and lean) are what Phases 1-2 decide.
+their evidence and lean) are what Phases 1-2 decide. If the project has check packs
+(check_packs.json or a check_packs folder), call run_custom_checks once too and add its
+failing rules to the evidence: they are the team's own rules.
 
 Then ask the user to choose a scope:
   - A specific sheet (e.g. "{first_sheet}")

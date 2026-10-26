@@ -527,7 +527,7 @@ def push_pull_drivers(design: _Design, net: str) -> list[str]:
     return out
 
 
-def _classify_net(design: _Design, net: str) -> _Net | None:
+def classify_net(design: _Design, net: str) -> _Net | None:
     entry = _Net(net)
     members = design.nets[net]
     spi = bool(set(net_tokens(net)) & _SPI)
@@ -585,11 +585,11 @@ def _ic_signal_pins(design: _Design, net: str) -> list[tuple[str, str]]:
             and pin_role(design.pin_name(ref, pin)) not in ("supply", "ground", "cap", "ref")]
 
 
-def _signals(design: _Design) -> list[_Net]:
+def merged_signals(design: _Design) -> list[_Net]:
     """Classified signals: each classified net with the nets linked to it, merged."""
     found = {}
     for net in design.nets:
-        if not design.fixed(net) and (entry := _classify_net(design, net)):
+        if not design.fixed(net) and (entry := classify_net(design, net)):
             found[net] = entry
     signals: list[_Net] = []
     done: set[str] = set()
@@ -712,12 +712,20 @@ def _pulls_of(design: _Design, signal: _Net, open_drain_names: set[str]) -> list
             for ref, other, ohms in design.series.get(net, ()):
                 if ohms is not None and ohms >= SWITCHED_PULL_OHMS and \
                         other not in signal.group and other not in open_drain_names and \
-                        _pull_supply(design, other, open_drain_names):
+                        pull_supply(design, other, open_drain_names):
                     out.append(Pull(ref, net, other, "up", ohms, True, switched=True))
     return out
 
 
-def _pull_supply(design: _Design, net: str, open_drain_names: set[str]) -> bool:
+def open_drain_nets(signals: list[_Net]) -> set[str]:
+    """Every net of the open-drain and I2C signals, the nets linked to them included."""
+    return {net for signal in signals if {"i2c", "open_drain"} & set(signal.classes)
+            for net in signal.group}
+
+
+def pull_supply(design: _Design, net: str, open_drain_names: set[str]) -> bool:
+    """Whether net pulls up two or more open-drain or I2C lines through 1 kohm or more (a
+    supply a GPIO switches, or one not named like a supply)."""
     lines = {other for _, other, ohms in design.series.get(net, ())
              if ohms is not None and ohms >= SWITCHED_PULL_OHMS and other in open_drain_names}
     return len(lines) >= 2
@@ -1077,7 +1085,7 @@ def run_pull_resistor_check(
                 "message": f"No net {unknown} in the compiled netlist; use query_net to "
                            "find the real name."}
     wanted = set(requested or set(CHECKS) - OPT_IN_CHECKS)
-    signals = _signals(design)
+    signals = merged_signals(design)
     if "connector_no_pull" in wanted:
         signals += _connector_signals(design, {net for s in signals for net in s.group})
     variant = getattr(plan, "name", None) or "[No Variations]"
@@ -1086,8 +1094,7 @@ def run_pull_resistor_check(
         notes.append(f"Not found: {', '.join(unknown)}.")
     # Every open-drain and I2C net of the design, before the net filter: a supply switched
     # by a GPIO is recognised by the lines it pulls up together.
-    open_drain_names = {net for signal in signals if {"i2c", "open_drain"} & set(signal.classes)
-                        for net in signal.group}
+    open_drain_names = open_drain_nets(signals)
     if wanted_nets is not None:
         # A gate's driving net (through its series resistor) finds the gate's signal too.
         covered = {net for signal in signals for net in (*signal.group, *signal.extra)}
