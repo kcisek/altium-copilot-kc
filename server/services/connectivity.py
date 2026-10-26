@@ -703,12 +703,14 @@ class Connectivity:
 
     def _plane_connect_style(self, net: str, row) -> str | None:
         """Lower-case style (relief, direct, noconnect) of the Power Plane
-        Connect Style rule for a pad or via."""
+        Connect Style rule for a pad or via: the rule's VIA. or PAD. style when it
+        sets one for the object's kind, else its PLANECONNECTSTYLE."""
         rule = self._object_rule("PlaneConnect", net, row)
         if rule is None:
             return None
         properties = {key.upper(): value for key, value in rule.properties.items()}
-        style = properties.get("PLANECONNECTSTYLE")
+        prefix = "VIA." if row["kind"] == "via" else "PAD."
+        style = properties.get(prefix + "PLANECONNECTSTYLE") or properties.get("PLANECONNECTSTYLE")
         return style.strip().lower().replace(" ", "") if style else None
 
     def _polygon_connect_style(self, net: str, row, pour_id: int, layer: int) -> str | None:
@@ -1544,7 +1546,7 @@ def connectivity(index) -> Connectivity:
 # ---------- the check ----------
 
 
-def _select_nets(index, nets: list[str] | None, net_classes: list[str] | None):
+def select_nets(index, nets: list[str] | None, net_classes: list[str] | None):
     """(net ids, unknown names, unknown classes): nets named (also differential
     pairs, whose two nets count) and members of net classes; every net without
     either."""
@@ -1723,7 +1725,7 @@ def check_connectivity(
             "message": f"Unknown checks: {', '.join(invalid)}.",
             "valid_checks": list(CHECKS),
         }
-    net_ids, unknown, unknown_classes = _select_nets(index, nets, net_classes)
+    net_ids, unknown, unknown_classes = select_nets(index, nets, net_classes)
     if unknown:
         return {
             "error": "net_not_found",

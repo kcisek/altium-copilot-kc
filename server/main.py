@@ -79,6 +79,7 @@ try:
         DEFAULTS as POWER_DEFAULTS, parse_copper_oz, parse_currents as parse_power_currents,
         prepare_power_paths_cached, render_power_paths,
     )
+    from services.return_path import prepare_return_path_cached, render_return_path
     from services.via_checks import page_result as page_via_result, review_vias
     from services.testpoints import (
         build_profile as build_testpoint_profile, marked_testpoint_nets,
@@ -222,6 +223,7 @@ except ImportError:
         DEFAULTS as POWER_DEFAULTS, parse_copper_oz, parse_currents as parse_power_currents,
         prepare_power_paths_cached, render_power_paths,
     )
+    from server.services.return_path import prepare_return_path_cached, render_return_path
     from server.services.via_checks import page_result as page_via_result, review_vias
     from server.services.testpoints import (
         build_profile as build_testpoint_profile, marked_testpoint_nets,
@@ -917,6 +919,17 @@ component locations, distances):
     Pour- and plane-fed rails are not estimated (say so); Power Analyzer by Keysight HTML
     results for this project, when present, replace the estimate: quote them first.
     IPC-2152 is chart-based and not applied. Present every number as an estimate.
+26. check_return_path — "do my fast signals keep a continuous reference plane?", "does
+    anything cross a plane split?", "which layer does this layer reference?", "is there a
+    stitching via where the clock changes layers?", or the return-path part of a
+    high-speed layout review: per signal layer its reference layers (impedance profile,
+    else stack neighbours) and layers with no plane or pour reference; for the selected
+    fast nets (selection.by_reason: confirm them, or name others with net= or net_class=)
+    segments crossing a split, over a void or near the reference copper's edge, plane
+    splits, and layer changes with no stitching via (or, where the reference net changes,
+    no capacitor) within stitch_radius. Places marked likely rest on approximated copper
+    (anti-pads, bridged hatch openings): say so. A geometric screen of the saved copper,
+    not a field solver: ask the user to repour and save first.
 
 get_board_info lists the stack manager's impedance profiles: target, solved width/gap and
 calculated impedance per layer, reference layers, the rules using each, and issues. Quote
@@ -5101,6 +5114,118 @@ def check_power_paths(
                                                                  limit=step)}, to_mm)
         if step != POWER_PATH_STEPS[0]:
             result["page_limited_to"] = step
+        rendered = json.dumps(result, indent=2)
+        if len(rendered) <= QUERY_NET_MAX_RESULT_SIZE_CHARS:
+            break
+    return rendered
+
+
+# (findings, places per finding, selected nets listed) per page, tried in turn until the
+# result fits.
+RETURN_PATH_STEPS = ((100, 10, 50), (60, 5, 30), (40, 3, 20), (25, 2, 10), (15, 1, 5),
+                     (10, 1, 5), (5, 1, 3), (2, 1, 1), (1, 1, 1))
+
+
+@mcp.tool(
+    title="Check Return Path (Reference Planes)",
+    annotations=ToolAnnotations(readOnlyHint=True),
+    meta={"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS},
+)
+def check_return_path(
+    net: str | None = None,
+    net_class: str | None = None,
+    layer: str | None = None,
+    checks: list[str] | None = None,
+    edge_distance: float | None = None,
+    stitch_radius: float | None = None,
+    units: PcbUnits | None = None,
+    offset: int = 0,
+) -> str:
+    """Return-path and reference-plane review of the saved PcbDoc, offline: "do my fast
+    signals have a continuous reference plane?", "does anything cross a plane split?",
+    "which layer does this layer reference?", "are there stitching vias where the clock
+    changes layers?", signal integrity and EMI of high-speed routing, or the return-path
+    part of a layout review.
+
+    layers: per signal layer its reference layers (the impedance profile's, else the
+    nearest copper above and below) with kind (internal plane, large pour: one net's area
+    copper covering 15% of the board, or signal), nets, dielectric height and the edge
+    distance used; no_adjacent_reference flags a routed layer with no plane or large pour
+    reference (warning when it carries selected nets). plane_splits lists internal planes
+    split among nets (split plane polygons, with areas) and pour layers used as references
+    whose copper is split among nets.
+
+    Selected nets (selection, with reasons): net (nets or differential pairs) and net_class
+    (net classes) name them; by default the members of differential pairs, of net classes
+    with a high-speed name, of xSignals and of the scopes of impedance-profile-driven and
+    length rules, and nets named like clocks or high-speed buses (power and ground names,
+    and sideband nets such as enables, resets and I2C, left out). Each of their tracks and
+    arcs, chained where they meet, is walked over the copper of every plane or pour
+    reference of its layer (its own vias' and pads' clearances, and the cut-out under its
+    own pads, left out). Reference copper is a plane's nets, or on a pour layer the nets
+    listed for it and supply or ground nets; any other net's copper is a gap. Findings,
+    grouped per net, layer and reference with their places (occurrences, longest first):
+    segment_crosses_split (the reference net under it changes, e.g. GND to PWR, across a
+    gap of at most 100 mil: warning), segment_over_void (no reference copper under part of
+    it, with the cause: a split line, drawn void, plane edge or pullback, outside the split
+    planes, merged via clearances, no copper, another net's copper; warning, but info for
+    one via's or pad's clearance (hole_clearance: its anti-pad on a plane, the clearance
+    measured in the pour), the cut-out under the net's own pad, or where the stripline's
+    other reference stays continuous), segment_near_plane_edge (reference copper of another
+    net, or none, within edge_distance of the track on either side; default 3x the
+    dielectric height to that reference: info), plane_split (info) and
+    missing_stitching_via: at each layer change of a selected net whose two layers share no
+    reference layer, no via of the reference net through both reference layers within
+    stitch_radius (default 1 mm; info), or, where the reference net changes (GND to a power
+    plane), no capacitor between each pair of reference nets with a pad within it
+    (warning; pairs_without_capacitor); a differential pair's two vias are judged together.
+    layer_changes counts every layer change by outcome. Places resting on approximated
+    copper (anti-pad sizes, default pullback, bridged hatch openings, assumed pour
+    outlines) are marked likely: say so. Quote approximations when the user relies on a
+    result.
+
+    The copper is read as saved: ask the user to repour polygons and save first. It is a
+    geometric screen, not a field solver: Altium's Return Path rule is not decoded.
+    layer narrows the findings to one signal or reference layer; checks to names in
+    checks_run (aliases layers, splits, voids, edges, plane_splits, stitching).
+    edge_distance and stitch_radius use units (default: board display unit). Findings are
+    paginated (offset from next_offset)."""
+    index, error = _pcb_index_or_error()
+    if error:
+        return json.dumps(error)
+    to_mm, resolved, units_error = _pcb_units_or_error(index, units)
+    if units_error:
+        return json.dumps(units_error)
+    limits = {}
+    for name, value in (("edge_distance", edge_distance), ("stitch_radius", stitch_radius)):
+        if value is None:
+            continue
+        if not _finite_nonnegative(value) or value == 0 or \
+                _input_to_mil(value, resolved) > 10000.0:
+            return json.dumps({
+                "error": f"invalid_{name}",
+                "message": f"{name} must be a positive length in {resolved} (at most 10000 "
+                           "mil).",
+            })
+        limits[name] = _input_to_mil(float(value), resolved)
+    prepared = prepare_return_path_cached(
+        index, nets=_split_names(net), net_classes=_split_names(net_class), layer=layer,
+        checks=checks, edge_distance_mil=limits.get("edge_distance"),
+        stitch_radius_mil=limits.get("stitch_radius"), units=resolved)
+    if "error" in prepared:
+        return json.dumps(prepared)
+    project, _, _ = _require_project(netlist=False)
+    paths = project.get("pcb_doc_paths") or []
+    context: dict = {"units": resolved}
+    if paths:
+        context["pcb_doc"] = Path(paths[0]).name
+        if len(paths) > 1:
+            context["note"] = f"Project lists {len(paths)} PcbDocs; checked '{Path(paths[0]).name}'."
+    for limit, occurrences, nets in RETURN_PATH_STEPS:
+        result = _convert_units({**context, **render_return_path(
+            prepared, offset=offset, limit=limit, occurrences=occurrences, nets=nets)}, to_mm)
+        if limit != RETURN_PATH_STEPS[0][0]:
+            result["page_limited_to"] = limit
         rendered = json.dumps(result, indent=2)
         if len(rendered) <= QUERY_NET_MAX_RESULT_SIZE_CHARS:
             break

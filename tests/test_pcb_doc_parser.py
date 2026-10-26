@@ -854,6 +854,18 @@ def test_decode_polygons():
         0.0,
         0.0,
     )
+    assert (pours[0].grid_mil, pours[0].track_width_mil) == (None, None)
+
+
+def test_decode_polygons_reads_the_hatch_grid_and_track_width():
+    (pour,), _ = decode_polygons(
+        [{"LAYER": "TOP", "NET": "1", "HATCHSTYLE": "45Degree", "GRIDSIZE": "0.5mm",
+          "TRACKWIDTH": "8mil", "VX0": "0mil", "VY0": "0mil", "VX1": "80mil",
+          "VY1": "0mil", "VX2": "80mil", "VY2": "50mil"}],
+        layer_name_to_v6={"top": 1},
+    )
+    assert pour.grid_mil == pytest.approx(0.5 / 0.0254)
+    assert pour.track_width_mil == 8.0
 
 
 @pytest.mark.parametrize("raw, name", [

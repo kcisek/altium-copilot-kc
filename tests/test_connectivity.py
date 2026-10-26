@@ -1053,6 +1053,24 @@ def test_plane_no_connect_rule_keeps_a_pad_off_the_plane():
     assert _status(index, "GND") == "unrouted"
 
 
+def test_plane_connect_style_set_per_object_kind():
+    """A rule with only PAD. / VIA. styles: the object's own kind decides."""
+    board = Board(["GND"])
+    board.pad("GND", "U1", "1", 0, 0, layer=MULTI, hole=20.0, size=40.0)
+    board.pad("GND", "U2", "1", 500, 0, layer=MULTI, hole=20.0, size=40.0)
+    board.rule("PlaneConnect", scope="InComponent('U2')",
+               **{"PAD.PLANECONNECTSTYLE": "NoConnect", "VIA.PLANECONNECTSTYLE": "Direct"})
+    index = board.index(plane=True, plane_nets={PLANE: "GND"})
+    assert _status(index, "GND") == "unrouted"
+    board = Board(["GND"])
+    board.pad("GND", "U1", "1", 0, 0, layer=MULTI, hole=20.0, size=40.0)
+    board.pad("GND", "U2", "1", 500, 0, layer=MULTI, hole=20.0, size=40.0)
+    board.rule("PlaneConnect", scope="InComponent('U2')",
+               **{"VIA.PLANECONNECTSTYLE": "NoConnect", "PLANECONNECTSTYLE": "Direct"})
+    index = board.index(plane=True, plane_nets={PLANE: "GND"})
+    assert _status(index, "GND") == "routed"
+
+
 # ---------- antennae ----------
 
 
