@@ -192,6 +192,48 @@ def _create_derived_schema(conn: sqlite3.Connection) -> None:
           extent         TEXT                     -- [min x, min y, max x, max y], JSON
         );
         CREATE INDEX idx_mech_parts_refdes ON mech_parts(refdes);
+        -- The project's ActiveBOM document (get_active_bom) for the active variant: per BOM
+        -- line its ranked solutions, one row per part choice (supplier part); a solution
+        -- without part choices (from a Solution record or the parts' MPN parameter) once.
+        -- Stock, price and lifecycle are the BomDoc's cache as of cache_date.
+        CREATE TABLE bom_solutions (
+          id                  INTEGER PRIMARY KEY,
+          line                INTEGER,             -- the BomDoc line number; NULL: unnumbered
+          design_item_id      TEXT,
+          designators         TEXT NOT NULL DEFAULT '[]',  -- fitted parts, JSON
+          position            INTEGER NOT NULL,    -- 1: the chosen solution
+          rank                INTEGER,             -- ActiveBOM's rank (higher first)
+          manufacturer        TEXT,
+          mpn                 TEXT,
+          source              TEXT NOT NULL,       -- part_choices | solution_record |
+                                                   -- component_parameters
+          solution_lifecycle  TEXT,                -- the worst over its part choices
+          supplier            TEXT,
+          sku                 TEXT,
+          stock               INTEGER,             -- NULL: none cached (or no supplier)
+          unit_price          REAL,                -- at the production need
+          price_break_quantity REAL,               -- the price break that price is from
+          below_minimum_order INTEGER,             -- 1: the need is under the first break
+          extended_price      REAL,                -- unit_price x the need (x the first
+                                                   -- break's quantity when below it)
+          currency            TEXT,
+          lifecycle           TEXT,
+          cache_date          TEXT                 -- when this part choice was cached
+        );
+        CREATE INDEX idx_bom_solutions_line ON bom_solutions(line);
+        -- BOM items added in the BomDoc with no design parts (bare board, screws, glue).
+        CREATE TABLE bom_non_pcb_lines (
+          id              INTEGER PRIMARY KEY,
+          line            INTEGER,
+          design_item_id  TEXT,
+          description     TEXT,
+          comment         TEXT,
+          item_type       TEXT,
+          quantity        REAL,
+          manufacturer    TEXT,
+          mpn             TEXT,
+          note            TEXT
+        );
     """)
 
 
@@ -210,6 +252,15 @@ MECHANICAL_TABLES = {
                    "height_source", "fitted", "extent"),
 }
 _JSON_COLUMNS = {"data", "polygon", "extent"}
+# Columns of the bom_* tables in insert order (designators is JSON).
+BOM_DOC_TABLES = {
+    "bom_solutions": ("line", "design_item_id", "designators", "position", "rank",
+                      "manufacturer", "mpn", "source", "solution_lifecycle", "supplier", "sku",
+                      "stock", "unit_price", "price_break_quantity", "below_minimum_order",
+                      "extended_price", "currency", "lifecycle", "cache_date"),
+    "bom_non_pcb_lines": ("line", "design_item_id", "description", "comment", "item_type",
+                          "quantity", "manufacturer", "mpn", "note"),
+}
 
 
 def export_project(
@@ -221,6 +272,7 @@ def export_project(
     firmware_pins: list[dict] | None = None,
     variant_variations: list[dict] | None = None,
     mechanical: dict[str, list[dict]] | None = None,
+    bom_doc: dict[str, list[dict]] | None = None,
 ) -> str:
     """Write in-memory project to a pcb-copilot .db file next to the .PrjPcb.
 
@@ -228,7 +280,8 @@ def export_project(
     are linked to their sheet by name. firmware_pins are rows for the firmware_pins table
     (services.firmware_pins.export_rows). variant_variations are rows for the
     variant_variations table (services.variants.export_rows). mechanical holds the mech_*
-    tables' rows by table (services.mechanical_fit.export_rows).
+    tables' rows by table (services.mechanical_fit.export_rows). bom_doc holds the
+    bom_solutions and bom_non_pcb_lines rows (services.active_bom.export_rows).
     Returns the absolute path to the written file.
     Raises ValueError if a duplicate refdes is detected during INSERT.
     Always overwrites any existing file at the same path.
@@ -376,6 +429,14 @@ def export_project(
                     if column in _JSON_COLUMNS and not (column == "extent" and value is None):
                         value = json.dumps(value if value is not None else {})
                     values.append(value)
+                conn.execute(
+                    f"INSERT INTO {table} ({', '.join(columns)}) VALUES "
+                    f"({', '.join('?' for _ in columns)})", values)
+
+        for table, columns in BOM_DOC_TABLES.items():
+            for row in (bom_doc or {}).get(table) or []:
+                values = [json.dumps(row.get(column) or []) if column == "designators"
+                          else row.get(column) for column in columns]
                 conn.execute(
                     f"INSERT INTO {table} ({', '.join(columns)}) VALUES "
                     f"({', '.join('?' for _ in columns)})", values)

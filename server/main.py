@@ -68,6 +68,13 @@ try:
         to_csv as bom_csv,
     )
     from services.bom_checks import run_bom_checks
+    from services.active_bom import (
+        SHRINK_STEPS as ACTIVE_BOM_SHRINK_STEPS, bom_doc_findings as active_bom_findings,
+        cache_summary as active_bom_cache, covered_designators as active_bom_covered,
+        export_rows as active_bom_export_rows, find_lines as find_active_bom_lines,
+        line_annotations as active_bom_annotations, open_model as open_active_bom,
+        page as page_active_bom, parse_sections as parse_active_bom_sections,
+    )
     from services.decoupling import DEFAULT_MAX_DISTANCE_MIL, run_decoupling_check
     from services.pull_resistors import run_pull_resistor_check
     from services.interfaces import (
@@ -132,7 +139,8 @@ try:
     from services.erc import build_erc, page_erc
     from services.project_integrity import build_project_integrity, page_project_integrity
     from services.output_jobs import (
-        build_output_jobs, draftsman_outputs, page_output_jobs, variant_outputs,
+        build_output_jobs, draftsman_outputs, output_locations, page_output_jobs,
+        variant_outputs,
     )
     from services.variants import (
         GROUPS as VARIANT_DIFF_GROUPS, compare as compare_variant_views,
@@ -229,6 +237,13 @@ except ImportError:
         to_csv as bom_csv,
     )
     from server.services.bom_checks import run_bom_checks
+    from server.services.active_bom import (
+        SHRINK_STEPS as ACTIVE_BOM_SHRINK_STEPS, bom_doc_findings as active_bom_findings,
+        cache_summary as active_bom_cache, covered_designators as active_bom_covered,
+        export_rows as active_bom_export_rows, find_lines as find_active_bom_lines,
+        line_annotations as active_bom_annotations, open_model as open_active_bom,
+        page as page_active_bom, parse_sections as parse_active_bom_sections,
+    )
     from server.services.decoupling import DEFAULT_MAX_DISTANCE_MIL, run_decoupling_check
     from server.services.pull_resistors import run_pull_resistor_check
     from server.services.interfaces import (
@@ -295,7 +310,8 @@ except ImportError:
         build_project_integrity, page_project_integrity,
     )
     from server.services.output_jobs import (
-        build_output_jobs, draftsman_outputs, page_output_jobs, variant_outputs,
+        build_output_jobs, draftsman_outputs, output_locations, page_output_jobs,
+        variant_outputs,
     )
     from server.services.variants import (
         GROUPS as VARIANT_DIFF_GROUPS, compare as compare_variant_views,
@@ -555,7 +571,8 @@ DNP reasons, fabrication requirements. Use it.
   match the board?", "check my release package or zip", before sending files to a
   fabricator or assembler: the files Altium generated (the OutJob folders, or path= a
   folder or .zip) against the saved design: pick-and-place parts, side, rotation and
-  Center-X/Y; BOM designators, quantities and columns per variant; IPC-D-356A and
+  Center-X/Y; BOM designators, quantities and columns per variant (a BOM generated from
+  ActiveBOM: its part numbers, suppliers and Line # against the BomDoc); IPC-D-356A and
   IPC-2581 nets pin by pin; the IPC-2581 stackup and layer pairs; NC drill tools, hole
   counts and positions per layer pair; files older than the design. A mismatch says the
   file and the saved design differ, not which is right: quote the file and the examples,
@@ -679,8 +696,19 @@ DNP reasons, fabrication requirements. Use it.
   parts, without Not Fitted and no-BOM parts. Its compare_variants=true shows what each
   variant changes in the BOM; format csv gives the lines as CSV.
 - check_bom before a release or when asked whether the BOM is right. mpn_coverage_percent
-  low means the project keeps MPNs elsewhere (e.g. ActiveBOM, not read): say so instead
-  of listing every part as missing one.
+  low means the project keeps MPNs elsewhere: say so instead of listing every part as
+  missing one. With a BomDoc it also checks its part choices (lifecycle_risk,
+  single_source, no_solution, out_of_stock_at_qty, stale_cache, bomdoc_out_of_sync).
+- get_active_bom — "what did we choose to buy?", "which parts are NRND / obsolete?",
+  "approved alternates?", "is there stock for 500 boards?", "screws, bare board, glue?":
+  the project's ActiveBOM document (.BomDoc) read offline: line numbers, design parts per
+  line (variant applied), ranked manufacturer solutions with suppliers, stock, price at
+  the production quantity and lifecycle, favourite suppliers, non-PCB lines and a join
+  report (parts without a line, lines whose parts are gone, MPN differences). The need
+  is per board times the BomDoc's production quantity; production_quantity= asks for
+  another number of boards. Stock, price and lifecycle are a cache: always quote the
+  cache date with them, and never present them as current (live supplier lookups are
+  not made).
 - get_component's mpn falls back to Comment; for part numbers in a BOM use get_bom.
   A line's varies lists values its parts disagree on (varies_count when there are
   more): mention them, the line is not one part.
@@ -1140,7 +1168,7 @@ _design_notes = DesignNotesCache()
 # netlist_required. Every other tool works from the project files alone.
 NETLIST_TOOLS = (
     "query_net", "get_component", "search_components", "get_sheet_context", "get_bom",
-    "check_bom", "check_decoupling", "check_pull_resistors", "check_interfaces",
+    "check_bom", "get_active_bom", "check_decoupling", "check_pull_resistors", "check_interfaces",
     "get_power_tree", "check_derating", "check_logic_levels", "get_circuit_calculations",
     "check_thermal", "check_hv_clearance", "check_power_paths", "get_firmware_pin_map",
     "run_erc", "check_sch_pcb_sync", "check_directive_sync", "get_constraints_brief",
@@ -7742,6 +7770,7 @@ def get_bom(
     compare_variants: bool = False,
     format: Literal["json", "csv"] = "json",
     offset: int = 0,
+    active_bom: bool = False,
 ) -> str:
     """Bill of materials for a variant (default: the active one; '[No Variations]' for
     the base design): lines with quantity, designators, Comment, description, value,
@@ -7757,7 +7786,12 @@ def get_bom(
     include_not_fitted lists the Not Fitted parts as lines; compare_variants adds what
     each variant changes in the BOM (Not Fitted parts, varied values, alternate parts;
     the compare_variants tool lists every difference between two variants); format csv
-    returns the page as CSV text. Lines are paginated (offset from next_offset)."""
+    returns the page as CSV text. Lines are paginated (offset from next_offset).
+
+    active_bom adds, from the project's ActiveBOM document (.BomDoc), each line's BomDoc
+    line numbers (bom_doc_lines) and chosen solutions (bom_doc_chosen: manufacturer, MPN,
+    lifecycle and cache date; CSV columns BomDoc Line # and BomDoc MPN) and a bom_doc
+    header; without it the output is as before. get_active_bom gives the whole BomDoc."""
     try:
         project, netlist, variant_state = _require_project()
     except ProjectNotReady as error:
@@ -7774,6 +7808,23 @@ def get_bom(
     not_fitted = [part for part in parts if not part.fitted]
     lines = group_bom_lines(fitted, group_by)
     header = _bom_header(netlist, plan, parts, excluded)
+    extra_columns = ()
+    if active_bom:
+        model, error = _active_bom_model(project, netlist, plan, parts)
+        if model is not None:
+            try:
+                brief = _active_bom_brief(model)
+                _annotate_bom_lines(lines, model)
+            except Exception as failure:  # the BomDoc must never break the BOM
+                model, error = None, _bom_doc_failure(failure)
+                for line in lines:
+                    for key in ("bom_doc_lines", "bom_doc_chosen", "bom_doc_mpns"):
+                        line.pop(key, None)
+        if model is None:
+            header["bom_doc_error"] = error
+        else:
+            header["bom_doc"] = brief
+            extra_columns = (("BomDoc Line #", "bom_doc_lines"), ("BomDoc MPN", "bom_doc_mpns"))
     offset = max(0, int(offset or 0))
     for limit in (BOM_LINE_LIMIT, 40, 15):
         page = lines[offset : offset + limit]
@@ -7782,9 +7833,10 @@ def get_bom(
         if result["has_more"]:
             result["next_offset"] = offset + limit
         if format == "csv":
-            result["csv"] = bom_csv(page)
+            result["csv"] = bom_csv(page, extra_columns)
         else:
-            result["lines"] = page
+            result["lines"] = [{key: value for key, value in line.items()
+                                if key != "bom_doc_mpns"} for line in page]
         if not_fitted:
             if include_not_fitted:
                 result["not_fitted"] = group_bom_lines(not_fitted, group_by)
@@ -7821,10 +7873,23 @@ def check_bom(
     (only where the project keeps MPNs in parameters), placeholder descriptions, variant
     entries that no longer fit their parts (designator changed, part gone), passives that
     could share one part number, and sheet parts left out of the compiled design.
-    Supply data (lifecycle, stock, price) is not checked.
 
-    checks narrows to some of these (names as in summary). Findings are paginated
-    (offset from next_offset), errors first."""
+    With an ActiveBOM document (.BomDoc) in the project its part choices are checked too
+    (get_active_bom shows them): lifecycle_risk (NRND, EOL, last-time-buy or Obsolete on
+    the chosen solution: warning; on an alternate only: info), single_source (lines with
+    one manufacturer: info), no_solution (no part choice and no MPN parameter),
+    out_of_stock_at_qty (no supplier of the chosen solution had the production need in
+    stock: warning; info when no figure has a cache date), stale_cache (supply data cached
+    over a year ago: info), bomdoc_out_of_sync (parts without a BomDoc line, lines without
+    parts and why, lines saved for another revision of the item: info; the chosen MPN
+    differs from the parts' MPN parameter: warning), and the MPN checks over every ranked
+    MPN; a part whose line has a part choice counts as having an MPN. Stock, price and
+    lifecycle are the BomDoc's cache: quote cache_date with them. A finding about one
+    BomDoc line gives its line number (absent when unnumbered) and design_item_id.
+
+    checks narrows to some of these (names as in summary); BomDoc checks asked for on a
+    project without a BomDoc are listed in checks_not_run. Findings are paginated (offset
+    from next_offset), errors first."""
     try:
         project, netlist, variant_state = _require_project()
     except ProjectNotReady as error:
@@ -7837,9 +7902,21 @@ def check_bom(
         return json.dumps(error)
     parts, excluded = build_bom_parts(netlist, plan, project.get("parameters") or {})
     header = _bom_header(netlist, plan, parts, excluded)
+    model, error = _active_bom_model(project, netlist, plan, parts)
+    bom_findings, chosen = None, None
+    if model is not None:
+        try:
+            brief = _active_bom_brief(model)
+            bom_findings, chosen = active_bom_findings(model), active_bom_covered(model)
+            header["bom_doc"] = brief
+        except Exception as failure:  # the BomDoc must never break the BOM checks
+            bom_findings, chosen, error = None, None, _bom_doc_failure(failure)
+    if bom_findings is None and error and error.get("error") != "no_bom_doc":
+        header["bom_doc_error"] = error
     for limit in (100, 40, 15):
         result = run_bom_checks(parts, netlist, plan, checks=checks, offset=offset,
-                                limit=limit)
+                                limit=limit, bom_doc_findings=bom_findings,
+                                chosen_in_bom_doc=chosen)
         if "error" in result:
             return json.dumps(result)
         result = {**header, **result}
@@ -7849,6 +7926,183 @@ def check_bom(
         if len(rendered) <= QUERY_NET_MAX_RESULT_SIZE_CHARS:
             break
     return rendered
+
+
+def _active_bom_model(project: dict, netlist: dict, plan, parts: list, name: str | None = None,
+                      production_quantity: int | None = None):
+    """(ActiveBom model, error) of the project's BomDoc joined to a variant's BOM parts
+    (services/active_bom.open_model); with several BomDocs the one the OutJobs' BOM
+    outputs name wins. error "no_bom_doc" when the project has none."""
+
+    def outjob_documents() -> list[str]:
+        rows = output_locations(project).get("outputs") or []
+        return [row.get("document") or "" for row in rows]
+
+    try:
+        return open_active_bom(project, parts, netlist, plan, plan.name, name=name,
+                               outjob_documents=outjob_documents,
+                               production_quantity=production_quantity)
+    except Exception as failure:  # the BomDoc must never break the BOM tools
+        return None, _bom_doc_failure(failure)
+
+
+def _bom_doc_failure(failure: Exception) -> dict:
+    """The bom_doc_error of a BomDoc step that raised (logged, not shown in full)."""
+    logging.warning("BomDoc not read: %s", failure)
+    return {"error": "bom_doc_unreadable",
+            "message": f"The BomDoc could not be read ({type(failure).__name__}); the BOM "
+                       "is checked without it."}
+
+
+def _active_bom_brief(model) -> dict:
+    """The BomDoc a BOM tool read: its file and how it was chosen, and the cache dates."""
+    cache = active_bom_cache(model)
+    brief = model.choice.describe() if model.choice is not None else {}
+    brief["cache"] = {key: cache[key] for key in ("oldest", "newest") if key in cache}
+    brief["lines"] = len(model.all_lines)
+    return brief
+
+
+def _annotate_bom_lines(lines: list[dict], model) -> None:
+    """get_bom's active_bom columns: each line's BomDoc line numbers and chosen solutions
+    (by its designators)."""
+    annotations = active_bom_annotations(model)
+    for line in lines:
+        numbers, chosen = [], []
+        for designator in line["designators"]:
+            entry = annotations.get(designator.upper())
+            if entry is None:
+                continue
+            if entry["line"] not in numbers:
+                numbers.append(entry["line"])
+            if entry["chosen"] and entry["chosen"] not in chosen:
+                chosen.append(entry["chosen"])
+        line["bom_doc_lines"] = numbers
+        line["bom_doc_chosen"] = chosen
+        line["bom_doc_mpns"] = " / ".join(entry.get("mpn") or "" for entry in chosen)
+
+
+ActiveBomSection = Literal["header", "lines", "solutions", "non_pcb", "join"]
+ACTIVE_BOM_LINES_OMITTED = (
+    "The page is too large even at one line: lines are left out; call again with "
+    "line=<a line number> for one line's solutions.")
+
+
+@mcp.tool(
+    title="Get Active BOM",
+    annotations=ToolAnnotations(readOnlyHint=True),
+    meta={"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS},
+)
+def get_active_bom(
+    variant: str | None = None,
+    name: str | None = None,
+    line: str | None = None,
+    sections: list[ActiveBomSection] | None = None,
+    offset: int = 0,
+    production_quantity: int | None = None,
+) -> str:
+    """The project's ActiveBOM document (.BomDoc) read offline: the engineer's sourcing
+    decisions joined to the design parts of a variant (default: the active one;
+    '[No Variations]' for the base design). Call it for "what did we choose to buy?",
+    "which parts are NRND, EOL or obsolete?", "do we have approved alternates?", "is
+    there stock for the production run?", "what does this line cost from each
+    supplier?", "which lines are not on the PCB (bare board, screws, glue)?". Not: the BOM
+    lines from the schematic alone (get_bom), the BOM checks (check_bom, which checks these
+    part choices too), a total BOM cost (not computed).
+
+    header: production quantity, currency, target and actual unit price, favourite
+    suppliers (and whether their order is used), solutions per item, risky-solution
+    filtering, custom columns, column aliases and export options (the BomDoc stores no
+    variant). lines (paged, in line-number order): line number (null: not numbered; an
+    exported BOM leaves Line # empty), Design Item ID, library source, description,
+    comment, note, BOM-check status, the design parts it covers (variant applied: Not
+    Fitted parts listed apart), quantity per board and at the production quantity, the
+    chosen (first-ranked) solution with its lifecycle, stock (stock_total: each
+    supplier's largest figure, summed), its suppliers and best price (from offers the need
+    reaches the first break of; best_price_below_minimum_order when only a larger order
+    gets a price), and the cache dates. solutions adds every ranked solution (rank,
+    manufacturer, MPN, lifecycle) with each part choice: supplier, SKU, stock and
+    enough_stock for the production need, unit price at that need (the lowest price of the
+    breaks it reaches, and that break's quantity; below_minimum_order when the need is
+    under the first break, and extended_price then buys that break's quantity), price
+    breaks, lifecycle and cache date (a part choice with no supplier is a manufacturer part
+    only: no_supplier, no stock). non_pcb: BOM items added in the BomDoc, with no design
+    parts. join: how lines map to parts (by Design Item ID; one item split into several
+    lines is told apart by its stored parameter values), parts with no line, lines whose
+    parts are gone and why, other revisions, line numbers given to several lines, and
+    lines whose chosen MPN differs from the parts' MPN parameter. A line without part
+    choices takes its parts' MPN parameter as a component_parameters solution, as an
+    ActiveBOM export does.
+
+    The need is a line's quantity per board times the BomDoc's production quantity;
+    production_quantity= (boards) asks for another run ("stock for 500 boards?"):
+    production_quantity_used and production_quantity_from say which was used.
+
+    Stock, prices and lifecycle are what ActiveBOM cached (cache: oldest and newest
+    date): quote the cache date with any of them and never present them as current.
+    name picks a BomDoc (a project with several, or one in the folder but not in the
+    project); line= one line by number, Design Item ID (an unnumbered line), ref ('#12':
+    a line whose number or ID names another line too has one) or designator, with all its
+    solutions (line_ambiguous lists the refs when a number or ID names several lines);
+    sections narrows the result (header, lines, solutions, non_pcb, join).
+    Lines are paginated (offset from next_offset)."""
+    try:
+        project, netlist, variant_state = _require_project()
+    except ProjectNotReady as error:
+        return json.dumps(error.payload)
+    no_components = _no_components_error(netlist)
+    if no_components:
+        return json.dumps(no_components)
+    wanted, problem = parse_active_bom_sections(sections)
+    if problem:
+        return json.dumps({"error": "invalid_sections", "message": problem})
+    if production_quantity is not None and not (
+            isinstance(production_quantity, int) and 0 < production_quantity <= 10**9):
+        return json.dumps({"error": "invalid_production_quantity",
+                           "message": "production_quantity is a number of boards from 1 up; "
+                                      "leave it out for the BomDoc's."})
+    plan, _, error = _bom_plan(netlist, variant_state, variant)
+    if error:
+        return json.dumps(error)
+    parts, _ = build_bom_parts(netlist, plan, project.get("parameters") or {})
+    model, error = _active_bom_model(project, netlist, plan, parts, name, production_quantity)
+    if model is None:
+        return json.dumps(error)
+    chosen_line = None
+    if line is not None and str(line).strip():
+        found = find_active_bom_lines(model, str(line))
+        if not found:
+            return json.dumps({
+                "error": "line_not_found",
+                "message": f"No BomDoc line '{line}': give a line number, a Design Item ID "
+                           "(an unnumbered line), a line's ref ('#12') or a designator of the "
+                           "line.",
+            })
+        if len(found) > 1:
+            return json.dumps({
+                "error": "line_ambiguous",
+                "message": f"'{line}' names {len(found)} BomDoc lines (the BomDoc gives them "
+                           "one number, or splits one Design Item ID into several lines): "
+                           "pass the ref of the line you want, or one of its designators.",
+                "lines": [{"ref": entry.label, "line": entry.item.line_number,
+                           "design_item_id": entry.item.design_item_id,
+                           "designators": [part.designator for part in entry.fitted][:10]}
+                          for entry in found[:20]],
+            })
+        chosen_line = found[0]
+    result: dict = {}
+    for limit, breaks in ACTIVE_BOM_SHRINK_STEPS:
+        result = page_active_bom(model, wanted, offset, limit, breaks, chosen_line)
+        if (limit, breaks) != ACTIVE_BOM_SHRINK_STEPS[0]:
+            result["lines_limited_to"] = limit
+            result["price_breaks_per_choice"] = breaks
+        rendered = json.dumps(result, indent=2)
+        if len(rendered) <= QUERY_NET_MAX_RESULT_SIZE_CHARS:
+            return rendered
+    brief = {key: value for key, value in result.items()
+             if key not in ("lines", "line", "non_pcb_lines", "join")}
+    brief["lines_omitted"] = ACTIVE_BOM_LINES_OMITTED
+    return json.dumps(brief, indent=2)
 
 
 GUIDE_APPROXIMATE_NOTE = (
@@ -8169,8 +8423,12 @@ def verify_outputs(
     as info), bom (designators equal the variant's BOM parts as get_bom builds them, Not
     Fitted lines, quantity = designator count per line, Comment, Description, Value,
     Footprint, Manufacturer and MPN columns, a column named after a parameter with its
-    special strings resolved; MPN differences are info when the BOM comes from an
-    ActiveBOM document, whose part choices are not read; the variant from the file's
+    special strings resolved; a BOM that comes from an ActiveBOM document is checked
+    against that BomDoc: its MPN against the line's chosen solution (a line without part
+    choices: against the parts' MPN parameter, info), Manufacturer against it and its
+    aliases (info), Supplier and Supplier Part Number against its part choices and Line #
+    against the BomDoc's line number (info when the BomDoc repeats line numbers); the
+    variant from the file's
     title, its OutJob output (info when the file's parts are exactly another variant's),
     its name, else the best fit; .xlsx and .csv are read, .xls is not), netlist
     (IPC-D-356A and IPC-2581 pins against the PcbDoc's pad nets: pins missing, extra or
@@ -9613,6 +9871,25 @@ def _mechanical_rows(project: dict, netlist: dict, variant_state,
         return None, f"{type(error).__name__}: {error}"
 
 
+def _bom_doc_rows(project: dict, netlist: dict, variant_state) -> tuple[dict | None, str | None]:
+    """The bom_solutions and bom_non_pcb_lines tables' rows of the snapshot (the active
+    variant's ActiveBOM), and why not when there is no readable BomDoc (the snapshot is
+    written either way)."""
+    try:
+        plan = plan_variant(getattr(variant_state, "active", None), netlist,
+                            variant_names(netlist))
+        parts, _ = build_bom_parts(netlist, plan, project.get("parameters") or {})
+        model, error = _active_bom_model(project, netlist, plan, parts)
+        if model is None:
+            # Only a BomDoc that is there but unreadable is worth a warning.
+            unreadable = (error or {}).get("error") == "bom_doc_unreadable"
+            return None, (error or {}).get("message") if unreadable else None
+        return active_bom_export_rows(model), None
+    except Exception as error:  # the BomDoc must never block the snapshot
+        logging.warning("BomDoc tables not built for the snapshot: %s", error)
+        return None, f"{type(error).__name__}: {error}"
+
+
 def _package_for_xfn_impl(
     project: dict,
     netlist: dict,
@@ -9637,9 +9914,12 @@ def _package_for_xfn_impl(
     if pcb_index is not None:
         mechanical, mechanical_error = _mechanical_rows(project, netlist, variant_state,
                                                         pcb_index)
+    bom_doc, bom_doc_error = (None, None)
+    if project.get("prj_pcb_path") and netlist.get("components"):
+        bom_doc, bom_doc_error = _bom_doc_rows(project, netlist, variant_state)
     try:
         db_path = export_project(project, netlist, variant_state, version, notes, firmware,
-                                 variations, mechanical)
+                                 variations, mechanical, bom_doc)
     except Exception as e:
         return json.dumps({"error": "export_failed", "message": str(e)})
     prj_pcb_name = Path(project["prj_pcb_path"]).name
@@ -9674,6 +9954,16 @@ def _package_for_xfn_impl(
         incomplete_warning += (
             f"\nWarning: the mechanical tables could not be built ({mechanical_error}); the "
             "mech_* tables are empty.")
+    if bom_doc:
+        incomplete_warning += (
+            f"\nActiveBOM: {len(bom_doc['bom_solutions'])} solution and supplier rows in "
+            f"bom_solutions and {len(bom_doc['bom_non_pcb_lines'])} non-PCB lines in "
+            "bom_non_pcb_lines (stock, price and lifecycle as cached in the BomDoc, with "
+            "their cache dates).")
+    elif bom_doc_error:
+        incomplete_warning += (
+            f"\nWarning: the project's BomDoc could not be read ({bom_doc_error}); the bom_* "
+            "tables are empty.")
     if _offline(netlist):
         incomplete_warning += (
             "\nNote: the nets in this snapshot were compiled offline by the copilot from the "
@@ -9719,7 +10009,10 @@ def package_for_xfn() -> str:
     rigid-flex board regions), mech_mounting_holes (drill, plated, net, screw, free
     radius, fitted), mech_connectors (position, rotation, side, edge, offset, overhang, facing),
     mech_regions (keepouts, rooms, free 3D bodies) and mech_parts (each part's height and
-    source, standoff and extent; Not Fitted parts with fitted 0)."""
+    source, standoff and extent; Not Fitted parts with fitted 0) and, with an ActiveBOM
+    document, bom_solutions (per line its ranked solutions and their part choices:
+    manufacturer, MPN, supplier, SKU, stock, unit price, lifecycle and cache date, for
+    the active variant) and bom_non_pcb_lines (BOM items with no design parts)."""
     try:
         project, netlist, variant_state = _require_project()
     except ProjectNotReady as e:

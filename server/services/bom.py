@@ -533,19 +533,22 @@ def _cell(value) -> str:
     return "'" + text if text.startswith(_FORMULA_START) else text
 
 
-def to_csv(lines: list[dict]) -> str:
+def to_csv(lines: list[dict], extra_columns: tuple = ()) -> str:
     """The lines as CSV. A field the members disagree on lists its values with ' / '
     ('(none)' for members without one, '...' when more were left out); a cell that
-    would start a spreadsheet formula ('=', '+', '-', '@') gets a leading apostrophe."""
+    would start a spreadsheet formula ('=', '+', '-', '@') gets a leading apostrophe.
+    extra_columns ((title, line key), ...) follow the usual ones; a list value is joined
+    with ', '."""
+    columns = [*CSV_COLUMNS, *extra_columns]
     out = io.StringIO()
     writer = csv.writer(out, lineterminator="\n")
-    writer.writerow([title for title, _ in CSV_COLUMNS])
+    writer.writerow([title for title, _ in columns])
     for line in lines:
         varies = line.get("varies") or {}
         row = []
-        for _, key in CSV_COLUMNS:
-            if key == "designators":
-                value = ", ".join(line[key])
+        for _, key in columns:
+            if key == "designators" or isinstance(line.get(key), list):
+                value = ", ".join(str(item) if item is not None else "" for item in line[key])
             elif key in varies:
                 shown = [value or "(none)" for value in varies[key]]
                 if key in (line.get("varies_count") or {}):

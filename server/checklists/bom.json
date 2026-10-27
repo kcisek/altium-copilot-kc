@@ -17,10 +17,10 @@
       "text": "Every fitted BOM line names a manufacturer and a manufacturer part number.",
       "evidence": {
         "tool": "check_bom", "args": {},
-        "no": [{"list": "findings", "where": {"check": ["missing_mpn", "mpn_without_manufacturer"], "severity": "warning"}, "label": "lines without a manufacturer or part number"}],
-        "judge": [{"list": "findings", "where": {"check": "missing_mpn"}, "label": "part numbers kept elsewhere (few parts carry one here)"}]
+        "no": [{"list": "findings", "where": {"check": ["missing_mpn", "mpn_without_manufacturer", "no_solution"], "severity": "warning"}, "label": "lines without a manufacturer or part number"}],
+        "judge": [{"list": "findings", "where": {"check": ["missing_mpn", "no_solution"]}, "label": "part numbers kept elsewhere (few parts carry one here)"}]
       },
-      "hint": "Part numbers kept in ActiveBOM or a database library are not read: say so instead of listing every part."
+      "hint": "Part numbers kept in a database library are not read: say so instead of listing every part. ActiveBOM part choices count when the project has a BomDoc (get_active_bom shows them)."
     },
     {
       "id": "BOM-DAT-02", "section": "part_data", "kind": "auto",

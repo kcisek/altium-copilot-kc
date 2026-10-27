@@ -31,9 +31,17 @@ The checks (each mismatch is a warning, a missing output or a stale file is info
   variant's Not Fitted parts), each line's quantity equals its designator count, and the
   Comment, Value, Footprint and Manufacturer Part Number columns the file has equal the
   part's (Description and Manufacturer as info: part choices and supplier data word them
-  their own way; the part number too when the BOM comes from an ActiveBOM document, whose
-  part choices are not read); a column named after a parameter shows that parameter, its
-  special strings resolved. Differences are reported, not judged. The variant: the file's
+  their own way); a column named after a parameter shows that parameter, its special
+  strings resolved. A BOM generated from an ActiveBOM document (its OutJob output's data
+  source is a .BomDoc) is checked against that BomDoc (services/active_bom): Manufacturer
+  Part Number against the line's chosen solution (on a line without part choices the
+  parts' MPN parameter, which ActiveBOM falls back to on most rows, not all: info,
+  field_mpn_parameter), Manufacturer against it and its aliases (info), Supplier and
+  Supplier Part Number columns against the chosen solution's part choices, and Line #
+  against the BomDoc's line number (empty for an unnumbered line; info when the BomDoc
+  gives a number to several lines, as an export may number them otherwise); when the
+  BomDoc cannot be read the part number differences are info, unverified.
+  Differences are reported, not judged. The variant: the file's
   title block, else its OutJob output (unless the file's parts are exactly another
   variant's: info), else a variant named in its path, else the variant whose parts fit
   it best.
@@ -64,8 +72,7 @@ The checks (each mismatch is a warning, a missing output or a stale file is info
   the comparisons above are what shows an output out of date).
 
 Not read: Gerber and ODB++ contents (counted only), .xls workbooks, the EIA drill format,
-Board Stack Reports (no layout to rely on), ActiveBOM part choices. Pure logic, no MCP;
-lengths in mil."""
+Board Stack Reports (no layout to rely on). Pure logic, no MCP; lengths in mil."""
 
 import hashlib
 import io
@@ -90,6 +97,7 @@ try:
         NO_VARIATIONS, STALE_TOLERANCE_S, output_locations, utc_iso,
     )
     from services.via_checks import layer_token_v6
+    from services import active_bom
 except ImportError:
     from server.parsers import fab_outputs as fo
     from server.services import dfm_assembly, dfm_geometry
@@ -101,6 +109,7 @@ except ImportError:
         NO_VARIATIONS, STALE_TOLERANCE_S, output_locations, utc_iso,
     )
     from server.services.via_checks import layer_token_v6
+    from server.services import active_bom
 
 CHECKS = ("pick_place", "bom", "netlist", "stackup", "drill", "staleness")
 MM = 1 / 0.0254
@@ -154,6 +163,10 @@ _NOT_FITTED_WORDS = {"not fitted", "notfitted", "dnp", "dnf", "dni", "nf", "no f
                      "not populated", "no"}
 _GENERATION_NAME = re.compile(r"^[\d\s._\-:()]{6,}$")  # a date/time folder name
 _FITTED_COLUMN = re.compile(r"(?i)\b(fitted|fit|dnp|populat\w*|place(?:d|ment)?|mount\w*)\b")
+# ActiveBOM's supplier columns ('Supplier 1', 'Supplier Part Number 1', 'Supplier Order
+# Qty 1' is neither).
+_SUPPLIER_COLUMN = re.compile(r"^supplier ?(\d*)$")
+_SKU_COLUMN = re.compile(r"^supplier (?:part ?(?:number|no\.?|#)|p/?n|sku|order code) ?(\d*)$")
 
 FIXES = {
     "pick_place": "Generate the pick-and-place output again from the saved PcbDoc with the "
@@ -591,6 +604,8 @@ class Design:
         self.duplicates: set[str] = set()
         self.origin = (0.0, 0.0)
         self._bom: dict[str, tuple] = {}
+        self._plans: dict[str, object] = {}
+        self._active: dict[tuple, tuple] = {}
         # The project's OutJob outputs (output_jobs.output_locations rows) and .BomDocs.
         self.outputs: list[dict] = []
         self.bomdocs: list[str] = []
@@ -648,6 +663,7 @@ class Design:
                 plan = plan_variant(variant, self.netlist, variant_names(self.netlist))
                 parts, _ = build_parts(self.netlist, plan, self.project.get("parameters") or {})
                 self._bom[key] = (parts, set(plan.not_fitted), "netlist")
+                self._plans[key] = plan
             else:
                 dnp = set(variant.dnp_refdes) if variant is not None else set()
                 parts = [_PcbBomPart(part, part.name not in dnp and part.designator not in dnp)
@@ -655,6 +671,24 @@ class Design:
                 parts.sort(key=lambda part: natural_key(part.designator))
                 self._bom[key] = (parts, dnp, "pcb")
         return self._bom[key]
+
+    def active_bom(self, path: str, name: str | None):
+        """(ActiveBom model, why not) of a BomDoc for the variant's BOM parts; only with
+        the netlist's parts (the PCB's carry no Design Item ID)."""
+        parts, _names, basis = self.bom_parts(name)
+        if basis != "netlist":
+            return None, "no netlist with schematic parts: the BomDoc's lines cannot be joined"
+        key = (path, (name or BASE_VARIANT).lower())
+        if key not in self._active:
+            try:
+                doc = active_bom.load_bom_doc(path)
+                plan = self._plans.get((name or BASE_VARIANT).lower())
+                self._active[key] = (active_bom.build_active_bom(
+                    doc, parts, self.netlist, plan, getattr(plan, "name", "")), None)
+            except Exception as error:  # a bad BomDoc leaves the BOM checked without it
+                self._active[key] = (None, f"{Path(path).name}: {type(error).__name__}: "
+                                           f"{error}")
+        return self._active[key]
 
     def not_fitted_designators(self, name: str | None) -> set[str]:
         """PCB designators (upper case) of the parts the variant does not fit."""
@@ -1091,6 +1125,35 @@ def _from_bomdoc(design: Design, entry: OutputFile) -> bool:
         or "activebom" in (row.get("document") or "").lower() for row in rows)
 
 
+def _bom_doc_of(design: Design, entry: OutputFile) -> str | None:
+    """The BomDoc a BOM came from: the one its OutJob output names, else the project's
+    first (an output naming '[ActiveBOM Document]' uses the project's)."""
+    if not design.bomdocs:
+        return None
+    for row in entry.outputs or []:
+        named = (row.get("document") or "").replace("\\", "/").rsplit("/", 1)[-1].lower()
+        for path in design.bomdocs:
+            if Path(path).name.lower() == named:
+                return path
+    return design.bomdocs[0]
+
+
+def _supply_columns(bom: fo.Bom) -> dict[str, str]:
+    """The lowest-numbered Supplier and Supplier Part Number columns of a BOM (header as
+    written)."""
+    found: dict[str, tuple[int, str]] = {}
+    for header in bom.columns:
+        name = norm_name(header)
+        for role, pattern in (("sku", _SKU_COLUMN), ("supplier", _SUPPLIER_COLUMN)):
+            match = pattern.match(name)
+            if match:
+                rank = int(match[1] or 0)
+                if role not in found or rank < found[role][0]:
+                    found[role] = (rank, header)
+                break
+    return {role: header for role, (_rank, header) in found.items()}
+
+
 def _not_fitted_line(line: fo.BomLine) -> bool:
     if line.quantity == 0 and line.designators:
         return True
@@ -1123,8 +1186,20 @@ def check_bom(entry: OutputFile, bom: fo.Bom, design: Design, variant_arg: str |
     fallback = {name.lower(): value
                 for name, value in (design.project.get("parameters") or {}).items()}
     bomdoc = _from_bomdoc(design, entry)
+    expected: dict[str, dict] | None = None
     if bomdoc:
-        stats["part_choices_not_read"] = True
+        path = _bom_doc_of(design, entry)
+        model, why = design.active_bom(path, variant if known else None) if path else (
+            None, "the project lists no .BomDoc")
+        if model is None:
+            stats["part_choices_not_read"] = True
+            if why:
+                stats["bom_doc_not_read"] = why
+        else:
+            stats["bom_doc"] = Path(path).name
+            expected = active_bom.expected_columns(model)
+    supply = _supply_columns(bom) if expected is not None else {}
+    compared_rows: set[tuple[int, str]] = set()
     by_designator = {part.designator.upper(): part for part in parts}
     fitted = {key for key, part in by_designator.items() if part.fitted}
     groups: dict[str, list[dict]] = defaultdict(list)
@@ -1163,10 +1238,25 @@ def check_bom(entry: OutputFile, bom: fo.Bom, design: Design, variant_arg: str |
                     continue
                 text = getattr(line, role) or ""
                 want = _bom_value(part, role, bom.columns[bom.roles[role]], fallback)
+                chosen = (expected or {}).get(key)
+                from_choices = bool(chosen) and chosen["source"] in (
+                    "part_choices", "solution_record")
+                if from_choices and role in ("mpn", "manufacturer"):
+                    want = chosen[role]
+                    if role == "manufacturer" and active_bom._key(text) in chosen["aliases"]:
+                        continue
+                code = f"field_{role}"
+                if expected is not None and role == "mpn" and not from_choices:
+                    # A line without BomDoc part choices: ActiveBOM shows the parts' MPN
+                    # parameter on most rows, not all (unverified, info).
+                    code = "field_mpn_parameter"
                 if _fold(text) != _fold(want):
-                    groups[f"field_{role}"].append({"designator": designator,
-                                                    "row": line.row, "file": text or None,
-                                                    "design": want or None})
+                    groups[code].append({"designator": designator,
+                                         "row": line.row, "file": text or None,
+                                         "design": want or None})
+            if expected is not None and key in expected:
+                _compare_supply(line, bom, expected[key], supply, designator, groups,
+                                compared_rows)
     missing = sorted((key for key in fitted if key not in listed),
                      key=natural_key)
     groups["missing"] = [{"designator": by_designator[key].designator} for key in missing]
@@ -1198,13 +1288,35 @@ def check_bom(entry: OutputFile, bom: fo.Bom, design: Design, variant_arg: str |
                                        "data spells makers' names its own way)."),
         "field_mpn": ("warning", "Manufacturer part number differs from the part's."),
     }
-    if bomdoc:
-        # ActiveBOM fills these columns from the BomDoc's part choices, which are not read:
-        # the part's parameters are no reference for them.
+    if bomdoc and expected is None:
+        # ActiveBOM fills these columns from the BomDoc's part choices, which could not be
+        # read: the part's parameters are no reference for them.
         messages["field_mpn"] = (
             "info", "Manufacturer part number differs from the part's parameters. The BOM "
-                    "comes from an ActiveBOM document (.BomDoc), whose part choices are not "
-                    "read: unverified.")
+                    "comes from an ActiveBOM document (.BomDoc), whose part choices could not "
+                    "be read: unverified.")
+    elif expected is not None:
+        messages["field_mpn"] = (
+            "warning", "Manufacturer part number differs from the BomDoc's chosen solution.")
+        messages["field_mpn_parameter"] = (
+            "info", "Manufacturer part number differs from the parts' MPN parameter on a line "
+                    "without part choices in the BomDoc (ActiveBOM shows that parameter on "
+                    "most such rows, not all): unverified.")
+        messages["field_manufacturer"] = (
+            "info", "Manufacturer differs from the BomDoc's chosen solution and its aliases.")
+        messages["field_supplier"] = (
+            "warning", "Supplier is none of the BomDoc's suppliers for the line's chosen "
+                       "solution.")
+        messages["field_supplier_part_number"] = (
+            "warning", "Supplier part number is none of the BomDoc's part choices for the "
+                       "line's chosen solution.")
+        duplicated = any(entry.get("line_numbers_duplicated") for entry in expected.values())
+        messages["line_number"] = (
+            "info", "Line # differs from the BomDoc's line number (empty for a line the BomDoc "
+                    "has not numbered). The BomDoc gives some line numbers to more than one "
+                    "line, so an export may number its lines otherwise.") if duplicated else (
+            "warning", "Line # differs from the BomDoc's line number (empty for a line the "
+                       "BomDoc has not numbered).")
     for code, (severity, message) in messages.items():
         if groups.get(code):
             findings.add("bom", code, severity, message, label, groups[code])
@@ -1213,6 +1325,29 @@ def check_bom(entry: OutputFile, bom: fo.Bom, design: Design, variant_arg: str |
     stats["mismatches"] = sum(len(groups[code]) for code in messages
                               if messages[code][0] == "warning" and groups.get(code))
     return stats
+
+
+def _compare_supply(line: fo.BomLine, bom: fo.Bom, chosen: dict, supply: dict[str, str],
+                    designator: str, groups: dict, compared: set) -> None:
+    """An ActiveBOM-filled row's Line #, Supplier and Supplier Part Number cells against
+    the BomDoc (each cell once per row)."""
+    if "line" in bom.roles and (line.row, "line") not in compared:
+        compared.add((line.row, "line"))
+        text = (line.fields.get(bom.columns[bom.roles["line"]]) or "").strip()
+        want = "" if chosen["line"] is None else str(chosen["line"])
+        if text != want and not (text.endswith(".0") and text[:-2] == want):
+            groups["line_number"].append({"designator": designator, "row": line.row,
+                                          "file": text or None, "design": chosen["line"]})
+    for role, column, known, code in (
+            ("supplier", supply.get("supplier"), chosen["suppliers"], "field_supplier"),
+            ("sku", supply.get("sku"), chosen["skus"], "field_supplier_part_number")):
+        if not column or (line.row, role) in compared or not known:
+            continue
+        compared.add((line.row, role))
+        text = (line.fields.get(column) or "").strip()
+        if text and active_bom._key(text) not in known:
+            groups[code].append({"designator": designator, "row": line.row, "file": text,
+                                 "design": sorted(known.values())[:5]})
 
 
 # ---------------------------------------------------------------- netlists
