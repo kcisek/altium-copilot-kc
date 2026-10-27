@@ -13,7 +13,8 @@
    states and notices, a full-screen button.
    Paging and details: readPages follows a tool's next offsets and says why it stopped
    (teardown, no serverTools, the page budget, a failed page); toolCache asks for a
-   selection's details once and never keeps a failure as the answer.
+   selection's details once, never keeps a failure as the answer and forgets an answer
+   that may be out of date when asked to.
    Nothing here loads or sends anything except postMessage to the host. */
 
 const Shell = (() => {
@@ -278,12 +279,24 @@ const Shell = (() => {
   function startAutoResize() {
     let last = { width: 0, height: 0 };
     let queued = false;
+    let unsized = 0;  // timed measures of a frame not laid out yet
     const measure = () => {
       if (!queued) return;
       queued = false;
       fitPanes();
       const height = contentHeight();
       const width = Math.ceil(window.innerWidth);
+      if (!width || !height) {
+        // A frame with no size yet (the host has not laid it out) may get no animation
+        // frames, ResizeObserver callbacks or mutations later: measure it again on a
+        // timer (backing off to a second, for about half a minute) until it has one.
+        if (unsized < 40) {
+          unsized += 1;
+          setTimeout(queueMeasure, Math.min(1000, 80 * unsized));
+        }
+        return;
+      }
+      unsized = 0;
       if (height !== last.height || width !== last.width) {
         last = { width, height };
         notify("ui/notifications/size-changed", { width, height });
@@ -736,19 +749,32 @@ const Shell = (() => {
   /** Focus the control in container with that mark, else fallback() (a node or null).
    *  True when something got focus. */
   function refocus(container, mark, fallback) {
-    let target = mark ? [...container.querySelectorAll("button, input, summary")].find((node) => markOf(node) === mark) : null;
+    let target = mark ? [...container.querySelectorAll("button, input, select, summary")].find((node) => markOf(node) === mark) : null;
     if (!target && fallback) target = fallback();
     if (!target || typeof target.focus !== "function") return false;
     target.focus();
     return document.activeElement === target;
   }
 
-  /** Rebuild a container's content; a button that had keyboard focus in it gets it back
-   *  (the one with the same text and title), so an answer arriving does not drop focus. */
-  function keepFocus(container, rebuild) {
+  // The controls keepFocus counts to find a neighbour for a control that is gone.
+  const CONTROLS = 'button:not([disabled]), input:not([disabled]), select:not([disabled]), summary, [tabindex="0"]';
+
+  /** Rebuild a container's content; a control that had keyboard focus in it gets it back
+   *  (the one with the same text and title), so an answer arriving does not drop focus.
+   *  When that control is not drawn again (a Retry or Ask again replaced by "Asking…"),
+   *  focus goes to fallback() when given, else to the control now at its place in the
+   *  container, so it stays where the user was rather than falling to the page. */
+  function keepFocus(container, rebuild, fallback = null) {
     const had = focusMark(container);
+    const at = had === null ? -1 : [...container.querySelectorAll(CONTROLS)].indexOf(document.activeElement);
     rebuild();
-    if (had !== null) refocus(container, had, null);
+    if (had === null) return;
+    refocus(container, had, () => {
+      const chosen = fallback ? fallback() : null;
+      if (chosen) return chosen;
+      const shown = [...container.querySelectorAll(CONTROLS)].filter((node) => node.getClientRects().length);
+      return at >= 0 && shown.length ? shown[Math.min(at, shown.length - 1)] : null;
+    });
   }
 
   // One polite live region for the whole page: short news (a selection, a details answer)
@@ -781,9 +807,11 @@ const Shell = (() => {
 
   // ---------- paging and tool calls ----------
 
-  /** A page budget shared by several readPages calls (one result's follow-up calls). */
-  function pageBudget(total) {
-    return { total, left: total };
+  /** A page budget shared by several readPages calls (one result's follow-up calls):
+   *  at most total pages in all, used of them already read (the result's first page,
+   *  which readPages does not count), so a stop names the number of pages really read. */
+  function pageBudget(total, used = 0) {
+    return { total, left: total - used };
   }
 
   /**
@@ -823,13 +851,18 @@ const Shell = (() => {
    * Detail calls for a selection, asked once each: get(tool, args) -> undefined or
    * {loading} | {data: the tool's result} | {error}; load(tool, args) asks the server when
    * there is no entry or the last ask failed (a failure is never kept as the answer), and
-   * never after teardown. onChange(tool, args, entry) runs when an entry changes.
+   * never after teardown; forget(tool, args) drops an answer that may be out of date, so
+   * the next load asks again. onChange(tool, args, entry) runs when an entry changes.
    */
   function toolCache(onChange) {
     const entries = new Map();
     const keyOf = (tool, args) => `${tool} ${JSON.stringify(args || {})}`;
     return {
       get: (tool, args) => entries.get(keyOf(tool, args)),
+      forget(tool, args) {
+        const entry = entries.get(keyOf(tool, args));
+        if (entry && !entry.loading) entries.delete(keyOf(tool, args));
+      },
       async load(tool, args) {
         const key = keyOf(tool, args);
         const entry = entries.get(key);

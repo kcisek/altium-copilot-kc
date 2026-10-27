@@ -3138,7 +3138,8 @@ def _compare_variants_impl(project: dict, netlist: dict | None, variant_state: V
 @mcp.tool(
     title="Compare Variants",
     annotations=ToolAnnotations(readOnlyHint=True),
-    meta={"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS},
+    meta=ui_views.link_meta("compare_variants",
+                            {"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS}),
 )
 def compare_variants(a: str | None = None, b: str | None = None, offset: int = 0) -> str:
     """Every difference between two variants: a (default: the active one) and b

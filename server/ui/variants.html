@@ -1,0 +1,1343 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!--@csp-->
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Variant comparison</title>
+<style>/*@shell.css*/</style>
+<style>
+/* Variant comparison view (roadmap #61): compare_variants side by side, one row per
+   designator and difference with variant a, variant b and the base design; a picker for
+   a and b filled from list_variants; the per-variant documentation check. */
+.head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 0 0 6px; }
+.head h1 { font-size: var(--fs-lg); margin: 0; font-weight: var(--fw-bold); }
+.head .grow { flex: 1 1 auto; }
+.summary { display: flex; flex-wrap: wrap; gap: 4px; }
+.vs { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 4px 6px; min-width: 0; }
+.vs .name { font-weight: var(--fw-medium); overflow-wrap: anywhere; }
+.approx { font-size: var(--fs-xs); color: var(--c-text3); margin: 0 0 8px; }
+.picker { border: 1px solid var(--c-line); border-radius: var(--radius); padding: 8px 10px; margin: 0 0 8px;
+          font-size: var(--fs-sm); }
+.picker-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.picker label { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; }
+.picker .side { font-weight: var(--fw-bold); }
+select.pick { border: 1px solid var(--c-border); border-radius: var(--radius-sm); background: var(--c-bg);
+              padding: 2px 6px; font-size: var(--fs-sm); min-width: 8em; max-width: min(100%, 22em); }
+.picker .help { margin: 6px 0 0; color: var(--c-text2); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.filters { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; margin: 0 0 8px; }
+.tbl td.c-val { min-width: 7em; overflow-wrap: anywhere; }
+/* The a and b headers carry the variants' names: they wrap rather than widen the table. */
+.tbl th.c-val { white-space: normal; }
+.tbl th.c-val button { overflow-wrap: anywhere; }
+.val { overflow-wrap: anywhere; }
+/* A value that differs from the base design: a tint and a ring (a cue that is not only
+   colour), and on a selected row (tinted the same) the page's background inside the ring. */
+.val.chg { background: var(--c-info-bg); border-radius: 3px; padding: 0 3px; font-weight: var(--fw-medium);
+           box-shadow: inset 0 0 0 1px var(--c-info); }
+.tbl tbody tr[aria-selected="true"] .val.chg { background: var(--c-bg); }
+.val.unset { color: var(--c-text3); font-style: italic; }
+.eq { margin-left: 4px; }
+.fit-note { display: block; font-size: var(--fs-xs); color: var(--c-text2); overflow-wrap: anywhere; margin-top: 2px; }
+.lines { display: flex; flex-direction: column; gap: 2px; }
+.findings { margin: 4px 0 8px; padding-left: 0; list-style: none; }
+.findings li { margin: 3px 0; overflow-wrap: anywhere; }
+.findings .badge { margin-right: 6px; }
+.status { font-size: var(--fs-xs); color: var(--c-text3); }
+.section-gap { margin-top: 14px; }
+/* The Documentation and Notes tabs scroll as one pane (fitted to the host's height); their
+   tables inside it are not capped again. */
+.content > .pane .tbl-wrap { max-height: none; }
+.diff { border-top: 1px solid var(--c-line); padding: 6px 0; }
+.diff h4 { font-size: var(--fs-sm); margin: 0 0 4px; overflow-wrap: anywhere; }
+/* Labels that name a variant ("a: <name>") wrap within at most 45% of the pane, so the
+   values keep a readable width; the pane's name badges wrap too. */
+.pane dl.facts { grid-template-columns: fit-content(45%) minmax(0, 1fr); }
+.pane dl.facts dt { min-width: 0; overflow-wrap: anywhere; }
+.pane h3 { overflow-wrap: anywhere; }
+.pane .summary .badge { white-space: normal; overflow-wrap: anywhere; }
+.pane .btn-row .btn { white-space: normal; overflow-wrap: anywhere; text-align: left; max-width: 100%; }
+/* A short host 980 px wide or less: a selected part's details take the table's place
+   (Close or Esc brings the table back), rather than both shrinking to a row or two. */
+@media (max-width: 980px) {
+  .split.solo > .content { display: none; }
+}
+.sides { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin: 6px 0; }
+.sides h3 { margin-top: 0; }
+</style>
+</head>
+<body>
+<main id="app"></main>
+<script type="application/json" id="data-contract">
+{
+  "tool": "compare_variants",
+  "picker": "list_variants",
+  "paged": "differences",
+  "kinds": ["fitted", "values", "parameters", "alternate_parts", "variant_parameters"],
+  "stale_shown": 20,
+  "base_names": ["[no variations]", "no variations", "none", "base"],
+  "shapes": {
+    "result": {
+      "required": ["a", "b", "binding", "summary", "differences_total", "offset", "has_more", "differences"],
+      "optional": ["next_offset", "differences_limited_to", "stale_variant_entries",
+                   "stale_variant_entries_note", "documentation", "notes"]
+    },
+    "differences.fitted[]": {
+      "required": ["designator", "a", "b"],
+      "optional": ["fitted_with_varied_parameters", "fitted_as_alternate"]
+    },
+    "differences.fitted[].fitted_as_alternate": {
+      "required": ["part"],
+      "optional": ["lib_reference", "design_item_id", "library", "footprint", "same_footprint",
+                   "same_as_base_part", "database_table", "library_copy", "library_error",
+                   "description", "comment", "value", "link"]
+    },
+    "differences.values[]": {"required": ["designator", "parameter", "a", "b"], "optional": ["base"]},
+    "differences.parameters[]": {"required": ["designator", "parameter", "a", "b"], "optional": ["base"]},
+    "differences.alternate_parts[]": {"required": ["designator", "a", "b"], "optional": []},
+    "differences.alternate_parts[].a": {
+      "required": ["part"],
+      "optional": ["lib_reference", "design_item_id", "library", "footprint", "same_footprint",
+                   "same_as_base_part", "database_table", "library_copy", "library_error",
+                   "description", "comment", "value", "link"]
+    },
+    "differences.alternate_parts[].b": {
+      "required": ["part"],
+      "optional": ["lib_reference", "design_item_id", "library", "footprint", "same_footprint",
+                   "same_as_base_part", "database_table", "library_copy", "library_error",
+                   "description", "comment", "value", "link"]
+    },
+    "differences.variant_parameters[]": {"required": ["parameter", "a", "b"], "optional": []},
+    "stale_variant_entries.a[]": {"required": ["designator", "issue", "detail"], "optional": []},
+    "stale_variant_entries.b[]": {"required": ["designator", "issue", "detail"], "optional": []},
+    "documentation": {
+      "required": ["per_variant", "outjobs", "note"],
+      "optional": ["outputs_on_base_design", "outjob_error", "draftsman"]
+    },
+    "documentation.per_variant[]": {
+      "required": ["variant", "outputs_missing"],
+      "optional": ["bom", "pick_and_place", "assembly_drawing", "bom_count", "pick_and_place_count",
+                   "assembly_drawing_count", "draftsman_set_to_variant", "draftsman_notes_mention"]
+    },
+    "documentation.draftsman{}": {
+      "required": ["readable"],
+      "optional": ["drawing_variant", "view_variants", "bom_table_variants", "prints_variant_name", "mentions"]
+    }
+  },
+  "list_variants": {
+    "result": {"required": ["active_variant", "variants"], "optional": []},
+    "variants[]": {
+      "required": ["name", "dnp_count", "dnp_components", "is_active"],
+      "optional": ["varied_parameter_count", "varied_components", "alternate_parts", "allow_fabrication",
+                   "parameters"]
+    },
+    "variants[].alternate_parts[]": {
+      "required": ["designator"],
+      "optional": ["lib_reference", "library", "footprint", "same_footprint", "library_error"]
+    }
+  }
+}
+</script>
+<script>/*@shell.js*/</script>
+<script>
+(() => {
+  "use strict";
+  const { el, clear } = Shell;
+  const CONTRACT = JSON.parse(document.getElementById("data-contract").textContent);
+  const app = document.getElementById("app");
+
+  const MAX_PAGES = 60;
+  const BASE = "[No Variations]";
+  // The only tools this page calls. None of them changes the server's state: the picker
+  // compares, it never switches the active variant (no set_active_variant, ever).
+  const READ_ONLY_TOOLS = new Set(["compare_variants", "list_variants", "get_component"]);
+  const KINDS = CONTRACT.kinds;
+  const KIND_LABEL = {
+    fitted: "Fitted in one only", values: "Values (Value, Comment)", parameters: "Other parameters",
+    alternate_parts: "Alternate parts", variant_parameters: "Variant parameters",
+  };
+  const KIND_SHORT = {
+    fitted: "Fitted", values: "Value", parameters: "Parameter", alternate_parts: "Alternate part",
+    variant_parameters: "Variant parameter",
+  };
+  // The header's counts: "18 fitted" (in one only), "4 values", "1 alternate part".
+  const KIND_NOUN = {
+    values: "value", parameters: "parameter", alternate_parts: "alternate part", variant_parameters: "variant parameter",
+  };
+  // compare_variants lists at most this many stale entries per side (and no count).
+  const STALE_SHOWN = CONTRACT.stale_shown;
+  // The names compare_variants also takes for the base design (when no variant has one).
+  const BASE_NAMES = CONTRACT.base_names;
+  const ROLE_LABEL = { "bom": "BOM", "pick_and_place": "Pick and place", "assembly_drawing": "Assembly drawing" };
+  const COUNT_KEY = { bom: "bom_count", pick_and_place: "pick_and_place_count", assembly_drawing: "assembly_drawing_count" };
+  const VARIANT_PARAMS = "(variant parameters)";
+  const GROUPINGS = [
+    { id: "kind", label: "Kind", title: "Fitted, values, parameters, alternate parts, variant parameters" },
+    { id: "part", label: "Part", title: "All of a part's differences together" },
+    { id: "none", label: "None", title: "No groups: one sortable table" },
+  ];
+  const READ_ONLY_NOTE = "Comparing does not switch the active variant: the view only asks compare_variants (and list_variants for this list), never set_active_variant.";
+  const APPROX_NOTE = "Read from the saved project files: Altium's Variant Management dialog is the final word.";
+  const FIRST_PAGE_NOTE = "This result is a later page of compare_variants: the documentation check, the stale variant entries and the notes come with its first page (offset 0), which the view could not read. Ask Claude to compare again without offset.";
+
+  const view = {
+    args: {}, argsKnown: false, data: null, errorPayload: null, pages: 0, incomplete: false, stopReason: "",
+    warnings: [], query: "", groupBy: "kind", kindsOn: null, tab: "differences", selected: null, selectedRow: null,
+    asked: [], busy: false, closed: false, filtersOpen: null, pickerOpen: null,
+    variants: null, active: null, variantsError: "", variantsLoading: null, listWarnings: [],
+    pick: { a: null, b: null }, wanted: { a: null, b: null },
+  };
+  const ui = {};
+  const details = Shell.toolCache((tool, args, entry) => {
+    renderPane();
+    if (entry && !entry.loading) Shell.announce(`${tool} ${entry.error ? "failed" : "answered"}`);
+  });
+  // The active variant list_variants named just before each get_component call (null when
+  // it could not say): an answer is labelled with it, never with a later one, and asked
+  // again when list_variants names another active variant.
+  const askedUnder = new Map();
+
+  // ---------- helpers ----------
+
+  const canCall = () => Shell.canCallTools();
+  const plural = Shell.plural;
+  // The server's natural_key order (R9 before R10, case-insensitive, digits as numbers),
+  // so groups and the Part column follow compare_variants' own order.
+  const naturalKey = (text) => String(text).split(/(\d+)/).map((part, index) => (index % 2 ? Number(part) : part.toLowerCase()));
+  function naturalOrder(x, y) {
+    const a = naturalKey(x);
+    const b = naturalKey(y);
+    for (let index = 0; index < Math.min(a.length, b.length); index += 1) {
+      if (a[index] === b[index]) continue;
+      if (typeof a[index] === "number") return a[index] - b[index];
+      return a[index] < b[index] ? -1 : 1;
+    }
+    return a.length - b.length;
+  }
+  const trimmed = (value) => String(value === null || value === undefined ? "" : value).trim();
+  const sameText = (x, y) => trimmed(x) === trimmed(y);
+  // The server's same_variant: case-insensitive, an empty name or [All Variants] is the base.
+  const normName = (name) => {
+    const text = trimmed(name).toLowerCase();
+    return text === "" || text === BASE.toLowerCase() || text === "[all variants]" ? BASE.toLowerCase() : text;
+  };
+  const sameVariant = (x, y) => normName(x) === normName(y);
+  const isBase = (name) => normName(name) === BASE.toLowerCase();
+  const unbound = () => Boolean(view.data && view.data.binding === "stored_designators");
+  const baseAlias = (name) => BASE_NAMES.includes(trimmed(name).toLowerCase());
+
+  /** Room for the open picker and filters (about 280 px over the table) while the table,
+   *  and the details pane stacked under it on a host 980 px wide or less, keep about five
+   *  rows each: the shell's roomy() and, with a height limit, 660 px side by side or
+   *  820 px stacked. Otherwise both start folded behind their one-line disclosures. */
+  function roomyHere() {
+    if (!Shell.roomy()) return false;
+    const dims = Shell.context().containerDimensions || {};
+    const limit = Number(dims.height || dims.maxHeight) || 0;
+    return !limit || limit >= (window.innerWidth > 980 ? 660 : 820);
+  }
+
+  /** Call one of the page's read-only tools (through the shell, which checks serverTools). */
+  function call(tool, args) {
+    if (!READ_ONLY_TOOLS.has(tool)) return Promise.reject(new Error(`The view does not call ${tool}.`));
+    return Shell.callTool(tool, args);
+  }
+
+  // ---------- data contract ----------
+
+  /** The rows a contract path names: "x.y[]" a list's items, "x.y{}" an object's values. */
+  function rowsAt(data, path) {
+    if (path === "result") return [data];
+    let rows = [data];
+    for (const part of path.split(".")) {
+      const key = part.replace(/(\[\]|\{\})$/, "");
+      rows = rows.flatMap((row) => {
+        const value = row && typeof row === "object" ? row[key] : undefined;
+        if (part.endsWith("[]")) return Array.isArray(value) ? value : [];
+        if (part.endsWith("{}")) return value && typeof value === "object" && !Array.isArray(value) ? Object.values(value) : [];
+        return value === undefined || value === null ? [] : [value];
+      });
+    }
+    return rows;
+  }
+
+  function checkContract(shapes, data) {
+    const problems = [];
+    for (const [path, shape] of Object.entries(shapes)) {
+      for (const key of shape.required) {
+        const missing = rowsAt(data, path).filter((row) => !row || typeof row !== "object" || !(key in row)).length;
+        if (missing) problems.push(`${path}: ${key} missing in ${missing} row(s)`);
+      }
+    }
+    return problems;
+  }
+
+  // ---------- one difference ----------
+
+  function identityText(identity) {
+    if (!identity || typeof identity !== "object") return "";
+    const footprint = identity.footprint ? `footprint ${identity.footprint}`
+      : identity.same_footprint ? "the base part's footprint" : null;
+    const where = [identity.lib_reference || identity.design_item_id || "?",
+                   identity.library ? `from ${identity.library}` : null, footprint].filter(Boolean).join(", ");
+    if (identity.part === "base") return `Base part: ${where}`;
+    return `Alternate part: ${where}${identity.same_as_base_part ? " (the base part, re-selected)" : ""}`;
+  }
+
+  /** The base design's part for an alternate-part row: the side that places it, if any. */
+  function baseIdentity(row) {
+    if (row.a && row.a.part === "base") return row.a;
+    if (row.b && row.b.part === "base") return row.b;
+    return null;
+  }
+
+  const unsetText = () => (unbound() ? "not known (no netlist)" : "not set");
+
+  /** What a fitted side carries: its varied parameters and alternate part. */
+  function fittedExtras(row) {
+    const parts = [];
+    if ((row.fitted_with_varied_parameters || []).length) parts.push(`with ${row.fitted_with_varied_parameters.join(", ")}`);
+    if (row.fitted_as_alternate) parts.push(`as ${identityText(row.fitted_as_alternate).replace(/^Alternate part: /, "alternate part ")}`);
+    return parts.join("; ");
+  }
+
+  function sideText(row, side) {
+    const value = row[side];
+    if (row._kind === "fitted") {
+      if (value !== "fitted") return "Not Fitted";
+      const extras = fittedExtras(row);
+      return extras ? `Fitted ${extras}` : "Fitted";
+    }
+    if (row._kind === "alternate_parts") return identityText(value);
+    if (value !== null && value !== undefined) return String(value);
+    // Variant parameters come from the .PrjPcb, netlist or not: one a variant lacks is not
+    // set. A part's value or parameter without the netlist is not known (only the
+    // variant's own variations are).
+    return row._kind === "variant_parameters" ? "not set" : unsetText();
+  }
+
+  function baseText(row) {
+    if (row._kind === "fitted") return "Fitted";
+    if (row._kind === "alternate_parts") {
+      const base = baseIdentity(row);
+      return base ? identityText(base) : "the part's own (neither side places it)";
+    }
+    if (row._kind === "variant_parameters") return "none (the base design has no variant parameters)";
+    if (!("base" in row)) return "not known (no netlist)";
+    return row.base === null || row.base === undefined ? "not set" : String(row.base);
+  }
+
+  /** true when the side is the base design's, false when it differs, null when not known. */
+  function equalsBase(row, side) {
+    const value = row[side];
+    if (row._kind === "fitted") return value === "fitted" && !fittedExtras(row);
+    if (row._kind === "alternate_parts") return Boolean(value && value.part === "base");
+    if (row._kind === "variant_parameters") return value === null || value === undefined;
+    if (!("base" in row)) return null;
+    return sameText(value, row.base);
+  }
+
+  function againstText(row) {
+    const a = equalsBase(row, "a");
+    const b = equalsBase(row, "b");
+    if (a === null || b === null) return "base not known";
+    if (a) return "a is the base design's";
+    if (b) return "b is the base design's";
+    return "both differ from the base design";
+  }
+
+  function fittedBadge(fitted) {
+    return el("span", { class: `badge ${fitted ? "ok" : "error"}`, text: fitted ? "Fitted" : "Not Fitted" });
+  }
+
+  function cell(row, side) {
+    const same = equalsBase(row, side);
+    const mark = same ? el("span", { class: "badge muted eq", text: "= base", title: "The same as the base design" }) : null;
+    if (row._kind === "fitted") {
+      const fitted = row[side] === "fitted";
+      const extras = fitted ? fittedExtras(row) : "";
+      return [fittedBadge(fitted), mark, extras ? el("span", { class: "fit-note", text: extras }) : null];
+    }
+    const value = row[side];
+    const unset = row._kind !== "alternate_parts" && (value === null || value === undefined);
+    const cls = ["val", same === false ? "chg" : "", unset ? "unset" : ""].filter(Boolean).join(" ");
+    return [el("span", { class: cls, text: sideText(row, side) }), mark];
+  }
+
+  function baseCell(row) {
+    if (row._kind === "fitted") return fittedBadge(true);
+    const unknown = !("base" in row) && (row._kind === "values" || row._kind === "parameters");
+    const unset = row._kind === "variant_parameters" || unknown ||
+      ((row._kind === "values" || row._kind === "parameters") && (row.base === null || row.base === undefined)) ||
+      (row._kind === "alternate_parts" && !baseIdentity(row));
+    return el("span", { class: `val${unset ? " unset" : ""}`, text: baseText(row) });
+  }
+
+  // ---------- loading ----------
+
+  function showState(kind, title, detail) {
+    clear(app).appendChild(Shell.state(kind, title, detail));
+  }
+
+  const ERROR_TITLES = {
+    no_project: "No project is loaded",
+    variant_not_found: "compare_variants does not know that variant",
+    no_components_loaded: "No components were loaded",
+    netlist_required: "The netlist is not loaded",
+  };
+
+  function showError(payload) {
+    if (payload.error === "no_variants") {
+      clear(app).appendChild(Shell.state("empty", "This project defines no variants",
+        payload.message || "There is nothing to compare."));
+      return;
+    }
+    clear(app).appendChild(Shell.state("error", ERROR_TITLES[payload.error] || "compare_variants answered with an error",
+      payload.message || payload.error));
+    if ((payload.sheet_errors || []).length) {
+      app.appendChild(el("details", { class: "more section-gap" }, el("summary", { text: "Sheet errors" }),
+        el("ul", { class: "small" }, payload.sheet_errors.map((item) => el("li", { text: typeof item === "object" ? JSON.stringify(item) : String(item) })))));
+    }
+    if (payload.error === "variant_not_found" && canCall()) {
+      // The picker lists the variants compare_variants knows.
+      ui.picker = el("section", { class: "picker section-gap", "aria-label": "Variants to compare" });
+      app.appendChild(ui.picker);
+      renderPicker();
+      if (!view.variants) loadVariants();
+    }
+  }
+
+  function flatten(page, into) {
+    const differences = (page && page.differences) || {};
+    for (const kind of KINDS) {
+      for (const row of differences[kind] || []) into.push({ ...row, _kind: kind });
+    }
+    return into;
+  }
+
+  async function getPage(offset, a, b, total) {
+    const page = Shell.resultJson(await call("compare_variants", { a, b, offset }));
+    if (page && page.error) throw new Error(page.message || page.error);
+    // A page of another comparison (other variants, or the project changed) is not merged.
+    if (total !== null && (page.differences_total !== total || page.a !== a || page.b !== b)) {
+      throw new Error(`it is not a page of this comparison (${page.a} against ${page.b}, ${page.differences_total} differences)`);
+    }
+    return page;
+  }
+
+  async function loadResult(result) {
+    let first;
+    try {
+      first = Shell.resultJson(result);
+    } catch (error) {
+      view.busy = false;
+      showState("error", "The comparison could not be read", error.message);
+      return;
+    }
+    await loadFrom(first);
+  }
+
+  async function loadFrom(first) {
+    view.busy = true;
+    try {
+      if (!first || typeof first !== "object") throw new Error("The result is not a variant comparison.");
+      if (first.error) {
+        view.data = null;
+        view.errorPayload = first;
+        // The picker starts from the call's arguments: the side compare_variants knew stays
+        // picked, the unknown one falls back (a: the active variant, b: the base design).
+        view.pick = { a: null, b: null };
+        view.wanted = { a: view.args.a, b: view.args.b };
+        showError(first);
+        return;
+      }
+      view.errorPayload = null;
+      const reasons = [];
+      if (first.offset > 0) {
+        // A later page: the earlier rows, the documentation, stale entries and notes come
+        // with the first page, which the view asks for when it can.
+        let firstPage = null;
+        if (canCall() && !view.closed) {
+          showState("loading", "Reading the comparison", "Asking compare_variants for its first page.");
+          try {
+            firstPage = await getPage(0, first.a, first.b, first.differences_total);
+          } catch (error) {
+            reasons.push(`its first page could not be read: ${error.message}`);
+          }
+        }
+        if (firstPage) first = firstPage;
+        else reasons.unshift(`this result starts at offset ${first.offset}, so its first ${plural(first.offset, "difference")}, the documentation check, the stale variant entries and the notes (which come with compare_variants' first page) are not in it`);
+      }
+      const rows = flatten(first, []);
+      const merged = { ...first, differences: {} };
+      const keep = (page) => {
+        for (const [kind, list] of Object.entries(page.differences || {})) {
+          merged.differences[kind] = [...(merged.differences[kind] || []), ...list];
+        }
+      };
+      keep(first);
+      const { pages, stopped } = await Shell.readPages({
+        // The first page counts: a stop says "at most 60 pages" after 60 pages read.
+        first, tool: "compare_variants", budget: Shell.pageBudget(MAX_PAGES, 1), closed: () => view.closed,
+        pageOffset: (page) => (page.has_more && page.next_offset !== undefined ? page.next_offset : null),
+        getPage: (offset) => getPage(offset, first.a, first.b, first.differences_total),
+        onPage: (page) => {
+          keep(page);
+          flatten(page, rows);
+        },
+        progress: (page, offset) => showState("loading", "Reading the comparison", `compare_variants pages its differences: page ${page} (offset ${offset}).`),
+      });
+      if (stopped) reasons.push(stopped);
+      // Each designator's place in compare_variants' natural order (the Part column sorts by it).
+      const ranks = new Map([...new Set(rows.filter((row) => row.designator !== undefined).map((row) => String(row.designator)))]
+        .sort(naturalOrder).map((designator, index) => [designator, index]));
+      rows.forEach((row, index) => {
+        row._id = index;
+        row._part = row.designator !== undefined ? `part:${row.designator}` : `param:${row.parameter}`;
+        row._rank = row.designator !== undefined ? ranks.get(String(row.designator)) : null;
+        row._what = row._kind === "fitted" ? "Fitted" : row._kind === "alternate_parts" ? "Part placed" : row.parameter;
+      });
+      view.pages = pages;
+      view.incomplete = reasons.length > 0;
+      view.stopReason = reasons.join("; ").replace(/[.\s]+$/, "");
+      view.data = { ...first, rows };
+      view.warnings = checkContract(CONTRACT.shapes, merged);
+      view.selected = null;
+      view.selectedRow = null;
+      view.asked = [];
+      view.kindsOn = null;
+      view.pick = { a: first.a, b: first.b };
+      renderAll();
+      if (canCall() && !view.variants) loadVariants();
+    } catch (error) {
+      showState("error", "The comparison could not be read", error.message);
+    } finally {
+      view.busy = false;
+    }
+  }
+
+  /** Ask compare_variants for another pair (the picker); the table already drawn stays
+   *  when the call fails. Never switches the active variant. */
+  async function compare(a, b) {
+    if (view.closed) renderPicker();  // says the view was closed, without its buttons
+    if (view.busy || !canCall() || view.closed) return;
+    const previous = view.args;
+    const mark = Shell.focusMark(app);
+    view.busy = true;
+    view.args = { a, b };
+    view.argsKnown = true;
+    showState("loading", "Comparing", `Asking compare_variants for ${a} against ${b}.`);
+    try {
+      const first = Shell.resultJson(await call("compare_variants", { a, b, offset: 0 }));
+      if (first && first.error) throw new Error(first.message || first.error);
+      await loadFrom(first);
+    } catch (error) {
+      view.busy = false;
+      view.args = previous;
+      if (!view.data) {
+        // From the unknown-variant state: that state and its picker stay, with the failure
+        // above them, so another pair can be picked or the same one asked again.
+        if (view.errorPayload) showError(view.errorPayload);
+        else showState("error", "The comparison could not be read", error.message);
+        if (view.errorPayload) app.prepend(Shell.notice("error", `Comparing ${a} against ${b} failed: ${error.message}`));
+      } else {
+        view.pick = { a: view.data.a, b: view.data.b };
+        renderAll();
+        app.prepend(Shell.notice("error", `Comparing ${a} against ${b} failed: ${error.message}`));
+      }
+    }
+    if (mark) Shell.refocus(app, mark, () => (ui.compareButton && !ui.compareButton.disabled ? ui.compareButton : ui.tabBar && ui.tabBar.selected()));
+  }
+
+  /** list_variants for the picker and the active variant's name (read-only). Resolves
+   *  when it answered; a call already on its way is shared, not repeated. */
+  function loadVariants() {
+    if (!canCall() || view.closed) return Promise.resolve();
+    if (view.variantsLoading) return view.variantsLoading;
+    view.variantsLoading = fetchVariants(variantsSignature());
+    // Only the first list shows "Asking…" (a redraw would close a picker's open list).
+    if (!view.variants) renderPicker();
+    return view.variantsLoading;
+  }
+
+  async function fetchVariants(before) {
+    try {
+      const listing = Shell.resultJson(await call("list_variants", {}));
+      if (listing && listing.error) throw new Error(listing.message || listing.error);
+      view.variants = Array.isArray(listing.variants) ? listing.variants : [];
+      view.active = listing.active_variant || null;
+      view.variantsError = "";
+      view.listWarnings = checkContract(CONTRACT.list_variants, listing);
+    } catch (error) {
+      view.variantsError = error.message;
+    } finally {
+      view.variantsLoading = null;
+    }
+    if (variantsSignature() === before) return;
+    renderPicker();
+    renderPane();
+    if (view.tab === "notes" && ui.content && view.data) renderTab();
+  }
+
+  function variantsSignature() {
+    return JSON.stringify([view.variants, view.active, view.variantsError]);
+  }
+
+  // ---------- picker ----------
+
+  /** The names the picker offers: the project's variants, then the base design. */
+  function pickNames() {
+    const names = (view.variants || []).map((variant) => variant.name);
+    for (const name of [view.pick.a, view.pick.b]) {
+      if (name && !isBase(name) && !names.some((other) => sameVariant(other, name))) names.push(name);
+    }
+    return [...names, BASE];
+  }
+
+  function optionLabel(name) {
+    if (isBase(name)) return `${BASE} (base design)`;
+    return sameVariant(name, view.active) ? `${name} (active)` : name;
+  }
+
+  function variantSelect(side) {
+    const select = el("select", { class: "pick", id: `pick-${side}`, "aria-label": `Variant ${side}` });
+    const names = pickNames();
+    for (const name of names) select.appendChild(el("option", { value: name, text: optionLabel(name) }));
+    const known = (wanted) => (wanted && trimmed(wanted) ? names.find((name) => sameVariant(name, wanted)) ||
+      (baseAlias(wanted) ? BASE : null) : null);
+    // Without a comparison yet (an unknown variant asked): the side the call named and
+    // compare_variants knows, else its default (a: the active variant, b: the base design).
+    const fallback = side === "b" ? BASE : known(view.active) || names[0];
+    const current = known(view.pick[side]) || known(view.wanted[side]) || fallback;
+    select.value = current;
+    view.pick[side] = current;
+    select.addEventListener("change", () => {
+      view.pick[side] = select.value;
+      syncCompareButton();
+    });
+    return select;
+  }
+
+  /** The Compare button says whether the picked pair is the one shown (its text and title
+   *  stay the same, so keyboard focus finds it again after the page is redrawn). */
+  function syncCompareButton() {
+    if (!ui.compareButton) return;
+    const shown = view.data && sameVariant(view.pick.a, view.data.a) && sameVariant(view.pick.b, view.data.b);
+    ui.compareButton.disabled = !canCall();
+    ui.compareButton.setAttribute("aria-describedby", "pick-state");
+    if (ui.pickState) ui.pickState.textContent = shown ? "(shown)" : "";
+  }
+
+  function renderPicker() {
+    if (!ui.picker) return;
+    Shell.keepFocus(ui.picker, drawPicker);
+  }
+
+  function drawPicker() {
+    clear(ui.picker);
+    ui.compareButton = null;
+    ui.pickState = null;
+    if (view.closed) {
+      Shell.append(ui.picker, [el("p", { class: "help", text: "The view was closed: it asks the server nothing more." })]);
+      return;
+    }
+    if (!canCall()) {
+      Shell.append(ui.picker, [el("p", { class: "help", text: "This host does not let the view call tools: ask Claude to compare other variants (compare_variants with a and b)." })]);
+      return;
+    }
+    const body = [];
+    if (view.variantsLoading && !view.variants) {
+      body.push(el("p", { class: "muted", text: "Asking list_variants for the project's variants…" }));
+    }
+    if (view.variantsError) {
+      body.push(el("div", { class: "notice warning" }, el("span", { class: "grow", text: `list_variants failed: ${view.variantsError}` }),
+        el("button", { type: "button", class: "btn-link", text: "Retry", on: { click: () => loadVariants() } })));
+    }
+    if (view.variants || view.pick.a) {
+      ui.compareButton = el("button", { type: "button", class: "btn", text: "Compare",
+                                        title: "Ask compare_variants for the two variants picked",
+                                        on: { click: () => compare(view.pick.a, view.pick.b) } });
+      const swap = el("button", { type: "button", class: "btn", text: "Swap a and b",
+                                  title: "Compare b against a",
+                                  on: { click: () => compare(view.pick.b, view.pick.a) } });
+      ui.pickState = el("span", { class: "muted small", id: "pick-state" });
+      body.push(el("div", { class: "picker-row" },
+        el("label", {}, el("span", { class: "side", text: "a" }), variantSelect("a")),
+        el("span", { class: "muted", text: "against" }),
+        el("label", {}, el("span", { class: "side", text: "b" }), variantSelect("b")),
+        ui.compareButton, swap, ui.pickState));
+      syncCompareButton();
+    }
+    body.push(el("p", { class: "help", text: `${READ_ONLY_NOTE} ${activeText()}` }));
+    Shell.append(ui.picker, body);
+  }
+
+  /** What the server's active variant is, as list_variants last said. */
+  function activeText() {
+    if (!view.active) return "get_component and get_sheet_context show the server's active variant.";
+    return `get_component and get_sheet_context show the active variant, ${view.active}${activeRole()}.`;
+  }
+
+  function activeRole() {
+    if (!view.data || !view.active) return "";
+    const roles = [sameVariant(view.active, view.data.a) ? "a" : null, sameVariant(view.active, view.data.b) ? "b" : null].filter(Boolean);
+    return roles.length ? ` (${roles.join(" and ")} here)` : " (neither a nor b here)";
+  }
+
+  // ---------- differences table ----------
+
+  function rowsOf() {
+    return (view.data && view.data.rows) || [];
+  }
+
+  function kindBadge(kind) {
+    return el("span", { class: `badge${kind === "fitted" ? " warning" : kind === "alternate_parts" ? " info" : ""}`, text: KIND_SHORT[kind] });
+  }
+
+  function groupSpec() {
+    const by = view.groupBy;
+    if (by === "none") return null;
+    const byPart = by === "part";
+    const total = rowsOf().length;
+    const naturally = naturalOrder;
+    return {
+      key: (row) => (byPart ? (row.designator !== undefined ? row.designator : VARIANT_PARAMS) : row._kind),
+      label: (key, rows) => {
+        if (!byPart) return KIND_LABEL[key] || key;
+        const kinds = KINDS.filter((kind) => rows.some((row) => row._kind === kind));
+        return [key === VARIANT_PARAMS ? "Variant parameters" : key, " ", kinds.map((kind) => [kindBadge(kind), " "])];
+      },
+      count: (key, rows) => {
+        const parts = new Set(rows.map((row) => row._part)).size;
+        return [el("span", { class: "badge", text: plural(rows.length, "difference") }),
+          !byPart && parts !== rows.length && key !== "variant_parameters" ? el("span", { class: "badge muted", text: plural(parts, "part") }) : null];
+      },
+      order: (x, y) => (byPart ? (Number(x === VARIANT_PARAMS) - Number(y === VARIANT_PARAMS)) || naturally(x, y)
+        : KINDS.indexOf(x) - KINDS.indexOf(y)),
+      // A long comparison opens with its groups closed (a single group open).
+      open: (key, rows, groups) => groups === 1 || total <= (byPart ? 80 : 250),
+    };
+  }
+
+  function rowFilter(row) {
+    return !view.kindsOn || view.kindsOn.has(row._kind);
+  }
+
+  function differenceTable() {
+    const data = view.data;
+    return Shell.table({
+      label: "Differences", ownFilter: false, rows: rowsOf(), group: groupSpec(), filter: rowFilter,
+      rowKey: (row) => row._id, onActivate: select,
+      empty: view.incomplete ? "No difference read: the notice above says why." : "No difference in this comparison.",
+      columns: [
+        { key: "kind", label: "Kind", value: (row) => KINDS.indexOf(row._kind), text: (row) => KIND_SHORT[row._kind],
+          render: (row) => kindBadge(row._kind) },
+        // Sorted in compare_variants' natural order (its rank), filtered by the designator.
+        { key: "designator", label: "Part", cls: "c-name", value: (row) => row._rank,
+          text: (row) => (row.designator === undefined ? "" : row.designator),
+          render: (row) => (row.designator === undefined ? el("span", { class: "muted", text: "variant" }) : row.designator) },
+        { key: "what", label: "What", cls: "c-name", value: (row) => row._what },
+        { key: "a", label: `a: ${data.a}`, cls: "c-val", value: (row) => sideText(row, "a"), render: (row) => cell(row, "a") },
+        { key: "b", label: `b: ${data.b}`, cls: "c-val", value: (row) => sideText(row, "b"), render: (row) => cell(row, "b") },
+        { key: "base", label: "Base design", cls: "c-val", value: baseText, render: baseCell },
+        { key: "against", label: "Against the base", hidden: true, value: againstText },
+      ],
+    });
+  }
+
+  function regroup(id) {
+    view.groupBy = id;
+    if (ui.table) ui.table.setGroup(groupSpec());
+  }
+
+  // ---------- selection and details pane ----------
+
+  function select(row) {
+    const fromTable = Boolean(ui.table && ui.table.el.contains(document.activeElement));
+    view.selected = row ? row._part : null;
+    view.selectedRow = row || null;
+    view.asked = [];
+    if (ui.table) ui.table.select((other) => Boolean(row) && other._part === row._part);
+    renderPane();
+    // The details took the table's place (a short, narrow host): focus goes to them.
+    if (row && fromTable && ui.split && ui.split.classList.contains("solo") && ui.closeButton) ui.closeButton.focus();
+    if (row) Shell.announce(`Details: ${row.designator !== undefined ? row.designator : row.parameter}`);
+  }
+
+  /** A short host 980 px wide or less, where the details pane would be stacked under the
+   *  table: there a selected part's details take the table's place. */
+  function compactHost() {
+    const dims = Shell.context().containerDimensions || {};
+    const limit = Number(dims.height || dims.maxHeight) || 0;
+    return window.innerWidth <= 980 && limit > 0 && limit < 820;
+  }
+
+  /** Close the details (Close, or Esc): focus goes back to the row that was selected. */
+  function closeDetails() {
+    const row = view.selectedRow;
+    const inPane = ui.pane && ui.pane.contains(document.activeElement);
+    select(null);
+    if (!inPane && document.activeElement && document.activeElement !== document.body) return;
+    if (ui.table && ui.table.focus((other) => other === row)) return;
+    if (ui.table && row && ui.table.focus((other) => other._part === row._part)) return;
+    if (ui.tabBar) ui.tabBar.focus();
+  }
+
+  /** Ask get_component for a part: it answers for the ACTIVE variant. list_variants is
+   *  asked first, so the answer is labelled with the active variant it was asked under; a
+   *  kept answer asked under another active variant than list_variants names now is
+   *  dropped and asked again. */
+  async function ask(tool, args, label) {
+    if (!READ_ONLY_TOOLS.has(tool)) return;
+    if (view.closed || !canCall()) {
+      renderPane();
+      return;
+    }
+    const key = JSON.stringify([tool, args]);
+    view.asked = [[tool, args, label], ...view.asked.filter(([other, otherArgs]) => JSON.stringify([other, otherArgs]) !== key)];
+    renderPane();
+    await loadVariants();
+    if (view.closed) return;
+    const under = view.variantsError ? null : view.active;
+    const kept = details.get(tool, args);
+    if (kept && kept.data && askedUnder.get(key) !== under) details.forget(tool, args);
+    const entry = details.get(tool, args);
+    if (!entry || entry.error) askedUnder.set(key, under);
+    details.load(tool, args);
+  }
+
+  function askAgain(tool, args, label) {
+    details.forget(tool, args);
+    ask(tool, args, label);
+  }
+
+  /** The active variant an answer shows: the one get_component names when the variant
+   *  changes the part, else the one list_variants named just before it was asked. */
+  function answeredUnder(tool, args, json) {
+    if (json && json.variant_changes && json.variant_changes.variant) return json.variant_changes.variant;
+    return askedUnder.get(JSON.stringify([tool, args])) || null;
+  }
+
+  function parsed(entry) {
+    const text = Shell.resultText(entry.data);
+    try {
+      return { json: JSON.parse(text), text };
+    } catch (error) {
+      return { json: null, text };
+    }
+  }
+
+  function changesFacts(changes) {
+    if (!changes) return null;
+    const fields = Object.entries(changes.fields || {}).map(([key, item]) => [key.replace(/_/g, " "), `${item.variant} (base ${item.base === null || item.base === undefined ? "not set" : item.base})`]);
+    const varied = (changes.varied_parameters || []).map((item) => `${item.parameter}=${item.value} (base ${item.base === null || item.base === undefined ? "not set" : item.base})`);
+    const alternate = changes.alternate_part;
+    return Shell.facts([
+      ["Variant", changes.variant],
+      ...fields,
+      ["Varied parameters", varied.join("; ")],
+      ["Alternate part", alternate ? [alternate.lib_reference, alternate.library ? `from ${alternate.library}` : null,
+        alternate.footprint ? `footprint ${alternate.footprint}` : null].filter(Boolean).join(", ") : null],
+    ], "facts section-gap");
+  }
+
+  /** What get_component answered: the part as the ACTIVE variant shows it. */
+  function answer(tool, args, title) {
+    const entry = details.get(tool, args);
+    const head = el("h3", { text: title });
+    if (!entry || entry.loading) return [head, el("p", { class: "muted", text: `Asking ${tool}…` })];
+    if (entry.error) {
+      return [head, el("div", { class: "notice error" }, el("span", { class: "grow", text: entry.error }),
+        el("button", { type: "button", class: "btn-link", text: "Retry", on: { click: () => ask(tool, args, title) } }))];
+    }
+    const { json, text } = parsed(entry);
+    if (!json) return [head, el("pre", { class: "text", text: String(text).slice(0, 4000) })];
+    if (json.error) return [head, el("div", { class: "notice warning", text: json.message || json.error })];
+    const pins = Object.keys(json.pins || {}).length;
+    const under = answeredUnder(tool, args, json);
+    // list_variants has named another active variant since: this answer is not its.
+    const moved = under && view.active && !view.variantsError && !sameVariant(under, view.active);
+    return [head,
+      el("p", { class: "help small", text: under
+        ? `As the active variant when asked, ${under}, shows it (not necessarily a or b).`
+        : "As the active variant when asked shows it (list_variants did not name it; not necessarily a or b)." }),
+      moved ? el("div", { class: "notice warning", text: `The active variant is now ${view.active}: Ask again for its values.` }) : null,
+      Shell.facts([
+        ["Fitted", json.dnp ? "no: Not Fitted in the active variant" : "yes, in the active variant"],
+        ["Value", json.value], ["Description", json.description], ["MPN", json.mpn], ["Sheet", json.sheet],
+        ["Sheet designator", json.logical_refdes],
+        ["Pins", pins ? String(pins) : null],
+      ]),
+      json.variant_changes ? [el("h3", { text: "What the active variant changes" }), changesFacts(json.variant_changes)]
+        : el("p", { class: "muted small", text: "The active variant does not change this part's values." }),
+      el("div", { class: "btn-row" }, el("button", { type: "button", class: "btn", text: "Ask again",
+        title: "The active variant may have changed: ask get_component again",
+        on: { click: () => askAgain(tool, args, title) } }))];
+  }
+
+  function identityFacts(identity) {
+    if (!identity) return el("p", { class: "muted", text: "not in the result" });
+    return Shell.facts([
+      ["Part", identity.part === "base" ? "the base part" : identity.same_as_base_part ? "the base part, re-selected as its alternate" : "an alternate part"],
+      ["Library reference", identity.lib_reference], ["Design item", identity.design_item_id],
+      ["Library", identity.library], ["Database table", identity.database_table],
+      ["Footprint", identity.footprint || (identity.same_footprint ? "the base part's" : null)],
+      ["Library copy", identity.library_copy === undefined ? null : identity.library_copy ? "in the .PrjPcbVariants file" : "not found"],
+      ["Library error", identity.library_error],
+      ["Description", identity.description], ["Comment", identity.comment], ["Value", identity.value],
+      ["Link", identity.link ? Object.entries(identity.link).map(([key, value]) => `${key}=${value}`).join(", ") : null],
+    ]);
+  }
+
+  function notFittedIn(designator) {
+    if (!view.variants) return null;
+    const names = view.variants.filter((variant) => (variant.dnp_components || []).includes(designator)).map((variant) => variant.name);
+    return names.length ? names.join(", ") : "no variant";
+  }
+
+  function partPane(rows) {
+    const data = view.data;
+    const first = rows[0];
+    const designator = first.designator;
+    const fitted = rows.find((row) => row._kind === "fitted");
+    const title = designator !== undefined ? designator : `Variant parameter ${first.parameter}`;
+    const sideName = { a: data.a, b: data.b };
+    ui.closeButton = el("button", { type: "button", class: "btn", text: "Close", on: { click: closeDetails } });
+    const blocks = [el("div", { class: "row" }, el("h2", { text: title }), ui.closeButton)];
+    if (designator !== undefined) {
+      blocks.push(el("div", { class: "summary" },
+        ["a", "b"].map((side) => [el("span", { class: "badge muted", text: `${side}: ${sideName[side]}` }), " ",
+          fittedBadge(fitted ? fitted[side] === "fitted" : true), " "])));
+      if (!fitted) blocks.push(el("p", { class: "muted small", text: "Fitted in both (a part Not Fitted in both is left out of the comparison)." }));
+    }
+    // Each difference as a short list (a, b, base): readable in the narrow pane.
+    blocks.push(el("h3", { text: plural(rows.length, "difference") }));
+    blocks.push(el("div", { class: "diffs" }, rows.map((row) => el("div", { class: "diff" },
+      el("h4", {}, kindBadge(row._kind), " ", row._what),
+      Shell.facts([[`a: ${data.a}`, cell(row, "a")], [`b: ${data.b}`, cell(row, "b")], ["Base design", baseCell(row)]])))));
+    const alternate = rows.find((row) => row._kind === "alternate_parts");
+    if (alternate) {
+      blocks.push(el("div", { class: "sides" },
+        ["a", "b"].map((side) => el("div", {}, el("h3", { text: `Part in ${side}: ${sideName[side]}` }), identityFacts(alternate[side])))));
+    } else if (fitted && fitted.fitted_as_alternate) {
+      blocks.push(el("h3", { text: `Alternate part in ${fitted.a === "fitted" ? data.a : data.b}` }), identityFacts(fitted.fitted_as_alternate));
+    }
+    if (designator !== undefined) {
+      blocks.push(Shell.facts([["Not Fitted in", notFittedIn(designator)]], "facts section-gap"));
+      blocks.push(serverSection(designator));
+    }
+    return blocks;
+  }
+
+  function serverSection(designator) {
+    const head = el("h3", { text: "From the server" });
+    if (!canCall()) {
+      return [head, el("p", { class: "muted", text: "This host does not let the view call tools: ask Claude for the part (get_component)." })];
+    }
+    if (view.closed) return [head, el("p", { class: "muted", text: "The view was closed: it asks the server nothing more." })];
+    if (unbound()) {
+      // get_component needs the netlist, which this comparison was made without.
+      return [head, el("p", { class: "muted", text: "This comparison was made without a netlist (designators as stored in the .PrjPcb), and get_component needs one: ask Claude to load the netlist, then compare again." })];
+    }
+    if (/[?(]/.test(designator)) {
+      return [head, el("p", { class: "muted", text: "This designator is the one stored in the .PrjPcb (no netlist): get_component does not know it." })];
+    }
+    const label = `get_component ${designator}`;
+    const args = { refdes: designator };
+    ui.askButton = el("button", { type: "button", class: "btn", text: `${label} (active variant)`,
+      title: `Ask get_component for ${designator}: the active variant's values`,
+      on: { click: () => ask("get_component", args, label) } });
+    return [head,
+      el("p", { class: "help", text: `get_component shows the part as the ACTIVE variant${view.active ? `, ${view.active}${activeRole()},` : ""} has it, not as a or b; the view never switches the active variant.` }),
+      el("div", { class: "btn-row" }, ui.askButton),
+      ...view.asked.map(([tool, askedArgs, askedLabel]) => answer(tool, askedArgs, askedLabel))];
+  }
+
+  /** Redraw the details; a button that is gone (Ask again, Retry: "Asking…" now) hands
+   *  keyboard focus to the part's get_component button. */
+  function renderPane() {
+    if (ui.pane) Shell.keepFocus(ui.pane, drawPane, () => ui.askButton);
+  }
+
+  function drawPane() {
+    clear(ui.pane);
+    ui.askButton = null;
+    ui.closeButton = null;
+    const rows = view.selected ? rowsOf().filter((row) => row._part === view.selected) : [];
+    ui.pane.classList.toggle("idle", !rows.length);
+    if (ui.split) ui.split.classList.toggle("solo", rows.length > 0 && compactHost());
+    if (!rows.length) {
+      Shell.append(ui.pane, [
+        el("h2", { text: "Select a difference" }),
+        el("p", { class: "help", text: "Click a row (or move to it and press Enter) for every difference of that part across a, b and the base design, and its alternate part." }),
+        el("p", { class: "help", text: !canCall()
+          ? "This host does not let the view call tools: ask Claude in the conversation for a part."
+          : unbound() ? "Without a netlist get_component cannot answer, so the view does not ask it."
+            : "Its button asks get_component, which shows the part as the ACTIVE variant has it." }),
+        el("p", { class: "help", text: "Keys: Up and Down move between rows and group headers, Enter selects or opens and closes a group, Left and Right close and open a group, Esc clears." }),
+      ]);
+      return;
+    }
+    Shell.append(ui.pane, partPane(rows));
+  }
+
+  // ---------- documentation and notes ----------
+
+  function listCell(items, more) {
+    if (!(items || []).length) return el("span", { class: "muted", text: "none" });
+    return el("div", { class: "lines" }, items.map((item) => el("span", { text: item })),
+      more && more > items.length ? el("span", { class: "muted", text: `${more - items.length} more` }) : null);
+  }
+
+  function sideBadges(name) {
+    const data = view.data;
+    return [sameVariant(name, data.a) ? el("span", { class: "badge info", text: "a" }) : null,
+      sameVariant(name, data.b) ? el("span", { class: "badge info", text: "b" }) : null,
+      view.active && sameVariant(name, view.active) ? el("span", { class: "badge muted", text: "active" }) : null];
+  }
+
+  function findingsCount() {
+    const docs = view.data && view.data.documentation;
+    if (!docs) return null;
+    return (docs.per_variant || []).reduce((total, row) => total + (row.outputs_missing || []).length, 0);
+  }
+
+  function staleRows() {
+    const stale = view.data.stale_variant_entries || {};
+    const rows = [];
+    for (const side of ["a", "b"]) {
+      // a and b the same variant: its entries once.
+      if (side === "b" && stale.a && sameVariant(view.data.a, view.data.b)) continue;
+      for (const entry of stale[side] || []) rows.push({ ...entry, variant: view.data[side], side });
+    }
+    return rows;
+  }
+
+  /** The variants whose stale entries reach compare_variants' cap (it may have cut them). */
+  function staleCapped() {
+    const stale = view.data.stale_variant_entries || {};
+    const sides = sameVariant(view.data.a, view.data.b) ? ["a"] : ["a", "b"];
+    return sides.filter((side) => (stale[side] || []).length >= STALE_SHOWN).map((side) => view.data[side]);
+  }
+
+  /** The stale entries' count as known: "at least 20" when a side reached the cap. */
+  function staleCount() {
+    const count = staleRows().length;
+    return staleCapped().length ? `at least ${count}` : String(count);
+  }
+
+  function documentationBlock() {
+    const data = view.data;
+    const docs = data.documentation;
+    if (!docs) {
+      return el("div", { class: "pane" }, el("h2", { text: "Documentation: not known" }), el("p", { text: FIRST_PAGE_NOTE }));
+    }
+    const per = docs.per_variant || [];
+    const missing = per.filter((row) => (row.outputs_missing || []).length);
+    // The findings of a and b are listed; the other variants' are counted (and in the table).
+    const compared = (row) => sameVariant(row.variant, data.a) || sameVariant(row.variant, data.b);
+    const listed = missing.filter(compared);
+    const others = missing.filter((row) => !compared(row));
+    const otherCount = others.reduce((total, row) => total + row.outputs_missing.length, 0);
+    const block = el("div", { class: "pane" },
+      el("h2", { text: "Documentation per variant" }),
+      el("p", { class: "help small", text: docs.note }),
+      docs.outjob_error ? Shell.notice("error", `The OutJobs could not be read: ${docs.outjob_error}`) : null,
+      Shell.facts([["OutJobs read", String(docs.outjobs)],
+                   ["On the base design", docs.outputs_on_base_design ? `${plural(docs.outputs_on_base_design, "output")} set to ${BASE}` : null]]),
+      el("h3", { class: "section-gap", text: missing.length ? `Findings: ${plural(findingsCount(), "output")} missing` : "Findings: none" }),
+      listed.length ? el("ul", { class: "findings" }, listed.flatMap((row) => row.outputs_missing.map((role) =>
+        el("li", {}, Shell.levelBadge("warning", "missing"), sideBadges(row.variant), " ",
+          `No connected ${ROLE_LABEL[role] || role} output is set to ${row.variant}.`)))) : null,
+      missing.length && !listed.length && per.some(compared)
+        ? el("p", { class: "muted", text: `${per.filter(compared).map((row) => row.variant).join(" and ")}: every output found.` }) : null,
+      others.length ? el("p", { class: "help", text: `The project's other variants: ${plural(otherCount, "output")} missing in ${others.map((row) => `${row.variant} (${row.outputs_missing.length})`).join(", ")}; see the table.` }) : null,
+      missing.length ? null : el("p", { class: "muted", text: "Every variant has a connected BOM, pick-and-place and assembly-drawing output set to it." }),
+      el("h3", { text: "Outputs per variant" }),
+      Shell.table({
+        label: "Outputs per variant", ownFilter: false, rows: per,
+        empty: "The project defines no variant.",
+        columns: [
+          { key: "variant", label: "Variant", cls: "c-name", render: (row) => [row.variant, " ", sideBadges(row.variant)] },
+          ...Object.keys(ROLE_LABEL).map((role) => ({
+            key: role, label: ROLE_LABEL[role], cls: "c-name", value: (row) => (row[role] || []).join(" "),
+            render: (row) => listCell(row[role], row[COUNT_KEY[role]]) })),
+          { key: "outputs_missing", label: "Missing", value: (row) => (row.outputs_missing || []).length,
+            render: (row) => ((row.outputs_missing || []).length
+              ? el("div", { class: "lines" }, row.outputs_missing.map((role) => Shell.levelBadge("warning", ROLE_LABEL[role] || role)))
+              : Shell.levelBadge("ok", "none")) },
+          { key: "draftsman_set_to_variant", label: "Draftsman set to it", cls: "c-name", hidden: !docs.draftsman,
+            value: (row) => (row.draftsman_set_to_variant || []).join(" "), render: (row) => listCell(row.draftsman_set_to_variant) },
+          { key: "draftsman_notes_mention", label: "Notes name it", cls: "c-name", hidden: !docs.draftsman,
+            value: (row) => (row.draftsman_notes_mention || []).join(" "), render: (row) => listCell(row.draftsman_notes_mention) },
+        ],
+      }).el);
+    const drawings = Object.entries(docs.draftsman || {}).map(([drawing, info]) => ({ drawing, ...info }));
+    if (drawings.length) {
+      block.appendChild(el("h3", { class: "section-gap", text: "Draftsman drawings (info)" }));
+      block.appendChild(Shell.table({
+        label: "Draftsman drawings", ownFilter: false, rows: drawings,
+        columns: [
+          { key: "drawing", label: "Drawing", cls: "c-name" },
+          { key: "readable", label: "Read", value: (row) => (row.readable ? "yes" : "no: unreadable") },
+          { key: "drawing_variant", label: "Drawing's variant", cls: "c-name" },
+          { key: "view_variants", label: "Views set to", cls: "c-name", value: (row) => (row.view_variants || []).join(", ") },
+          { key: "bom_table_variants", label: "BOM tables set to", cls: "c-name", value: (row) => (row.bom_table_variants || []).join(", ") },
+          { key: "prints_variant_name", label: "Prints the variant name", value: (row) => (row.readable ? (row.prints_variant_name ? "yes" : "no") : "") },
+          { key: "mentions", label: "Notes name", cls: "c-name", value: (row) => (row.mentions || []).join(", ") },
+        ],
+      }).el);
+    }
+    const stale = staleRows();
+    block.appendChild(el("h3", { class: "section-gap", text: `Stale variant entries (${staleCount()})` }));
+    if (stale.length) {
+      block.appendChild(el("p", { class: "help small", text: data.stale_variant_entries_note || "" }));
+      const capped = staleCapped();
+      if (capped.length) {
+        block.appendChild(Shell.notice("info", `compare_variants lists the first ${STALE_SHOWN} stale entries of a variant and no count: ${capped.join(" and ")} may have more (check_bom and get_bom report them all).`));
+      }
+      block.appendChild(Shell.table({
+        label: "Stale variant entries", ownFilter: false, rows: stale,
+        columns: [
+          { key: "variant", label: "Variant", cls: "c-name", render: (row) => [row.variant, " ", el("span", { class: "badge info", text: row.side })] },
+          { key: "designator", label: "Designator", cls: "c-name" },
+          { key: "issue", label: "Issue", value: (row) => String(row.issue || "").replace(/_/g, " "),
+            render: (row) => Shell.levelBadge("warning", String(row.issue || "").replace(/_/g, " ")) },
+          { key: "detail", label: "Detail", cls: "c-msg" },
+        ],
+      }).el);
+    } else {
+      block.appendChild(el("p", { class: "muted", text: `No stale variation line in ${sameVariant(data.a, data.b) ? data.a : `${data.a} or ${data.b}`}.` }));
+    }
+    return block;
+  }
+
+  function variantsTable() {
+    if (!canCall()) return el("p", { class: "muted", text: "This host does not let the view call list_variants." });
+    if (view.variantsError) return el("p", { class: "muted", text: `list_variants failed: ${view.variantsError}` });
+    if (!view.variants) return el("p", { class: "muted", text: "Asking list_variants…" });
+    return Shell.table({
+      label: "The project's variants", ownFilter: false, rows: view.variants,
+      columns: [
+        { key: "name", label: "Variant", cls: "c-name", render: (row) => [row.name, " ", sideBadges(row.name)] },
+        { key: "dnp_count", label: "Not Fitted", numeric: true },
+        { key: "varied_components", label: "Varied parts", numeric: true, value: (row) => (row.varied_components || []).length,
+          text: (row) => (row.varied_components || []).join(" ") },
+        { key: "varied_parameter_count", label: "Varied parameters", numeric: true, value: (row) => row.varied_parameter_count || 0 },
+        { key: "alternate_parts", label: "Alternate parts", cls: "c-name",
+          value: (row) => (row.alternate_parts || []).map((item) => `${item.designator} ${item.lib_reference || ""}${item.library_error ? " (library not read)" : ""}`).join(", ") },
+        { key: "allow_fabrication", label: "Varies fabrication", value: (row) => (row.allow_fabrication ? "yes" : "") },
+        { key: "parameters", label: "Variant parameters", cls: "c-name",
+          value: (row) => Object.entries(row.parameters || {}).map(([key, value]) => `${key}=${value}`).join(", ") },
+        { key: "is_active", label: "Active", hidden: true, value: (row) => (row.is_active ? "yes" : "") },
+      ],
+    }).el;
+  }
+
+  function notesBlock() {
+    const data = view.data;
+    return el("div", { class: "pane" },
+      el("h2", { text: "Notes" }),
+      el("p", { class: "help small", text: APPROX_NOTE }),
+      Shell.facts([
+        ["Binding", data.binding === "unique_id" ? "variations bound to the parts by UniqueId, like the BOM"
+          : "no netlist: the designators stored in the .PrjPcb, base values not known"],
+        ["Read", `${plural(view.pages, "page")} of compare_variants${view.incomplete ? `, then stopped: ${view.stopReason}` : ""}`],
+        ["Page size", data.differences_limited_to ? `compare_variants cut its pages to ${data.differences_limited_to} differences to fit its size limit` : null],
+      ], "facts section-gap"),
+      (data.notes || []).length ? [el("h3", { text: "From compare_variants" }), el("ul", {}, data.notes.map((note) => el("li", { text: note })))]
+        : el("p", { class: "muted", text: data.offset > 0 ? FIRST_PAGE_NOTE : "" }),
+      el("h3", { text: "The project's variants (list_variants)" }),
+      variantsTable(),
+      el("p", { class: "help small section-gap", text: READ_ONLY_NOTE }));
+  }
+
+  // ---------- page ----------
+
+  function summaryBadges() {
+    const data = view.data;
+    const summary = data.summary || {};
+    return [
+      el("span", { class: "badge", text: plural(data.differences_total || 0, "difference") }),
+      ...KINDS.filter((kind) => summary[kind]).map((kind) => el("span", { class: "badge muted", title: KIND_LABEL[kind],
+        text: kind === "fitted" ? `${summary[kind]} fitted` : plural(summary[kind], KIND_NOUN[kind]) })),
+    ];
+  }
+
+  function chipRow() {
+    const rows = rowsOf();
+    const kinds = KINDS.filter((kind) => rows.some((row) => row._kind === kind));
+    if (kinds.length < 2) return null;
+    return el("div", { class: "filters" }, Shell.chips({
+      label: "Kind", items: kinds.map((kind) => ({ id: kind, label: KIND_SHORT[kind], count: rows.filter((row) => row._kind === kind).length })),
+      selected: view.kindsOn, onChange: (on) => {
+        view.kindsOn = on.size === kinds.length ? null : on;
+        if (ui.table) ui.table.setFilter(rowFilter);
+        if (ui.filteredBadge) ui.filteredBadge.hidden = !view.kindsOn;
+      },
+    }).el);
+  }
+
+  function emptyBlock() {
+    const data = view.data;
+    const same = sameVariant(data.a, data.b);
+    return el("div", {},
+      Shell.state("empty", "No differences",
+        same ? `a and b are the same variant (${data.a}): pick another variant to compare.`
+          : `${data.a} and ${data.b} fit the same parts with the same values, parameters and parts, and the same variant parameters.`),
+      el("p", { class: "approx section-gap", text: "The documentation check and any stale variant entries are in the Documentation tab." }));
+  }
+
+  function renderTab() {
+    clear(ui.content);
+    // The details pane belongs to the differences: the other tabs take the whole width.
+    if (ui.split) ui.split.classList.toggle("split", view.tab === "differences");
+    if (ui.pane) ui.pane.hidden = view.tab !== "differences";
+    if (view.tab === "differences") {
+      if (!rowsOf().length && !view.incomplete) {
+        ui.table = null;
+        ui.content.appendChild(emptyBlock());
+        return;
+      }
+      ui.table = differenceTable();
+      ui.table.setQuery(view.query);
+      if (view.selected) ui.table.select((other) => other._part === view.selected);
+      ui.content.appendChild(ui.table.el);
+      return;
+    }
+    ui.table = null;
+    if (view.tab === "documentation") ui.content.appendChild(documentationBlock());
+    else ui.content.appendChild(notesBlock());
+  }
+
+  function tabItems() {
+    // Without the first page the findings and stale entries are not known (not 0).
+    const findings = findingsCount();
+    const stale = findings === null ? 0 : staleRows().length;
+    const staleText = stale && staleCapped().length ? `${stale}+` : String(stale);
+    const extra = findings === null ? "?" : `${findings}${stale ? ` + ${staleText} stale` : ""}`;
+    return [
+      { id: "differences", label: `Differences (${rowsOf().length})` },
+      { id: "documentation", label: `Documentation (${extra})` },
+      { id: "notes", label: "Notes" },
+    ];
+  }
+
+  function renderAll() {
+    const data = view.data;
+    ui.content = el("div", { class: "content" });
+    ui.pane = el("aside", { class: "pane", "aria-label": "Details" });
+    const split = el("div", { class: "split" }, ui.content, ui.pane);
+    ui.split = split;
+    const filter = Shell.filterBox({
+      placeholder: "Filter parts, parameters, values", label: "Filter the differences", value: view.query,
+      onInput: (text) => {
+        view.query = text;
+        if (ui.table) ui.table.setQuery(text);
+      },
+    });
+    const switcher = Shell.segmented({ label: "Group by", items: GROUPINGS, current: view.groupBy, onChange: regroup });
+    const groupTools = el("span", { class: "toolbar" },
+      el("button", { type: "button", class: "btn", text: "Expand all", on: { click: () => ui.table && ui.table.expandAll() } }),
+      el("button", { type: "button", class: "btn", text: "Collapse all", on: { click: () => ui.table && ui.table.collapseAll() } }));
+    const chips = chipRow();
+    const roomy = roomyHere();
+    if (view.filtersOpen === null) view.filtersOpen = roomy;
+    // "filtered" while a kind chip is off (the chips update it): the disclosure may be closed.
+    ui.filteredBadge = el("span", { class: "badge info", text: "filtered", hidden: !view.kindsOn });
+    const tableTools = el("details", { class: "filters-box", open: view.filtersOpen },
+      el("summary", { text: "Group and filter" }, ui.filteredBadge),
+      el("div", { class: "toolbar" }, switcher.el, groupTools), chips);
+    tableTools.addEventListener("toggle", () => { view.filtersOpen = tableTools.open; });
+    const filterRow = el("div", { class: "toolbar" }, filter);
+    const tabBar = Shell.tabs(tabItems(), (id) => {
+      view.tab = id;
+      tableTools.hidden = id !== "differences";
+      filterRow.hidden = id !== "differences";
+      view.selected = null;
+      view.selectedRow = null;
+      view.asked = [];
+      renderTab();
+      renderPane();
+    }, view.tab, split);
+    ui.tabBar = tabBar;
+    tableTools.hidden = view.tab !== "differences";
+    // One full-screen button for the page's life: it follows the host's display mode.
+    ui.displayButton = ui.displayButton || Shell.displayModeButton((error) => app.prepend(Shell.notice("error", error.message)));
+    filterRow.hidden = view.tab !== "differences";
+    const warnings = [];
+    if (view.incomplete) {
+      warnings.push(Shell.notice("warning", `Read ${plural(view.pages, "page")} of compare_variants, then stopped: ${view.stopReason}. ` +
+        `The table holds ${rowsOf().length} of the ${data.differences_total} differences; the counts above are the whole comparison's.`));
+    }
+    if (!canCall()) {
+      warnings.push(Shell.notice("info", "This host does not let the view call tools: more pages, the variant picker and the part details are off."));
+    }
+    if (view.warnings.length) warnings.push(Shell.notice("warning", `The result is not quite the shape this view reads: ${view.warnings.slice(0, 3).join("; ")}.`));
+    if (view.listWarnings.length) warnings.push(Shell.notice("warning", `list_variants is not quite the shape this view reads: ${view.listWarnings.slice(0, 3).join("; ")}.`));
+    // The picker: open where there is room, else behind a one-line disclosure (a short or
+    // narrow host), which the user opens or closes.
+    ui.picker = el("section", { class: "picker", "aria-label": "Variants to compare" });
+    if (view.pickerOpen === null) view.pickerOpen = roomy;
+    const pickerBox = el("details", { class: "filters-box", open: view.pickerOpen },
+      el("summary", { text: "Compare other variants" }), ui.picker);
+    pickerBox.addEventListener("toggle", () => { view.pickerOpen = pickerBox.open; });
+    clear(app).append(
+      el("div", { class: "head" },
+        el("h1", { text: "Variants" }),
+        el("span", { class: "vs" }, el("span", { class: "badge info", text: "a" }), el("span", { class: "name", text: data.a }),
+          el("span", { class: "muted", text: "against" }),
+          el("span", { class: "badge info", text: "b" }), el("span", { class: "name", text: data.b })),
+        el("span", { class: "summary" }, summaryBadges()),
+        el("span", { class: "grow" }), ui.displayButton),
+      // On a short or narrow host this line is in the Notes tab only (room for the table).
+      ...(roomy ? [el("p", { class: "approx", text: APPROX_NOTE })] : []),
+      ...warnings,
+      pickerBox,
+      filterRow,
+      tableTools,
+      tabBar.el,
+      split);
+    drawPicker();
+    renderTab();
+    renderPane();
+  }
+
+  // ---------- host ----------
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && view.selected && !event.defaultPrevented) closeDetails();
+  });
+  Shell.on("toolInput", (args) => {
+    view.args = args || {};
+    view.argsKnown = true;
+    if (!view.data && !view.busy) showState("loading", "Comparing the variants", "compare_variants is reading the project's variants.");
+  });
+  Shell.on("toolInputPartial", () => {
+    if (!view.data && !view.busy) showState("loading", "Comparing the variants", "Waiting for the tool's arguments.");
+  });
+  Shell.on("toolResult", (result) => {
+    view.busy = true;
+    return loadResult(result);
+  });
+  Shell.on("toolCancelled", (reason) => {
+    if (!view.data) showState("info", "The compare_variants call was cancelled", reason || "No result to show.");
+  });
+  Shell.on("teardown", () => {
+    view.closed = true;
+  });
+  // The host's size changed: whether the details take the table's place may too.
+  Shell.on("context", () => {
+    if (view.selected && ui.pane) renderPane();
+  });
+
+  showState("loading", "Connecting to the host", "");
+  Shell.connect({ name: "altium-copilot-kc variant comparison", version: "1.0.0" })
+    .then(() => {
+      if (!view.data && !view.busy) showState("loading", "Waiting for compare_variants", "The comparison appears when the tool's result arrives.");
+    })
+    .catch((error) => showState("error", "This view needs a host that shows MCP Apps", error.message));
+})();
+</script>
+</body>
+</html>
