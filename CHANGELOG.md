@@ -6,6 +6,67 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [Unreleased]
 
 ### Added
+- `get_active_bom` (roadmap #43): the project's ActiveBOM document (`.BomDoc`) read
+  offline (`server/parsers/bom_doc.py`, `server/services/active_bom.py`), so the copilot
+  sees the engineer's sourcing decisions; netlist required. No supplier is queried: stock,
+  price and lifecycle are what ActiveBOM cached, and every one comes with its cache date.
+  - Parser: one record per CRLF line of '|'-separated KEY=VALUE fields, each line decoded
+    on its own (UTF-8 when valid, else Windows-1252; a %UTF8% key wins). A line that is no
+    record continues the previous record with its line break, and the joined text is then
+    split into fields, so the fields after a multi-line description (comment, note, line
+    number, parameters) are read; a fragment that is no KEY= continues the previous value
+    ('|' inside a description). BOM header, the option records, CatalogItem (one per line)
+    with its PartChoice (P<n>/Q<n> price breaks and the breaks' other <letters><n> fields
+    kept as written, stock, lifecycle, LASTUPDATEDAT as an OLE date; a negative stock is
+    unknown, and a part choice with no supplier or SKU caches no stock), Solution and
+    PartChoiceGroups records; unknown records and keys are kept raw, and a number that is
+    not finite (NAN, INF) is missing, so the output is always strict JSON. A 2.5 MB file
+    parses in about 0.05 s.
+  - The BomDoc to read: the project's only one, else the one the OutJobs' BOM outputs
+    name, else the first listed; name= picks another, also one in the folder but not in
+    the project (said so). No BomDoc, one missing on disk or unreadable: an error that
+    says which.
+  - The join: a line covers the compiled BOM parts whose Design Item ID is its
+    DESIGNITEMID; lines sharing one Design Item ID (ActiveBOM splits an item whose parts
+    differ in Comment, Value, Footprint or other parameters) are told apart by the values
+    stored in COMPONENTPARAMETERS; a Workspace item saved under another revision (a 1-2
+    digit suffix after an item number of 3 or more digits) matches as other_revision. The
+    variant's Not Fitted parts and parameter variations apply as in get_bom, and an
+    alternate part joins by its own Design Item ID. A line without parts says why: no
+    part has its ID, only parts outside the BOM (compile-masked, not compiled, no-BOM)
+    have it, a split line whose parts matched its sibling, or the variant's alternate
+    replaces them. On 56 private
+    projects' BomDocs 3388 of 3466 BOM parts joined a line (the rest are mostly in BomDocs saved before
+    the sheets); of the 89 lines without parts, 48 name an ID no part has, 37 an ID only
+    on parts outside the BOM and 4 are split lines whose parts matched a sibling. Checked against the 52
+    BOMs their OutJobs exported from ActiveBOM: 807 of 830 base-view rows hold exactly one
+    line's fitted parts, the MPN is the chosen solution's on 386 of 389 rows of lines with
+    part choices and the parts' MPN parameter on 279 of 306 rows of lines without, the
+    manufacturer or one of its aliases on 360 of 374 rows, the Line # on 250 of 275 rows
+    of files not older than the BomDoc (24 of the 25 misses in BomDocs that give one number
+    to several lines), and an unnumbered line exports an empty Line #.
+  - Output: header (production quantity, currency, target and actual unit price,
+    favourite suppliers, solutions per item, risky-solution filtering, custom columns,
+    column aliases, export options; a BomDoc stores no variant), lines in line-number
+    order with their design parts, quantity per board and at the production quantity
+    (production_quantity= for another number of boards), the chosen solution and cache
+    dates; sections=solutions adds every ranked solution
+    (higher RANK first; a Solution record's rank wins; pinned suppliers first) with each
+    part choice's SKU, stock and enough_stock for the need, unit price at the need (the
+    lowest price of the breaks the need reaches, as a part choice can hold several price
+    tables back to back; under the first break below_minimum_order, and extended_price
+    buys that break's quantity), price breaks and lifecycle. The chosen solution's best
+    price comes from offers the need can buy (best_price_below_minimum_order when none
+    can), and its stock_total counts each supplier once (its largest figure). non_pcb
+    lines (BOM items with no design parts) and the join report (parts without a line,
+    lines whose parts are gone and why, other revisions, ties, line numbers the BomDoc
+    gives to several lines, chosen MPNs that differ from the parts' MPN parameter). A
+    line without part choices takes its parts' MPN as a component_parameters solution, as
+    ActiveBOM's export does. line= gives one line by number, Design Item ID (an
+    unnumbered line), ref ('#12', the line's position in the file, given to every line
+    whose number or ID names another line too) or designator (line_ambiguous lists the
+    refs); pages and shrinks to the result limit. No total BOM cost and no currency
+    conversion.
 - `get_constraints_brief` and `generate_rule_file` (roadmap #48): a schematic-to-layout
   constraints brief and the files to apply an agreed constraint plan, offline
   (`server/services/constraints_brief.py`). Neither edits a design file.
@@ -3015,6 +3076,48 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
   uncommitted `.PcbDoc`, in about 0.3 s per clone
 
 ### Changed
+- `check_bom`: with a BomDoc in the project, BOMDOC_CHECKS run too (`checks_run` lists
+  them; without one the output is as before): lifecycle_risk (NRND, EOL, last-time-buy or
+  Obsolete on the chosen solution: warning; on an alternate only: info), single_source
+  (lines with one manufacturer: one info finding), no_solution (no part choice and no MPN
+  parameter: warning; one info when under half the lines have part choices),
+  out_of_stock_at_qty (no supplier of the chosen solution had the production need in
+  stock: warning with the cache date), stale_cache (part choices cached over 365 days
+  ago: info), bomdoc_out_of_sync (parts without a line, lines without parts with the
+  reason, and lines saved for another revision of the parts' Workspace item: info; a
+  chosen MPN that differs from the parts' MPN parameter: warning), and
+  mpn_without_manufacturer and mpn_inconsistent over every ranked MPN (an MPN the
+  parameter check already reports is not repeated: its BomDoc lines are added to that
+  finding). A part whose line has a part choice counts as having an MPN for missing_mpn,
+  and missing_mpn no longer lists parts a no_solution warning names. out_of_stock_at_qty
+  counts only suppliers' offers and is info when no stock figure has a cache date; a
+  lifecycle_risk carries the cache date of the part choices that report it. A finding
+  about one line gives its line number and design_item_id (an unnumbered line is named
+  by its Design Item ID). BomDoc checks asked for on a project without a BomDoc are listed
+  in checks_not_run instead of reported as run. The header names the BomDoc and its cache
+  dates; a BomDoc that cannot be read, or that breaks the checks, leaves check_bom as
+  without it (bom_doc_error).
+- `get_bom`: active_bom=true adds each line's BomDoc line numbers and chosen solutions
+  (and the CSV columns BomDoc Line # and BomDoc MPN); without it the output is as before.
+- `verify_outputs`: a BOM generated from an ActiveBOM document is checked against that
+  BomDoc instead of leaving its part numbers unverified: Manufacturer Part Number against
+  the line's chosen solution (warning; on a line without part choices against the parts'
+  MPN parameter, field_mpn_parameter, info, as ActiveBOM does not always fall back to
+  it), Manufacturer against it and its aliases (info), Supplier and Supplier Part Number
+  against the chosen solution's part choices and Line # against the BomDoc's line number
+  (warnings; Line # info when the BomDoc gives a number to several lines). A BomDoc that
+  cannot be read keeps the old info, and the file row's bom_doc_not_read says why.
+- `package_for_xfn`: new tables bom_solutions (per line, solution and part choice:
+  manufacturer, MPN, supplier, SKU, stock, unit price at the production need with its
+  price break, below_minimum_order and extended_price, lifecycle and cache date, for the
+  active variant) and bom_non_pcb_lines; the other tables are unchanged.
+- Knock-on effects on projects with a BomDoc: `check_release_readiness`'s outputs_current
+  gate reads verify_outputs, so an ActiveBOM BOM file that differs from its BomDoc can
+  turn it from pass to warn; in `run_review_checklist`, REL-OUT-02 can move from yes to
+  needs_judgment for the same reason, BOM-DAT-01 counts a no_solution warning as a line
+  without a part number (and a no_solution info as part numbers kept elsewhere), and
+  BOM-DAT-02 sees the BomDoc's mpn_inconsistent findings. The review_bom hint for
+  BOM-DAT-01 now says ActiveBOM part choices count.
 - Placement scopes are decided on components: `pcb_rules` evaluates a component object
   (kind "component": IsComponent, IsSMTComponent and IsThruComponent by its holes,
   WithinRoom / TouchesRoom on its extent, Name = its designator; IsBGA and the like stay

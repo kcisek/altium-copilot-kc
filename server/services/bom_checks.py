@@ -19,7 +19,13 @@ CHECKS = (
     "no_footprint", "mpn_inconsistent", "mpn_without_manufacturer", "missing_mpn",
     "placeholder_description", "stale_variant_entry", "consolidation", "not_compiled",
 )
-_CHECK_RANK = {check: rank for rank, check in enumerate(CHECKS)}
+# Checks of the project's ActiveBOM document (services/active_bom.bom_doc_findings), run
+# only when it has one.
+BOMDOC_CHECKS = (
+    "lifecycle_risk", "single_source", "no_solution", "out_of_stock_at_qty", "stale_cache",
+    "bomdoc_out_of_sync",
+)
+_CHECK_RANK = {check: rank for rank, check in enumerate(CHECKS + BOMDOC_CHECKS)}
 _SEVERITY_RANK = {"error": 0, "warning": 1, "info": 2}
 FINDING_LIMIT = 100
 MPN_COVERAGE = 0.5  # below this share of parts with an MPN, MPNs are not kept here
@@ -116,23 +122,30 @@ def _finding(check, severity, issue, designators=(), **fields) -> dict:
     return out
 
 
-def _check_mpn(parts: list[BomPart], findings: list[dict]) -> None:
-    # Mechanical parts often have none, and 'N/A' says a part has none on purpose.
+def _check_mpn(parts: list[BomPart], findings: list[dict],
+               chosen_in_bom_doc: set[str] | None = None) -> None:
+    # Mechanical parts often have none, and 'N/A' says a part has none on purpose. With
+    # a BomDoc read, a part whose line has a part choice there has an MPN too.
+    chosen = chosen_in_bom_doc or set()
     counted = [part for part in parts if needs_mpn(part)]
-    with_mpn = [part for part in counted if part.mpn]
+    with_mpn = [part for part in counted if part.mpn or part.designator.upper() in chosen]
     coverage = len(with_mpn) / len(counted) if counted else 1.0
     if counted and coverage < MPN_COVERAGE:
+        where = (
+            "parameter or a part choice in the BomDoc, so MPNs are not kept in the "
+            "schematic or ActiveBOM here" if chosen_in_bom_doc is not None else
+            "parameter, so MPNs are not kept in the schematic here (perhaps in ActiveBOM, "
+            "which is not read)")
         findings.append(_finding(
             "missing_mpn", "info",
             f"Only {round(coverage * 100)}% of the parts carry a manufacturer part number "
-            "parameter, so MPNs are not kept in the schematic here (perhaps in ActiveBOM, "
-            "which is not read): the BOM groups those parts by Comment and footprint.",
+            f"{where}: the BOM groups those parts by Comment and footprint.",
             coverage_percent=round(coverage * 100),
         ))
     else:
         groups: dict[tuple, list[BomPart]] = defaultdict(list)
         for part in counted:
-            if not part.mpn:
+            if not part.mpn and part.designator.upper() not in chosen:
                 groups[(part.comment or part.value or "", part.footprint or "")].append(part)
         for (comment, footprint), members in groups.items():
             findings.append(_finding(
@@ -275,16 +288,24 @@ def run_bom_checks(
     checks: list[str] | None = None,
     offset: int = 0,
     limit: int = FINDING_LIMIT,
+    bom_doc_findings: list[dict] | None = None,
+    chosen_in_bom_doc: set[str] | None = None,
 ) -> dict:
+    """The checks over a variant's BOM parts. bom_doc_findings (services/active_bom's,
+    given when the project's BomDoc was read) add BOMDOC_CHECKS to the checks run;
+    chosen_in_bom_doc are the designators (upper case) whose BomDoc line has a part
+    choice, which then count as having an MPN."""
     requested = [check.strip().lower() for check in checks or [] if check.strip()]
-    unknown = [check for check in requested if check not in CHECKS]
+    unknown = [check for check in requested if check not in CHECKS + BOMDOC_CHECKS]
     if unknown:
         return {"error": "invalid_checks",
-                "message": f"Unknown checks {unknown}; use {list(CHECKS)}."}
+                "message": f"Unknown checks {unknown}; use {list(CHECKS)}, and with an "
+                           f"ActiveBOM document {list(BOMDOC_CHECKS)}."}
+    available = CHECKS + BOMDOC_CHECKS if bom_doc_findings is not None else CHECKS
     fitted = [part for part in parts if part.fitted]
     findings: list[dict] = []
     _check_parts(fitted, findings)
-    _check_mpn(fitted, findings)
+    _check_mpn(fitted, findings, chosen_in_bom_doc if bom_doc_findings is not None else None)
     _check_consistency(fitted, findings)
     _check_consolidation(fitted, findings)
     compiled = netlist.get("parts") or {}
@@ -328,7 +349,35 @@ def run_bom_checks(
             "masks, or sheets outside the project) and are not in the BOM.",
             uncompiled[:30], count=len(uncompiled),
         ))
-    wanted = set(requested or CHECKS)
+    if bom_doc_findings:
+        # A line no_solution names is not listed again part by part under missing_mpn.
+        named = {designator.upper() for finding in bom_doc_findings
+                 if finding["check"] == "no_solution" and finding["severity"] == "warning"
+                 for designator in finding.get("designators", [])}
+        for finding in findings:
+            if finding["check"] == "missing_mpn" and finding.get("designators"):
+                finding["designators"] = [d for d in finding["designators"]
+                                          if d.upper() not in named]
+        findings = [finding for finding in findings
+                    if not (finding["check"] == "missing_mpn" and "designators" in finding
+                            and not finding["designators"])]
+        # An MPN the parameter check already found inconsistent is not reported again
+        # from the BomDoc: its BomDoc lines are added to that finding.
+        reported = {(_fold(finding.get("mpn")), finding.get("field")): finding
+                    for finding in findings if finding["check"] == "mpn_inconsistent"}
+        for finding in bom_doc_findings:
+            same = reported.get((_fold(finding.get("mpn")), finding.get("field")))                 if finding["check"] == "mpn_inconsistent" else None
+            if same is None:
+                findings.append(finding)
+                continue
+            for key in ("lines", "unnumbered_lines"):
+                if finding.get(key):
+                    same[f"bom_doc_{key}"] = finding[key]
+    # A BomDoc check asked for on a project without a BomDoc is not run (said so).
+    not_run = {check: "needs an ActiveBOM document (.BomDoc) in the project"
+               for check in requested if check not in available}
+    run = [check for check in requested if check in available] if requested else list(available)
+    wanted = set(run)
     findings = [finding for finding in findings if finding["check"] in wanted]
     findings.sort(key=lambda finding: (
         _SEVERITY_RANK[finding["severity"]], _CHECK_RANK[finding["check"]], finding["issue"],
@@ -336,7 +385,7 @@ def run_bom_checks(
     severities = Counter(finding["severity"] for finding in findings)
     offset = max(0, int(offset or 0))
     result = {
-        "checks_run": list(requested or CHECKS),
+        "checks_run": run,
         "summary": dict(Counter(finding["check"] for finding in findings)),
         "severity_counts": {
             level: severities.get(level, 0) for level in ("error", "warning", "info")
@@ -348,4 +397,6 @@ def run_bom_checks(
     }
     if result["has_more"]:
         result["next_offset"] = offset + limit
+    if not_run:
+        result["checks_not_run"] = not_run
     return result

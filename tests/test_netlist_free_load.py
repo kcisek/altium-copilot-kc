@@ -43,6 +43,7 @@ NETLIST_TOOL_CALLS = {
     "get_sheet_context": lambda: main.get_sheet_context("sheet1"),
     "get_bom": lambda: main.get_bom(),
     "check_bom": lambda: main.check_bom(),
+    "get_active_bom": lambda: _get_active_bom(),
     "check_decoupling": lambda: main.check_decoupling(),
     "check_pull_resistors": lambda: main.check_pull_resistors(),
     "check_interfaces": lambda: main.check_interfaces(),
@@ -62,6 +63,16 @@ NETLIST_TOOL_CALLS = {
     "schematic_review": lambda: main.schematic_review(),
     "package_for_xfn": lambda: main.package_for_xfn(),
 }
+
+
+def _get_active_bom() -> str:
+    """get_active_bom on a BomDoc in the project folder that the project does not list
+    (the fixture's project lists none), read by name."""
+    if main._project is not None:
+        (Path(main._project["root_dir"]) / "Spare.BomDoc").write_bytes(
+            b"|RECORD=BOM|VERSION=2|PRODUCTIONQUANTITY=1\r\n|RECORD=Catalog|DBLINKFILEPATH=\r\n")
+    return main.get_active_bom(name="Spare.BomDoc")
+
 
 WORKING_TOOL_CALLS = {
     "get_board_info": lambda: main.get_board_info(),
