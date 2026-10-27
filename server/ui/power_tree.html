@@ -1,0 +1,1478 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!--@csp-->
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Power tree</title>
+<style>/*@shell.css*/</style>
+<style>
+/* Power tree view (roadmap #59): get_power_tree's sources, series parts, converters,
+   rails and loads, laid out in columns by depth. */
+:root {
+  --k-source: #1d7a46;
+  --k-switch: #1d5fd1;
+  --k-linear: #7a3fd1;
+  --k-other: #0e7c74;
+  --k-series: #6b7280;
+  --k-rail: #9aa1ad;
+  --link: #a3a9b4;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --k-source: #5cc58b; --k-switch: #7aa7f5; --k-linear: #b796f5; --k-other: #4fd1c5;
+    --k-series: #9ca3af; --k-rail: #6b7280; --link: #5d6370;
+  }
+}
+:root[data-theme="dark"] {
+  --k-source: #5cc58b; --k-switch: #7aa7f5; --k-linear: #b796f5; --k-other: #4fd1c5;
+  --k-series: #9ca3af; --k-rail: #6b7280; --link: #5d6370;
+}
+
+.head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 0 0 6px; }
+.head h1 { font-size: var(--fs-lg); margin: 0; font-weight: var(--fw-bold); }
+.summary { display: flex; flex-wrap: wrap; gap: 4px; }
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 10px; align-items: start; }
+@media (max-width: 760px) {
+  .layout { grid-template-columns: minmax(0, 1fr); }
+  /* Stacked under the diagram, the details panel keeps only its title until a selection. */
+  .panel.idle p { display: none; }
+}
+
+.canvas { border: 1px solid var(--c-line); border-radius: var(--radius); overflow: auto;
+          max-height: var(--pane-height); background: var(--c-bg); }
+.canvas svg { display: block; }
+.canvas svg text { font-family: var(--font); }
+
+.node { cursor: pointer; outline: none; }
+.node rect.box { fill: var(--c-bg); stroke: var(--c-border); stroke-width: 1; }
+.node rect.strip { fill: var(--k-rail); }
+.node.kind-source rect.strip { fill: var(--k-source); }
+.node.outlet rect.strip { fill: none; stroke: var(--k-source); stroke-width: 1.5; }
+.node.kind-series rect.strip { fill: var(--k-series); }
+.node.conv-switching rect.strip { fill: var(--k-switch); }
+.node.conv-linear rect.strip { fill: var(--k-linear); }
+.node.conv-other rect.strip { fill: var(--k-other); }
+.node.kind-series rect.box { fill: var(--c-bg2); }
+.node.kind-rail.unsupplied rect.box { stroke: var(--c-warning); stroke-dasharray: 4 3; }
+.node.outside rect.box { stroke-dasharray: 2 3; }
+.node text { fill: var(--c-text); font-size: 12px; }
+.node text.title { font-weight: var(--fw-bold); }
+.node text.sub { fill: var(--c-text3); font-size: 11px; }
+.node:hover rect.box { stroke: var(--c-text3); }
+.node:focus-visible rect.box { stroke: var(--c-ring); stroke-width: 2; }
+.node.selected rect.box { stroke: var(--c-ring); stroke-width: 2.5; }
+.node.match rect.box { fill: var(--c-info-bg); }
+.node.dim, .link.dim { opacity: .2; }
+.node .count circle { stroke: var(--c-bg); stroke-width: 1.5; }
+.node .count.warning circle { fill: var(--c-warning); }
+.node .count.info circle { fill: var(--c-info); }
+.node .count text { fill: var(--c-bg); font-size: 10px; font-weight: var(--fw-bold); }
+.node .toggle circle { fill: var(--c-bg); stroke: var(--c-border); }
+.node .toggle text { fill: var(--c-text2); font-size: 12px; font-weight: var(--fw-bold); }
+.node .toggle:hover circle { stroke: var(--c-ring); }
+.node .loads-toggle { fill: var(--c-info); font-size: 11px; }
+.node .chip rect { fill: var(--c-bg2); stroke: var(--c-line); }
+.node .chip text { font-size: 10.5px; fill: var(--c-text2); }
+.node .chip:hover rect { stroke: var(--c-ring); }
+.node .hidden-count { fill: var(--c-text3); font-size: 10px; }
+
+.link { fill: none; stroke: var(--link); stroke-width: 1.3; }
+.link.undirected { stroke-dasharray: 4 3; }
+.link.back { stroke-dasharray: 2 4; }
+.link.on-path { stroke: var(--c-ring); stroke-width: 2.4; opacity: 1; }
+marker path { fill: var(--link); }
+marker.on-path path { fill: var(--c-ring); }
+
+.legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: var(--fs-xs); color: var(--c-text3);
+          margin: 6px 2px 0; }
+.legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px;
+              vertical-align: -1px; background: var(--k-rail); }
+.legend .sw.source { background: var(--k-source); }
+.legend .sw.outlet { background: none; border: 1.5px solid var(--k-source); }
+.legend .sw.switching { background: var(--k-switch); }
+.legend .sw.linear { background: var(--k-linear); }
+.legend .sw.other { background: var(--k-other); }
+.legend .sw.series { background: var(--k-series); }
+.legend .sw.unsupplied { background: none; border: 1.5px dashed var(--c-warning); }
+.legend .sw.outside { background: none; border: 1.5px dotted var(--c-text3); }
+
+.panel { border: 1px solid var(--c-line); border-radius: var(--radius); padding: 10px 12px;
+         max-height: var(--pane-height); overflow: auto; font-size: var(--fs-sm); }
+.panel h2 { font-size: var(--fs-md); margin: 0; overflow-wrap: anywhere; }
+.panel h3 { font-size: var(--fs-sm); margin: 12px 0 4px; color: var(--c-text2); }
+.panel .row { display: flex; gap: 8px; align-items: baseline; justify-content: space-between; }
+.panel ul { margin: 4px 0; padding-left: 18px; }
+.panel .help { color: var(--c-text2); }
+.finding { border-left: 3px solid var(--c-info); padding: 2px 8px; margin: 6px 0; }
+.finding.warning { border-left-color: var(--c-warning); }
+.pins { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 2px 8px; }
+.list-inline { display: flex; flex-wrap: wrap; gap: 4px 8px; }
+.status { font-size: var(--fs-xs); color: var(--c-text3); }
+.section-gap { margin-top: 14px; }
+</style>
+</head>
+<body>
+<main id="app"></main>
+<script type="application/json" id="data-contract">
+{
+  "tool": "get_power_tree",
+  "paged": ["converters", "findings", "rails", "sources", "inputs"],
+  "shapes": {
+    "result": {
+      "required": ["variant", "overview", "converters", "rails", "sources", "inputs", "findings",
+                   "has_more", "offset"],
+      "optional": ["next_offset", "notes", "heuristic", "severity_counts", "references",
+                   "supervisors", "sequencing", "not_fitted_converters"]
+    },
+    "overview": {
+      "required": ["converters", "rails", "rails_supplied", "rails_with_loads_unsupplied"],
+      "optional": []
+    },
+    "converters[]": {
+      "required": ["designator", "type", "category"],
+      "optional": ["part", "switching", "inputs", "outputs", "feedback", "enable", "power_good",
+                   "input_capacitors", "output_capacitors", "module", "controller", "isolated",
+                   "notes"]
+    },
+    "converters[].inputs[]": {"required": ["rail", "voltage"], "optional": []},
+    "converters[].outputs[]": {"required": ["rail", "voltage"], "optional": ["via", "channel"]},
+    "converters[].feedback[]": {
+      "required": ["state"],
+      "optional": ["rtop", "rbot", "vout_over_vref", "implied_vref", "vout_computed", "vref_given",
+                   "near_common_vref"]
+    },
+    "converters[].enable[]": {"required": ["state"], "optional": ["net"]},
+    "converters[].power_good[]": {"required": ["state"], "optional": ["net"]},
+    "rails[]": {
+      "required": ["rail", "voltage", "supplied", "load_count", "load_pins"],
+      "optional": ["depth", "origin", "sources", "fed_by", "feeds", "feeds_total", "loads",
+                   "capacitors", "capacitance_uF", "connectors", "test_points"]
+    },
+    "rails[].fed_by[]": {"required": ["part", "type", "from"], "optional": []},
+    "rails[].feeds[]": {"required": ["part", "type"], "optional": ["to", "with"]},
+    "sources[]": {"required": ["type", "part", "net"], "optional": ["role", "exposure", "detail"]},
+    "inputs[]": {
+      "required": ["source", "net", "path"],
+      "optional": ["exposure", "fuse", "reverse_polarity", "tvs"]
+    },
+    "findings[]": {
+      "required": ["check", "severity", "issue"],
+      "optional": ["designators", "part", "rail", "nets"]
+    }
+  }
+}
+</script>
+<script>/*@shell.js*/</script>
+<script>
+(() => {
+  "use strict";
+  const { el, svg, clear } = Shell;
+  const CONTRACT = JSON.parse(document.getElementById("data-contract").textContent);
+  const app = document.getElementById("app");
+
+  const MAX_PAGES = 60;
+  const SIZE = {
+    source: { w: 150, h: 44 }, converter: { w: 180, h: 58 }, rail: { w: 180, h: 46 },
+    series: { w: 104, h: 38 }, path: { w: 140, h: 46 },
+  };
+  const KIND_ORDER = { source: 0, rail: 1, series: 2, converter: 3 };
+  const COL_GAP = 56;
+  const ROW_GAP = 12;
+  const PAD = 18;
+  const CHIP = { w: 54, h: 18, gap: 4 };
+  const TYPE_LABEL = {
+    ldo: "LDO", buck: "Buck", boost: "Boost", buck_boost: "Buck-boost", sepic: "SEPIC",
+    flyback: "Flyback", inverting: "Inverting", charge_pump: "Charge pump", pmic: "PMIC",
+    load_switch: "Load switch", efuse: "eFuse", hot_swap: "Hot-swap", ideal_diode: "Ideal diode",
+    charger: "Charger", switching: "Switching", linear: "Linear",
+  };
+  // Every converter type get_power_tree gives (a converter's type, or a converter link's
+  // type in a rail's feeds and fed_by); series parts have other types (fuse, ferrite ...).
+  const CONVERTER_TYPES = new Set(Object.keys(TYPE_LABEL));
+  const SWITCHING_TYPES = new Set(["buck", "boost", "buck_boost", "sepic", "flyback", "inverting", "switching"]);
+  // get_power_tree lists a rail's first 10 links (feeds, with feeds_total past that) and
+  // first 6 feeders (fed_by).
+  const FEEDS_LISTED = 10;
+  const FED_BY_LISTED = 6;
+
+  const view = {
+    args: {}, data: null, model: null, pages: 0, incomplete: false, stopReason: "", warnings: [],
+    query: "", selected: null, collapsed: new Set(), loadsOpen: new Set(), details: new Map(),
+    tab: "diagram", scale: 1, autoFit: true, busy: false, closed: false,
+  };
+  const ui = {};
+
+  // ---------- helpers ----------
+
+  const naturally = (a, b) => String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" });
+  const volts = (value) => (typeof value === "number" ? `${+value.toFixed(3)} V` : null);
+  const typeLabel = (type) => TYPE_LABEL[type] || String(type || "").replace(/_/g, " ");
+  const fit = (text, chars) => {
+    const value = String(text === null || text === undefined ? "" : text);
+    return value.length > chars ? value.slice(0, Math.max(1, chars - 1)) + "…" : value;
+  };
+  const railId = (name) => "r:" + name;
+  const partId = (name) => "p:" + name;
+  // A connector that passes a board rail on (an outlet) is its own node: the same
+  // connector may also bring another rail in, and one node would join the two paths.
+  const outletId = (name) => "o:" + name;
+  const canCall = () => Shell.canCallTools();
+  // query_net takes a Python regex: an anchored, escaped name matches that net only.
+  const exactPattern = (name) => "^" + String(name).replace(/[\\^$.|?*+()[\]{}]/g, "\\$&") + "$";
+  const list = (items) => (items || []).filter((item) => item !== null && item !== undefined && item !== "");
+
+  function convClass(conv) {
+    const switching = conv.switching === undefined ? SWITCHING_TYPES.has(conv.type) : conv.switching;
+    if (switching) return "switching";
+    return conv.type === "ldo" || conv.type === "linear" ? "linear" : "other";
+  }
+
+  /** The node a part name stands for: a converter, source or series part, else its outlet. */
+  function partNode(name) {
+    for (const id of [partId(name), outletId(name)]) {
+      if (view.model && view.model.nodes.has(id)) return id;
+    }
+    return null;
+  }
+
+  /** Why a rail or converter is drawn without its own row. */
+  function outsideText(kind) {
+    const what = kind === "converter" ? "converters" : "rails";
+    if (view.incomplete) return `not read: the view stopped after ${view.pages} page(s) of get_power_tree (${view.stopReason})`;
+    if (view.args.rail || view.args.part) return `outside the ${what} this view shows (rail= or part= narrowed it)`;
+    return `not in get_power_tree's ${what} list`;
+  }
+
+  function worst(findings) {
+    return findings.some((finding) => finding.severity === "warning") ? "warning" : "info";
+  }
+
+  // ---------- data contract ----------
+
+  function rowsAt(data, path) {
+    if (path === "result") return [data];
+    let rows = [data];
+    for (const part of path.split(".")) {
+      const key = part.replace(/\[\]$/, "");
+      rows = rows.flatMap((row) => {
+        const value = row && typeof row === "object" ? row[key] : undefined;
+        if (part.endsWith("[]")) return Array.isArray(value) ? value : [];
+        return value === undefined || value === null ? [] : [value];
+      });
+    }
+    return rows;
+  }
+
+  function checkContract(data) {
+    const problems = [];
+    for (const [path, shape] of Object.entries(CONTRACT.shapes)) {
+      for (const key of shape.required) {
+        const missing = rowsAt(data, path).filter((row) => !(key in row)).length;
+        if (missing) problems.push(`${path}: ${key} missing in ${missing} row(s)`);
+      }
+    }
+    return problems;
+  }
+
+  // ---------- loading ----------
+
+  function baseArgs() {
+    const args = { ...view.args };
+    delete args.offset;
+    delete args.format;
+    return args;
+  }
+
+  async function fetchPage(offset) {
+    const page = Shell.resultJson(await Shell.callTool("get_power_tree", { ...baseArgs(), format: "json", offset }));
+    if (page && page.error) throw new Error(page.message || page.error);
+    return page;
+  }
+
+  function showState(kind, title, detail) {
+    clear(app).appendChild(Shell.state(kind, title, detail));
+  }
+
+  async function loadResult(result) {
+    let first;
+    try {
+      first = Shell.resultJson(result);
+    } catch (error) {
+      view.busy = false;
+      showState("error", "The power tree could not be read", error.message);
+      return;
+    }
+    await loadFrom(first);
+  }
+
+  async function loadFrom(first) {
+    view.busy = true;
+    try {
+      if (first && first.error) {
+        showState("error", first.message || "get_power_tree answered with an error", first.error);
+        return;
+      }
+      if (!Array.isArray(first.rails) || (first.offset > 0 && canCall())) {
+        // A Mermaid answer or a later page: read the JSON tree from the first page.
+        if (!canCall()) {
+          showState("info", "The diagram needs the JSON power tree",
+            "This result is the Mermaid chart, and this host does not let the view call get_power_tree for the JSON tree. Ask Claude for the power tree in JSON.");
+          return;
+        }
+        showState("loading", "Reading the power tree", "Asking get_power_tree for the JSON tree.");
+        first = await fetchPage(0);
+      }
+      const data = { ...first };
+      for (const key of CONTRACT.paged) data[key] = [...(first[key] || [])];
+      let next = first.has_more ? first.next_offset : null;
+      let pages = 1;
+      let stopped = "";
+      // Every page after the first is a tools/call; whatever stops the paging, the pages
+      // already read are drawn and the notice says why the rest is missing.
+      while (next !== null && next !== undefined) {
+        if (view.closed) stopped = "the view was closed";
+        else if (!canCall()) stopped = "this host does not let the view call get_power_tree for the next pages";
+        else if (pages >= MAX_PAGES) stopped = `the view reads at most ${MAX_PAGES} pages`;
+        if (stopped) break;
+        showState("loading", "Reading the power tree", `get_power_tree pages its rows: page ${pages + 1} (offset ${next}).`);
+        let page;
+        try {
+          page = await fetchPage(next);
+        } catch (error) {
+          stopped = `page ${pages + 1} could not be read: ${error.message}`;
+          break;
+        }
+        for (const key of CONTRACT.paged) data[key].push(...(page[key] || []));
+        next = page.has_more ? page.next_offset : null;
+        pages += 1;
+      }
+      view.pages = pages;
+      view.incomplete = Boolean(stopped) || first.offset > 0;
+      view.stopReason = first.offset > 0 && !stopped ? `this result starts at offset ${first.offset}` : stopped;
+      view.data = data;
+      view.warnings = checkContract(data);
+      view.model = buildModel(data);
+      view.collapsed = new Set();
+      view.loadsOpen = new Set();
+      view.selected = null;
+      view.details = new Map();
+      renderAll();
+    } catch (error) {
+      showState("error", "The power tree could not be read", error.message);
+    } finally {
+      view.busy = false;
+    }
+  }
+
+  async function refresh() {
+    if (view.busy || !canCall()) return;
+    view.busy = true;
+    showState("loading", "Reading the power tree again", "Calling get_power_tree.");
+    try {
+      await loadFrom(await fetchPage(0));
+    } catch (error) {
+      view.busy = false;
+      if (!view.data) {
+        showState("error", "The power tree could not be read", error.message);
+        return;
+      }
+      // Keep the tree already drawn and say the refresh failed.
+      renderAll();
+      app.prepend(Shell.notice("error", `Refresh failed: ${error.message}`));
+    }
+  }
+
+  // ---------- model: nodes and links ----------
+
+  function buildModel(data) {
+    const nodes = new Map();
+    const edges = [];
+    const keys = new Set();
+    const converters = new Set((data.converters || []).map((conv) => conv.designator));
+
+    const node = (id, props) => {
+      if (!nodes.has(id)) nodes.set(id, { id, findings: [], in: [], out: [], ...props });
+      return nodes.get(id);
+    };
+    const rail = (name) => node(railId(name), { kind: "rail", name, row: null, outside: true });
+    const series = (item) => node(partId(item.part), { kind: "series", name: item.part, type: item.type, links: [] });
+    // A converter link in a rail's list whose converter has no row here (a filter left it
+    // out, or its page was not read): a converter node, marked outside.
+    const outsideConverter = (item) => node(partId(item.part), {
+      kind: "converter", name: item.part, row: { designator: item.part, type: item.type }, outside: true });
+    const between = (item) => (CONVERTER_TYPES.has(item.type) ? outsideConverter(item) : series(item));
+    const link = (from, to, props = {}) => {
+      if (from.id === to.id) return;
+      const key = props.undirected ? [from.id, to.id].sort().join("\n") + "\nu" : `${from.id}\n${to.id}`;
+      if (keys.has(key)) return;
+      keys.add(key);
+      const edge = { from: from.id, to: to.id, ...props };
+      edges.push(edge);
+      from.out.push(edge);
+      to.in.push(edge);
+    };
+
+    for (const row of data.rails || []) Object.assign(rail(row.rail), { row, outside: false });
+    for (const conv of data.converters || []) {
+      const part = node(partId(conv.designator), { kind: "converter", name: conv.designator, row: conv });
+      for (const input of conv.inputs || []) link(rail(input.rail), part);
+      for (const output of conv.outputs || []) link(part, rail(output.rail), { label: output.channel || "" });
+    }
+    for (const source of data.sources || []) {
+      if (!source.part || !source.net) continue;
+      const outlet = source.role === "outlet";
+      const part = node(outlet ? outletId(source.part) : partId(source.part),
+                        { kind: "source", name: source.part, rows: [], outlet });
+      if (part.rows) part.rows.push(source);
+      // A connector that passes a board rail on (an outlet) hangs below its rail.
+      if (outlet) link(rail(source.net), part);
+      else link(part, rail(source.net));
+    }
+    for (const row of data.rails || []) {
+      const here = rail(row.rail);
+      for (const item of row.fed_by || []) {
+        if (converters.has(item.part) || !item.from) continue;
+        const part = between(item);
+        link(rail(item.from), part);
+        link(part, here);
+      }
+      for (const item of row.feeds || []) {
+        if (converters.has(item.part)) continue;
+        const part = between(item);
+        if (item.to) {
+          link(here, part);
+          link(part, rail(item.to));
+        } else if (item.with) {
+          link(here, part, { undirected: true });
+          link(part, rail(item.with), { undirected: true });
+        }
+      }
+    }
+    const findingTargets = new Map();
+    for (const finding of data.findings || []) {
+      const targets = [];
+      const add = (id) => {
+        const target = nodes.get(id);
+        if (target && !targets.includes(target)) targets.push(target);
+      };
+      const addPart = (name) => add(nodes.has(partId(name)) ? partId(name) : outletId(name));
+      if (finding.part) addPart(finding.part);
+      if (!targets.length && finding.rail) add(railId(finding.rail));
+      if (!targets.length) {
+        for (const name of finding.designators || []) addPart(name);
+        for (const net of finding.nets || []) add(railId(net));
+      }
+      for (const target of targets) target.findings.push(finding);
+      findingTargets.set(finding, targets.map((target) => target.id));
+    }
+    // Links get_power_tree does not list: a rail's feeds stop at FEEDS_LISTED (feeds_total
+    // counts them all) and its fed_by at FED_BY_LISTED. A link one rail leaves out is
+    // drawn when the other end's list, or the converters list, names it; count the rest.
+    const named = new Map();
+    const nameLink = (from, part, to) => {
+      if (!named.has(from)) named.set(from, new Set());
+      named.get(from).add(`${part}\n${to}`);
+    };
+    for (const row of data.rails || []) {
+      for (const item of row.feeds || []) {
+        nameLink(row.rail, item.part, item.to || item.with);
+        if (item.with) nameLink(item.with, item.part, row.rail);
+      }
+      for (const item of row.fed_by || []) nameLink(item.from, item.part, row.rail);
+    }
+    for (const conv of data.converters || []) {
+      const inputs = (conv.inputs || []).map((input) => input.rail);
+      for (const output of conv.outputs || []) {
+        // get_power_tree links an output from the first input, or from its channel's input.
+        for (const input of output.channel ? inputs : inputs.slice(0, 1)) nameLink(input, conv.designator, output.rail);
+      }
+    }
+    const unlisted = [];
+    for (const row of data.rails || []) {
+      const missing = (row.feeds_total || 0) - (named.get(row.rail) || new Set()).size;
+      if (missing > 0) {
+        rail(row.rail).unlisted = missing;
+        unlisted.push({ rail: row.rail, count: missing });
+      }
+    }
+    // Everything reachable from a root (a node nothing feeds); the rest sits on loops.
+    const reach = new Set();
+    const stack = [...nodes.values()].filter((item) => !item.in.length).map((item) => item.id);
+    while (stack.length) {
+      const id = stack.pop();
+      if (reach.has(id)) continue;
+      reach.add(id);
+      for (const edge of nodes.get(id).out) stack.push(edge.to);
+    }
+    return { nodes, edges, reach, findingTargets, unlisted };
+  }
+
+  function ancestors(id) {
+    const seen = new Set();
+    const stack = [id];
+    while (stack.length) {
+      for (const edge of view.model.nodes.get(stack.pop()).in) {
+        if (!seen.has(edge.from)) { seen.add(edge.from); stack.push(edge.from); }
+      }
+    }
+    seen.delete(id);
+    return seen;
+  }
+
+  function descendants(id) {
+    const seen = new Set();
+    const stack = [id];
+    while (stack.length) {
+      for (const edge of view.model.nodes.get(stack.pop()).out) {
+        if (!seen.has(edge.to)) { seen.add(edge.to); stack.push(edge.to); }
+      }
+    }
+    seen.delete(id);
+    return seen;
+  }
+
+  function visibleNodes() {
+    const { nodes, reach } = view.model;
+    const seen = new Set();
+    const stack = [...nodes.values()].filter((item) => !item.in.length).map((item) => item.id);
+    while (stack.length) {
+      const id = stack.pop();
+      if (seen.has(id)) continue;
+      seen.add(id);
+      if (view.collapsed.has(id)) continue;
+      for (const edge of nodes.get(id).out) stack.push(edge.to);
+    }
+    for (const id of nodes.keys()) if (!reach.has(id)) seen.add(id);
+    return seen;
+  }
+
+  // ---------- layout: columns by depth, rows by the parents' height ----------
+
+  function baseSize(item) {
+    // An unnamed net between two series parts is drawn narrower than a named rail.
+    return item.kind === "rail" && item.row && item.row.origin ? SIZE.path : SIZE[item.kind];
+  }
+
+  function nodeSize(item) {
+    const size = { ...baseSize(item) };
+    if (item.kind === "rail" && view.loadsOpen.has(item.id)) {
+      const chips = chipNames(item).length;
+      const perRow = Math.max(1, Math.floor((size.w - 12) / (CHIP.w + CHIP.gap)));
+      size.h += Math.ceil(chips / perRow) * (CHIP.h + CHIP.gap) + 4;
+    }
+    return size;
+  }
+
+  function chipNames(item) {
+    const row = item.row || {};
+    const names = [...(row.loads || [])];
+    const more = (row.load_count || 0) - names.length;
+    if (more > 0) names.push(`+${more}`);
+    return names;
+  }
+
+  function layout(visible) {
+    const { nodes } = view.model;
+    const order = [...visible].sort((a, b) => {
+      const x = nodes.get(a);
+      const y = nodes.get(b);
+      const rootX = x.in.some((edge) => visible.has(edge.from)) ? 1 : 0;
+      const rootY = y.in.some((edge) => visible.has(edge.from)) ? 1 : 0;
+      return rootX - rootY || KIND_ORDER[x.kind] - KIND_ORDER[y.kind] || naturally(x.name, y.name);
+    });
+    // Depth-first from the roots marks the links that close a loop; the rest is a DAG.
+    const mark = new Map();
+    const finished = [];
+    const back = new Set();
+    const visit = (id) => {
+      mark.set(id, 1);
+      for (const edge of nodes.get(id).out) {
+        if (!visible.has(edge.to)) continue;
+        const state = mark.get(edge.to);
+        if (state === 1) back.add(edge);
+        else if (!state) visit(edge.to);
+      }
+      mark.set(id, 2);
+      finished.push(id);
+    };
+    for (const id of order) if (!mark.get(id)) visit(id);
+    const column = new Map(order.map((id) => [id, 0]));
+    for (const id of finished.reverse()) {
+      for (const edge of nodes.get(id).out) {
+        if (visible.has(edge.to) && !back.has(edge)) column.set(edge.to, Math.max(column.get(edge.to), column.get(id) + 1));
+      }
+    }
+    const columns = [];
+    for (const id of order) (columns[column.get(id)] ||= []).push(id);
+    const boxes = new Map();
+    let x = PAD;
+    let height = 0;
+    for (const ids of columns) {
+      if (!ids) continue;
+      const width = Math.max(...ids.map((id) => nodeSize(nodes.get(id)).w));
+      const wanted = new Map(ids.map((id, index) => {
+        const centres = nodes.get(id).in.filter((edge) => boxes.has(edge.from) && !back.has(edge))
+          .map((edge) => boxes.get(edge.from).y + boxes.get(edge.from).base / 2);
+        return [id, centres.length ? centres.reduce((a, b) => a + b, 0) / centres.length : Infinity + index];
+      }));
+      const sortedIds = [...ids].sort((a, b) => {
+        const wa = wanted.get(a);
+        const wb = wanted.get(b);
+        if (wa === wb) return ids.indexOf(a) - ids.indexOf(b);
+        if (wa === Infinity) return 1;
+        if (wb === Infinity) return -1;
+        return wa - wb;
+      });
+      let bottom = PAD - ROW_GAP;
+      for (const id of sortedIds) {
+        const size = nodeSize(nodes.get(id));
+        const base = baseSize(nodes.get(id)).h;
+        const target = wanted.get(id);
+        const y = Math.max(bottom + ROW_GAP, Number.isFinite(target) ? target - base / 2 : 0);
+        boxes.set(id, { x, y, w: size.w, h: size.h, base });
+        bottom = y + size.h;
+      }
+      height = Math.max(height, bottom);
+      x += width + COL_GAP;
+    }
+    return { boxes, back, width: x - COL_GAP + PAD + 10, height: height + PAD };
+  }
+
+  // ---------- diagram ----------
+
+  function subtitle(item, short) {
+    const row = item.row || {};
+    if (item.kind === "rail") {
+      if (short) return volts(row.voltage) || "V ?";
+      const parts = [volts(row.voltage) || "voltage not in the name"];
+      if (item.outside) parts.push(outsideText("rail"));
+      else if (!row.supplied) parts.push("no source found");
+      if (item.unlisted) parts.push(`${item.unlisted} link(s) not listed by get_power_tree, not drawn`);
+      return parts.join(" · ");
+    }
+    if (item.kind === "converter") {
+      const feedback = (row.feedback || []).find((fb) => fb.implied_vref || fb.vout_computed) || {};
+      const extra = item.outside ? (short ? "outside this view" : outsideText("converter"))
+        : feedback.vout_computed ? `Vout ${volts(feedback.vout_computed)}`
+        : feedback.implied_vref ? `Vref ${volts(feedback.implied_vref)}` : "";
+      return [typeLabel(row.type), extra].filter(Boolean).join(" · ");
+    }
+    if (item.kind === "source") {
+      const first = item.rows[0] || {};
+      // On the node, a connector's role and exposure (the type is in the legend's colour).
+      const kind = short && first.type === "connector" ? null : first.type;
+      return [kind, first.role, first.exposure].filter(Boolean).join(" · ");
+    }
+    return typeLabel(item.type);
+  }
+
+  function kindLabel(item) {
+    if (item.kind === "source" && item.outlet) return "connector outlet";
+    if (item.kind === "series") return `series ${typeLabel(item.type)}`;
+    if (item.kind === "converter" && item.outside) return "converter, outside this view";
+    return item.kind;
+  }
+
+  function describe(item) {
+    const parts = [`${kindLabel(item)} ${item.name}`, subtitle(item)];
+    if (item.kind === "converter" && item.row.part) parts.push(item.row.part);
+    if (item.kind === "rail" && item.row) parts.push(`${item.row.load_count} loads`);
+    if (item.findings.length) parts.push(`${item.findings.length} findings`);
+    if (view.collapsed.has(item.id)) parts.push("collapsed");
+    return parts.filter(Boolean).join(", ");
+  }
+
+  function drawNode(item, box, hidden) {
+    const classes = ["node", `kind-${item.kind}`];
+    if (item.kind === "converter") classes.push(`conv-${convClass(item.row)}`);
+    if (item.kind === "rail" && item.row && !item.row.supplied) classes.push("unsupplied");
+    if (item.outside) classes.push("outside");
+    if (item.unlisted) classes.push("unlisted");
+    if (item.outlet) classes.push("outlet");
+    const group = svg("g", {
+      class: classes.join(" "), transform: `translate(${box.x},${box.y})`, tabindex: "0",
+      role: "button", "aria-label": describe(item), data: { id: item.id },
+    });
+    const titleChars = Math.floor((box.w - 26) / 7.6);
+    const subChars = Math.floor((box.w - (item.kind === "rail" ? 84 : 20)) / 6.1);
+    const top = item.kind === "series" ? 16 : 17;
+    group.appendChild(svg("title", { text: describe(item) }));
+    group.appendChild(svg("rect", { class: "box", width: box.w, height: box.h, rx: 6 }));
+    group.appendChild(svg("rect", { class: "strip", x: 0, y: 4, width: 4, height: box.base - 8, rx: 2 }));
+    group.appendChild(svg("text", { class: "title", x: 12, y: top, text: fit(item.name, titleChars) }));
+    group.appendChild(svg("text", { class: "sub", x: 12, y: top + 15, text: fit(subtitle(item, true), subChars) }));
+    if (item.kind === "converter" && item.row.part) {
+      group.appendChild(svg("text", { class: "sub", x: 12, y: top + 30, text: fit(item.row.part, subChars) }));
+    }
+    if (item.findings.length) {
+      const level = worst(item.findings);
+      group.appendChild(svg("g", { class: `count ${level}`, transform: `translate(${box.w - 4},4)` },
+        svg("title", { text: `${item.findings.length} finding(s), worst: ${level}` }),
+        svg("circle", { r: 8 }),
+        svg("text", { "text-anchor": "middle", y: 3.5, text: String(item.findings.length) })));
+    }
+    if (item.out.length) {
+      const collapsed = view.collapsed.has(item.id);
+      const toggle = svg("g", { class: "toggle", transform: `translate(${box.w},${box.base / 2})`,
+                                data: { action: "toggle" } },
+        svg("title", { text: collapsed ? "Expand what this feeds" : "Collapse what this feeds" }),
+        svg("circle", { r: 7 }),
+        svg("text", { "text-anchor": "middle", y: 4, text: collapsed ? "+" : "−" }));
+      group.appendChild(toggle);
+      if (collapsed && hidden) {
+        group.appendChild(svg("text", { class: "hidden-count", x: box.w + 11, y: box.base / 2 + 15, text: `${hidden} hidden` }));
+      }
+    }
+    if (item.unlisted) {
+      group.appendChild(svg("text", { class: "hidden-count", x: box.w + 11, y: box.base / 2 - 10 },
+        svg("title", { text: `get_power_tree lists this rail's first ${FEEDS_LISTED} links: ${item.unlisted} more are not drawn` }),
+        `+${item.unlisted} links`));
+    }
+    if (item.kind === "rail" && item.row && item.row.load_count) {
+      const open = view.loadsOpen.has(item.id);
+      group.appendChild(svg("text", {
+        class: "loads-toggle", x: box.w - 10, y: 32, "text-anchor": "end", data: { action: "loads" },
+        text: `${item.row.load_count} load${item.row.load_count === 1 ? "" : "s"} ${open ? "▾" : "▸"}`,
+      }));
+      if (open) {
+        const perRow = Math.max(1, Math.floor((box.w - 12) / (CHIP.w + CHIP.gap)));
+        chipNames(item).forEach((name, index) => {
+          const cx = 8 + (index % perRow) * (CHIP.w + CHIP.gap);
+          const cy = SIZE.rail.h + Math.floor(index / perRow) * (CHIP.h + CHIP.gap) - 2;
+          const more = name.startsWith("+");
+          group.appendChild(svg("g", { class: "chip", transform: `translate(${cx},${cy})`,
+                                       data: more ? { action: "rail" } : { action: "part", name } },
+            svg("title", { text: more ? "More loads: select the rail for its pins" : `Load ${name}: details` }),
+            svg("rect", { width: CHIP.w, height: CHIP.h, rx: 4 }),
+            svg("text", { x: CHIP.w / 2, y: 13, "text-anchor": "middle", text: fit(name, 8) })));
+        });
+      }
+    }
+    return group;
+  }
+
+  function linkPath(from, to, back) {
+    const x1 = from.x + from.w;
+    const y1 = from.y + from.base / 2;
+    const x2 = to.x;
+    const y2 = to.y + to.base / 2;
+    if (back || x2 <= x1) {
+      const dip = Math.max(y1, y2) + 40;
+      return `M${x1},${y1} C${x1 + 50},${dip} ${x2 - 50},${dip} ${x2},${y2}`;
+    }
+    const dx = Math.max(24, (x2 - x1) / 2);
+    return `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`;
+  }
+
+  function drawDiagram() {
+    if (!ui.canvas) return;
+    const { nodes, edges } = view.model;
+    const visible = visibleNodes();
+    const { boxes, back, width, height } = layout(visible);
+    const focused = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.id : null;
+    const root = svg("svg", { width: Math.ceil(width * view.scale), height: Math.ceil(height * view.scale),
+                              viewBox: `0 0 ${Math.ceil(width)} ${Math.ceil(height)}`, role: "group",
+                              "aria-label": "Power tree diagram" });
+    root.appendChild(svg("defs", {},
+      ["", "on-path"].map((name) => svg("marker", {
+        id: `arrow${name ? "-" + name : ""}`, class: name || null, viewBox: "0 0 8 8", refX: 7.5, refY: 4,
+        markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse" }, svg("path", { d: "M0,0 L8,4 L0,8 z" })))));
+    const linkLayer = svg("g", { class: "links" });
+    const nodeLayer = svg("g", { class: "nodes" });
+    ui.linkEls = new Map();
+    ui.nodeEls = new Map();
+    for (const edge of edges) {
+      if (!boxes.has(edge.from) || !boxes.has(edge.to)) continue;
+      const classes = ["link"];
+      if (edge.undirected) classes.push("undirected");
+      if (back.has(edge)) classes.push("back");
+      const path = svg("path", { class: classes.join(" "), d: linkPath(boxes.get(edge.from), boxes.get(edge.to), back.has(edge)),
+                                 "marker-end": edge.undirected ? null : "url(#arrow)" },
+        svg("title", { text: `${nodes.get(edge.from).name} → ${nodes.get(edge.to).name}${edge.label ? ` (${edge.label})` : ""}` }));
+      ui.linkEls.set(edge, path);
+      linkLayer.appendChild(path);
+    }
+    for (const id of visible) {
+      const item = nodes.get(id);
+      const hidden = view.collapsed.has(id) ? [...descendants(id)].filter((other) => !visible.has(other)).length : 0;
+      const group = drawNode(item, boxes.get(id), hidden);
+      ui.nodeEls.set(id, group);
+      nodeLayer.appendChild(group);
+    }
+    root.append(linkLayer, nodeLayer);
+    clear(ui.canvas).appendChild(root);
+    ui.boxes = boxes;
+    ui.size = { width, height };
+    highlight();
+    if (focused && ui.nodeEls.has(focused)) ui.nodeEls.get(focused).focus();
+  }
+
+  function setScale(scale) {
+    view.scale = Math.max(0.3, Math.min(2, scale));
+    const root = ui.canvas && ui.canvas.querySelector("svg");
+    if (root && ui.size) {
+      root.setAttribute("width", Math.ceil(ui.size.width * view.scale));
+      root.setAttribute("height", Math.ceil(ui.size.height * view.scale));
+    }
+    if (ui.zoomLabel) ui.zoomLabel.textContent = `${Math.round(view.scale * 100)}%`;
+  }
+
+  function fitWidth() {
+    if (!ui.canvas || !ui.size || !ui.canvas.clientWidth) return;
+    view.autoFit = false;
+    setScale(Math.min(1, Math.max(0.3, (ui.canvas.clientWidth - 4) / ui.size.width)));
+  }
+
+  function zoomBy(factor) {
+    view.autoFit = false;
+    setScale(view.scale * factor);
+  }
+
+  /** Until the user zooms, a wide diagram is shrunk to the canvas (to 80% at most). The
+   *  canvas can have no width yet when the first result is drawn (a frame the host has
+   *  not laid out), so this runs again whenever the canvas's width changes. */
+  function autoFit() {
+    if (!view.autoFit || !ui.canvas || !ui.size) return;
+    const width = ui.canvas.clientWidth;
+    if (!width) {
+      // Layout callbacks can be held back in a frame the host has not shown: look again.
+      clearTimeout(ui.fitTimer);
+      if ((ui.fitTries = (ui.fitTries || 0) + 1) <= 40) ui.fitTimer = setTimeout(autoFit, 150);
+      return;
+    }
+    if (width === ui.fittedWidth) return;
+    ui.fittedWidth = width;
+    setScale(ui.size.width > width - 4 ? Math.max(0.8, (width - 4) / ui.size.width) : 1);
+  }
+
+  function highlight() {
+    if (!ui.nodeEls) return;
+    const selectedId = view.selected && view.selected.id && view.model.nodes.has(view.selected.id) ? view.selected.id : null;
+    let up = new Set();
+    let down = new Set();
+    if (selectedId) {
+      up = ancestors(selectedId);
+      down = descendants(selectedId);
+    }
+    const query = view.query.trim();
+    const matched = new Set();
+    if (query) {
+      for (const [id, item] of view.model.nodes) {
+        if (Shell.matches(`${item.name} ${subtitle(item)} ${item.kind === "converter" ? item.row.part || "" : ""} ${(item.row && item.row.loads || []).join(" ")}`, query)) matched.add(id);
+      }
+    }
+    for (const [id, group] of ui.nodeEls) {
+      const onPath = id === selectedId || up.has(id) || down.has(id);
+      group.classList.toggle("selected", id === selectedId);
+      group.setAttribute("aria-pressed", id === selectedId ? "true" : "false");
+      group.classList.toggle("match", matched.has(id));
+      group.classList.toggle("dim", selectedId ? !onPath : query ? !matched.has(id) : false);
+    }
+    for (const [edge, path] of ui.linkEls) {
+      const onPath = selectedId && (
+        ((edge.to === selectedId || up.has(edge.to)) && up.has(edge.from)) ||
+        ((edge.from === selectedId || down.has(edge.from)) && down.has(edge.to)));
+      path.classList.toggle("on-path", Boolean(onPath));
+      if (!edge.undirected) path.setAttribute("marker-end", onPath ? "url(#arrow-on-path)" : "url(#arrow)");
+      path.classList.toggle("dim", selectedId ? !onPath : query ? !(matched.has(edge.from) || matched.has(edge.to)) : false);
+    }
+    if (ui.matchLabel) ui.matchLabel.textContent = query ? `${matched.size} match${matched.size === 1 ? "" : "es"}` : "";
+    ui.matches = [...matched];
+  }
+
+  function toggleCollapse(id, collapse) {
+    const now = view.collapsed.has(id);
+    const want = collapse === undefined ? !now : collapse;
+    if (want === now || !view.model.nodes.get(id).out.length) return;
+    if (want) view.collapsed.add(id);
+    else view.collapsed.delete(id);
+    drawDiagram();
+  }
+
+  function toggleLoads(id) {
+    if (view.loadsOpen.has(id)) view.loadsOpen.delete(id);
+    else view.loadsOpen.add(id);
+    drawDiagram();
+  }
+
+  function reveal(id) {
+    // Expand whatever hides the node, then scroll it into the middle of the canvas.
+    let changed = false;
+    for (const other of ancestors(id)) {
+      if (view.collapsed.delete(other)) changed = true;
+    }
+    if (changed && view.tab === "diagram") drawDiagram();
+    const box = ui.boxes && ui.boxes.get(id);
+    if (box && ui.canvas) {
+      ui.canvas.scrollLeft = Math.max(0, (box.x + box.w / 2) * view.scale - ui.canvas.clientWidth / 2);
+      ui.canvas.scrollTop = Math.max(0, (box.y + box.h / 2) * view.scale - ui.canvas.clientHeight / 2);
+    }
+  }
+
+  function onCanvasClick(event) {
+    const target = event.target.closest("[data-action], .node");
+    if (!target) {
+      select(null);
+      return;
+    }
+    const group = event.target.closest(".node");
+    const id = group && group.dataset.id;
+    const action = target.dataset ? target.dataset.action : null;
+    if (action === "toggle") toggleCollapse(id);
+    else if (action === "loads") toggleLoads(id);
+    else if (action === "part") selectPart(target.dataset.name);
+    else if (id) select(id);
+  }
+
+  function onCanvasKey(event) {
+    const group = event.target.closest && event.target.closest(".node");
+    if (!group) return;
+    const id = group.dataset.id;
+    if (event.key === "Enter" || event.key === " ") select(id);
+    else if (event.key === "ArrowLeft" || event.key === "-") toggleCollapse(id, true);
+    else if (event.key === "ArrowRight" || event.key === "+") toggleCollapse(id, false);
+    else if (event.key === "l" || event.key === "L") toggleLoads(id);
+    else return;
+    event.preventDefault();
+  }
+
+  // ---------- selection and details ----------
+
+  function select(id) {
+    if (id === null) view.selected = null;
+    else {
+      const item = view.model.nodes.get(id);
+      view.selected = { id, kind: item.kind === "rail" ? "rail" : "part", name: item.name };
+      if (view.tab === "diagram") reveal(id);
+      ensureDetails(view.selected);
+    }
+    highlight();
+    renderPanel();
+    syncTables();
+  }
+
+  function selectPart(name) {
+    const id = partNode(name);
+    if (id) return select(id);
+    view.selected = { id: null, kind: "part", name };
+    ensureDetails(view.selected);
+    highlight();
+    renderPanel();
+  }
+
+  function selectRail(name) {
+    const id = railId(name);
+    if (view.model.nodes.has(id)) return select(id);
+    view.selected = { id: null, kind: "rail", name };
+    ensureDetails(view.selected);
+    highlight();
+    renderPanel();
+  }
+
+  /** Ask the server for a rail's or part's details once; an error is asked again on the
+   *  next selection (or Retry), not kept. */
+  async function ensureDetails(selection) {
+    if (!canCall()) return;
+    const key = `${selection.kind}:${selection.name}`;
+    const entry = view.details.get(key);
+    if (entry && !entry.error) return;
+    view.details.set(key, { loading: true });
+    try {
+      const result = selection.kind === "rail"
+        ? await Shell.callTool("query_net", { pattern: exactPattern(selection.name) })
+        : await Shell.callTool("get_component", { refdes: selection.name });
+      view.details.set(key, { data: Shell.resultJson(result) });
+    } catch (error) {
+      view.details.set(key, { error: error.message });
+    }
+    if (view.selected && `${view.selected.kind}:${view.selected.name}` === key) renderPanel();
+  }
+
+  function fact(label, value) {
+    if (value === null || value === undefined || value === "" || (Array.isArray(value) && !value.length)) return [];
+    return [el("dt", { text: label }), el("dd", {}, value)];
+  }
+
+  function partButton(name) {
+    return el("button", { type: "button", class: "btn-link", text: name, on: { click: () => selectPart(name) } });
+  }
+
+  function railButton(name) {
+    return el("button", { type: "button", class: "btn-link", text: name, on: { click: () => selectRail(name) } });
+  }
+
+  function joined(items) {
+    const out = [];
+    items.forEach((item, index) => {
+      if (index) out.push(", ");
+      out.push(item);
+    });
+    return out;
+  }
+
+  function nodeFacts(item) {
+    const row = item.row || {};
+    if (item.kind === "rail") {
+      if (item.outside) return [fact("Rail", outsideText("rail"))];
+      const fedBy = row.fed_by || [];
+      const feeds = row.feeds || [];
+      return [
+        fact("Voltage", volts(row.voltage) || "not in the name"),
+        fact("Supplied", row.supplied ? "yes" : "no source found"),
+        fact("Depth", row.depth === undefined ? null : `${row.depth} link(s) from a source`),
+        fact("Origin", row.origin),
+        fact("Sources", joined((row.sources || []).map((src) => [partButton(src.part), ` ${src.type}${src.role ? " " + src.role : ""}`]))),
+        fact("Fed by", fedBy.length ? [joined(fedBy.map((src) => [partButton(src.part), ` ${src.type} from `, railButton(src.from)])),
+          fedBy.length >= FED_BY_LISTED ? ` (get_power_tree lists the first ${FED_BY_LISTED})` : ""] : null),
+        fact("Feeds", feeds.length ? [joined(feeds.map((dst) => [partButton(dst.part), ` ${dst.type} ${dst.to ? "to" : "with"} `, railButton(dst.to || dst.with)])),
+          row.feeds_total > feeds.length ? ` (the first ${feeds.length} of ${row.feeds_total})` : ""] : null),
+        fact("Not drawn", item.unlisted ? `${item.unlisted} link(s): past the first ${FEEDS_LISTED} this rail lists, and named by no other rail` : null),
+        fact("Loads", `${row.load_count} part(s), ${row.load_pins} pin(s)`),
+        fact("Load parts", joined((row.loads || []).map(partButton))),
+        fact("Capacitors", row.capacitors ? `${row.capacitors}${row.capacitance_uF ? `, ${row.capacitance_uF} µF` : ""}` : null),
+        fact("Connectors", joined((row.connectors || []).map(partButton))),
+        fact("Test points", joined((row.test_points || []).map(partButton))),
+      ];
+    }
+    const ends = () => [...item.in.map((edge) => view.model.nodes.get(edge.from)), ...item.out.map((edge) => view.model.nodes.get(edge.to))]
+      .filter((other) => other.kind === "rail");
+    if (item.kind === "converter" && item.outside) {
+      return [fact("Type", typeLabel(row.type)), fact("Converter", outsideText("converter")),
+              fact("Between", joined(ends().map((other) => railButton(other.name))))];
+    }
+    if (item.kind === "converter") {
+      const fb = row.feedback || [];
+      return [
+        fact("Type", `${typeLabel(row.type)} (${row.category}${row.switching ? ", switching" : ""})`),
+        fact("Part", row.part),
+        fact("Inputs", joined((row.inputs || []).map((input) => [railButton(input.rail), volts(input.voltage) ? ` ${volts(input.voltage)}` : ""]))),
+        fact("Outputs", joined((row.outputs || []).map((output) => [railButton(output.rail), volts(output.voltage) ? ` ${volts(output.voltage)}` : "", output.channel ? ` (${output.channel})` : "", output.via ? ` via ${output.via}` : ""]))),
+        fact("Feedback", fb.map((item2) => [item2.state, item2.rtop ? ` Rtop ${item2.rtop}` : "", item2.rbot ? ` Rbot ${item2.rbot}` : "",
+          item2.vout_over_vref ? ` Vout/Vref ${item2.vout_over_vref}` : "", item2.implied_vref ? ` implied Vref ${volts(item2.implied_vref)}` : "",
+          item2.near_common_vref ? ` (near ${volts(item2.near_common_vref)})` : "", item2.vout_computed ? ` Vout ${volts(item2.vout_computed)}` : "",
+          item2.vref_given ? ` with Vref ${volts(item2.vref_given)}` : ""].join("")).join("; ")),
+        fact("Enable", (row.enable || []).map((en) => `${en.state}${en.net ? ` on ${en.net}` : ""}`).join("; ")),
+        fact("Power good", (row.power_good || []).map((pg) => `${pg.state}${pg.net ? ` on ${pg.net}` : ""}`).join("; ")),
+        fact("Input caps", row.input_capacitors ? `${row.input_capacitors.count} (${row.input_capacitors.total_uF} µF)` : null),
+        fact("Output caps", row.output_capacitors ? `${row.output_capacitors.count} (${row.output_capacitors.total_uF} µF)` : null),
+        fact("Kind", list([row.module && "module", row.controller && "controller", row.isolated && "isolated"]).join(", ")),
+        fact("Notes", (row.notes || []).join(" ")),
+      ];
+    }
+    if (item.kind === "source") {
+      // The same connector's other role (an outlet that also brings a rail in, or back).
+      const otherId = item.outlet ? partId(item.name) : outletId(item.name);
+      const other = view.model.nodes.get(otherId);
+      return [
+        fact("Source", item.rows.map((src) => list([src.type, src.role, src.exposure]).join(" ")).join("; ")),
+        fact("Nets", joined(item.rows.map((src) => railButton(src.net)))),
+        fact("Detail", item.rows.map((src) => src.detail).filter(Boolean).join("; ")),
+        fact("Also", other && other.kind === "source" ? el("button", {
+          type: "button", class: "btn-link", on: { click: () => select(otherId) },
+          text: `${other.outlet ? "an outlet" : "an input"} on ${other.rows.map((src) => src.net).join(", ")}`,
+        }) : null),
+      ];
+    }
+    return [fact("Type", typeLabel(item.type)), fact("Between", joined(ends().map((other) => railButton(other.name))))];
+  }
+
+  function serverDetails(selection) {
+    const key = `${selection.kind}:${selection.name}`;
+    const entry = view.details.get(key);
+    const tool = selection.kind === "rail" ? "query_net" : "get_component";
+    const head = el("h3", { text: `From ${tool}` });
+    if (!canCall()) {
+      return [head, el("p", { class: "muted", text: `This host does not let the view call ${tool}: ask Claude in the conversation for the details.` })];
+    }
+    if (!entry || entry.loading) return [head, el("p", { class: "muted", text: "Asking the server…" })];
+    if (entry.error) {
+      return [head, el("div", { class: "notice error" },
+        el("span", { class: "grow", text: entry.error }),
+        el("button", { type: "button", class: "btn-link", text: "Retry",
+                       on: { click: () => { ensureDetails(selection); renderPanel(); } } }))];
+    }
+    const data = entry.data || {};
+    if (data.error) return [head, el("div", { class: "notice warning", text: data.message || data.error })];
+    if (selection.kind === "rail") {
+      // query_net matches case-insensitively: keep the net whose name is exactly the rail's.
+      const all = data.nets || [data];
+      const exact = all.filter((net) => net.net === selection.name);
+      const nets = exact.length ? exact : all;
+      return [head, ...nets.map((net) => {
+        const pins = net.pins || net.pins_sample || [];
+        return el("div", {},
+          el("dl", { class: "facts" }, fact("Net", net.net), fact("Pins", String(net.pin_count))),
+          net.message ? el("p", { class: "muted", text: net.message }) : null,
+          el("div", { class: "pins" }, pins.map((pin) => el("span", {}, partButton(pin.refdes), `.${pin.pin}`))));
+      })];
+    }
+    const pins = Object.entries(data.pins || {}).sort((a, b) => naturally(a[0], b[0]));
+    return [head,
+      el("dl", { class: "facts" },
+        fact("Description", data.description), fact("MPN", data.mpn), fact("Value", data.value),
+        fact("Fitted", data.dnp ? "no (DNP in this variant)" : "yes"), fact("Sheet", data.sheet)),
+      pins.length ? el("h3", { text: `Pins (${pins.length})` }) : null,
+      Shell.table({
+        label: `Pins of ${selection.name}`, ownFilter: pins.length > 12, rows: pins.map(([pin, info]) => ({ pin, name: info.name, net: info.net })),
+        columns: [
+          { key: "pin", label: "Pin" },
+          { key: "name", label: "Name" },
+          { key: "net", label: "Net", render: (row) => (row.net ? railButton(row.net) : "") },
+        ],
+      }).el];
+  }
+
+  function renderPanel() {
+    if (!ui.panel) return;
+    clear(ui.panel);
+    const selection = view.selected;
+    ui.panel.classList.toggle("idle", !selection);
+    if (!selection) {
+      Shell.append(ui.panel, [
+        el("h2", { text: "Select a rail or a part" }),
+        el("p", { class: "help", text: "Click a node to highlight what feeds it and what it feeds, and to ask the server for its details (query_net for a rail, get_component for a part)." }),
+        el("p", { class: "help", text: "The − / + on a node's right edge collapses or expands what it feeds; the loads link lists a rail's loads. Keys: Tab between nodes, Enter selects, Left and Right collapse and expand, L shows loads, Esc clears." }),
+        el("p", { class: "muted", text: view.data && view.data.heuristic ? view.data.heuristic : "" }),
+      ]);
+      return;
+    }
+    const item = selection.id ? view.model.nodes.get(selection.id) : null;
+    const kind = item ? kindLabel(item) : selection.kind;
+    Shell.append(ui.panel, [
+      el("div", { class: "row" },
+        el("h2", { text: selection.name }),
+        el("button", { type: "button", class: "btn", text: "Close", on: { click: () => select(null) } })),
+      el("span", { class: "badge", text: kind }),
+      item ? el("dl", { class: "facts section-gap" }, nodeFacts(item)) : el("p", { class: "muted", text: "Not a node of this tree." }),
+      item && item.findings.length ? [el("h3", { text: `Findings (${item.findings.length})` }),
+        item.findings.map((finding) => el("div", { class: `finding ${finding.severity}` },
+          el("span", { class: `badge ${finding.severity}`, text: finding.severity }), " ",
+          el("span", { class: "mono small", text: finding.check }), el("div", { text: finding.issue })))] : null,
+      serverDetails(selection),
+    ]);
+  }
+
+  // ---------- tables (the fallback view) ----------
+
+  function findingCount(row, id) {
+    const item = view.model.nodes.get(id);
+    return item ? item.findings.length : 0;
+  }
+
+  function buildTables() {
+    const data = view.data;
+    const severity = (finding) => (finding.severity === "warning" ? 0 : 1);
+    ui.tables = {
+      rails: Shell.table({
+        label: "Rails", ownFilter: false, rows: data.rails,
+        onActivate: (row) => select(railId(row.rail)),
+        columns: [
+          { key: "rail", label: "Rail" },
+          { key: "voltage", label: "Voltage", numeric: true, render: (row) => volts(row.voltage) || "" },
+          { key: "supplied", label: "Supplied", value: (row) => (row.supplied ? "yes" : "no"),
+            render: (row) => el("span", { class: `badge ${row.supplied ? "ok" : "warning"}`, text: row.supplied ? "yes" : "no" }) },
+          { key: "depth", label: "Depth", numeric: true },
+          { key: "fed_by", label: "Fed by", value: (row) => (row.fed_by || []).map((src) => `${src.part} ${src.type} from ${src.from}`).concat((row.sources || []).map((src) => `${src.part} ${src.type}`)) },
+          { key: "feeds", label: "Feeds", value: (row) => (row.feeds || []).map((dst) => `${dst.part} ${dst.type} ${dst.to || dst.with}`), hidden: true },
+          { key: "load_count", label: "Loads", numeric: true },
+          { key: "loads", label: "Load parts", value: (row) => row.loads || [], hidden: true },
+          { key: "capacitors", label: "Caps", numeric: true },
+          { key: "capacitance_uF", label: "µF", numeric: true, hidden: true },
+          { key: "findings", label: "Findings", numeric: true, value: (row) => findingCount(row, railId(row.rail)) },
+        ],
+      }),
+      converters: Shell.table({
+        label: "Converters", ownFilter: false, rows: data.converters,
+        onActivate: (row) => select(partId(row.designator)),
+        columns: [
+          { key: "designator", label: "Part" },
+          { key: "type", label: "Type", value: (row) => typeLabel(row.type) },
+          { key: "part", label: "Description" },
+          { key: "inputs", label: "Inputs", value: (row) => (row.inputs || []).map((input) => input.rail) },
+          { key: "outputs", label: "Outputs", value: (row) => (row.outputs || []).map((output) => `${output.rail}${volts(output.voltage) ? ` (${volts(output.voltage)})` : ""}`) },
+          { key: "implied_vref", label: "Implied Vref", numeric: true, value: (row) => ((row.feedback || []).find((fb) => fb.implied_vref) || {}).implied_vref },
+          { key: "vout_computed", label: "Vout", numeric: true, hidden: true, value: (row) => ((row.feedback || []).find((fb) => fb.vout_computed) || {}).vout_computed },
+          { key: "enable", label: "Enable", value: (row) => (row.enable || []).map((en) => en.state) },
+          { key: "power_good", label: "Power good", hidden: true, value: (row) => (row.power_good || []).map((pg) => pg.state) },
+          { key: "findings", label: "Findings", numeric: true, value: (row) => findingCount(row, partId(row.designator)) },
+        ],
+      }),
+      sources: Shell.table({
+        label: "Sources", ownFilter: false, rows: data.sources,
+        onActivate: (row) => select(sourceId(row)),
+        columns: [
+          { key: "part", label: "Part" }, { key: "type", label: "Type" }, { key: "net", label: "Net" },
+          { key: "role", label: "Role" }, { key: "exposure", label: "Exposure" },
+        ],
+      }),
+      inputs: Shell.table({
+        label: "Power inputs", ownFilter: false, rows: data.inputs,
+        onActivate: (row) => selectPart(row.source),
+        columns: [
+          { key: "source", label: "Source" }, { key: "net", label: "Net" }, { key: "exposure", label: "Exposure" },
+          { key: "fuse", label: "Fuse", value: (row) => row.fuse || [] },
+          { key: "reverse_polarity", label: "Reverse polarity", value: (row) => row.reverse_polarity || [] },
+          { key: "tvs", label: "TVS", value: (row) => row.tvs || [] },
+          { key: "path", label: "Path", hidden: true, value: (row) => (row.path || []).join(" → ") },
+        ],
+      }),
+      findings: Shell.table({
+        label: "Findings", ownFilter: false, rows: data.findings,
+        onActivate: (row) => {
+          const targets = view.model.findingTargets.get(row) || [];
+          if (targets.length) select(targets[0]);
+        },
+        columns: [
+          { key: "severity", label: "Severity", value: severity,
+            render: (row) => el("span", { class: `badge ${row.severity}`, text: row.severity }) },
+          { key: "check", label: "Check" },
+          { key: "issue", label: "Issue" },
+          { key: "designators", label: "Parts", value: (row) => row.designators || [] },
+          { key: "rail", label: "Rail", hidden: true },
+        ],
+      }),
+    };
+  }
+
+  function sourceId(row) {
+    return row.role === "outlet" ? outletId(row.part) : partId(row.part);
+  }
+
+  function syncTables() {
+    if (!ui.tables) return;
+    const selection = view.selected;
+    ui.tables.rails.select((row) => selection && selection.kind === "rail" && row.rail === selection.name);
+    ui.tables.converters.select((row) => selection && selection.kind === "part" && row.designator === selection.name);
+    ui.tables.sources.select((row) => selection && (selection.id ? sourceId(row) === selection.id
+                                                                 : selection.kind === "part" && row.part === selection.name));
+  }
+
+  // ---------- page ----------
+
+  function summaryBadges() {
+    const data = view.data;
+    const overview = data.overview || {};
+    const counts = data.severity_counts || {};
+    return [
+      el("span", { class: "badge", text: `${overview.converters} converter${overview.converters === 1 ? "" : "s"}` }),
+      el("span", { class: "badge", text: `${overview.rails} rails, ${overview.rails_supplied} supplied` }),
+      overview.rails_with_loads_unsupplied ? el("span", { class: "badge warning", text: `${overview.rails_with_loads_unsupplied} with loads and no source` }) : null,
+      el("span", { class: "badge", text: `${data.sources.length} source${data.sources.length === 1 ? "" : "s"}` }),
+      counts.warning ? el("span", { class: "badge warning", text: `${counts.warning} warning${counts.warning === 1 ? "" : "s"}` }) : null,
+      counts.info ? el("span", { class: "badge info", text: `${counts.info} info` }) : null,
+    ];
+  }
+
+  function notesBlock() {
+    const data = view.data;
+    const refs = data.references || [];
+    const sups = data.supervisors || [];
+    const chains = data.sequencing || [];
+    const unfitted = data.not_fitted_converters || [];
+    return el("div", { class: "panel" },
+      el("h2", { text: "Notes" }),
+      el("p", { text: data.heuristic || "" }),
+      el("ul", {}, (data.notes || []).map((note) => el("li", { text: note }))),
+      refs.length ? [el("h3", { text: "References" }), el("p", { class: "list-inline" }, refs.map((row) => el("span", {}, partButton(row.designator), ` ${(row.nets || []).join(", ")}`)))] : null,
+      sups.length ? [el("h3", { text: "Supervisors" }), el("p", { class: "list-inline" }, sups.map((row) => el("span", {}, partButton(row.designator), ` monitors ${(row.monitors || []).join(", ") || "-"}`)))] : null,
+      chains.length ? [el("h3", { text: "Sequencing" }), el("ul", {}, chains.map((chain) => el("li", { text: (chain.parts || []).join(" → ") })))] : null,
+      unfitted.length ? [el("h3", { text: "Converters not fitted in this variant" }),
+        el("p", { class: "list-inline" }, unfitted.map((row) => el("span", {}, partButton(row.designator), ` ${typeLabel(row.type)}`)))] : null,
+      el("p", { class: "status", text: `Read in ${view.pages} page(s) of get_power_tree${view.incomplete ? `, then stopped: ${view.stopReason}` : ""}.` }));
+  }
+
+  function renderTab() {
+    clear(ui.content);
+    ui.canvas = null;
+    if (ui.canvasObserver) ui.canvasObserver.disconnect();
+    ui.canvasObserver = null;
+    if (view.tab === "diagram") {
+      ui.canvas = el("div", { class: "canvas", on: { click: onCanvasClick, keydown: onCanvasKey } });
+      ui.content.append(ui.canvas, legend());
+      drawDiagram();
+      ui.fittedWidth = 0;
+      ui.fitTries = 0;
+      autoFit();
+      if (typeof ResizeObserver === "function") {
+        ui.canvasObserver = new ResizeObserver(autoFit);
+        ui.canvasObserver.observe(ui.canvas);
+      }
+      return;
+    }
+    if (view.tab === "notes") {
+      ui.content.appendChild(notesBlock());
+      return;
+    }
+    if (view.tab === "sources") {
+      ui.content.append(ui.tables.sources.el, el("h3", { class: "small", text: "Power inputs" }), ui.tables.inputs.el);
+      return;
+    }
+    ui.content.appendChild(ui.tables[view.tab].el);
+  }
+
+  function legend() {
+    return el("div", { class: "legend", "aria-hidden": "true" },
+      el("span", {}, el("span", { class: "sw source" }), "source"),
+      el("span", {}, el("span", { class: "sw outlet" }), "connector outlet"),
+      el("span", {}, el("span", { class: "sw switching" }), "switching converter"),
+      el("span", {}, el("span", { class: "sw linear" }), "linear regulator"),
+      el("span", {}, el("span", { class: "sw other" }), "switch, eFuse, other"),
+      el("span", {}, el("span", { class: "sw series" }), "series part"),
+      el("span", {}, el("span", { class: "sw" }), "rail"),
+      el("span", {}, el("span", { class: "sw unsupplied" }), "no source found"),
+      el("span", {}, el("span", { class: "sw outside" }), "outside this view or not read"),
+      el("span", { text: "dashed link: direction not known" }));
+  }
+
+  function renderAll() {
+    const data = view.data;
+    const empty = !data.rails.length && !data.converters.length && !data.sources.length;
+    if (empty) {
+      clear(app).append(
+        Shell.state("empty", "No power tree in this project",
+          "get_power_tree recognised no converter, rail or power source here (names, part numbers and pin names are what it reads)."),
+        (data.notes || []).length ? el("details", { class: "more section-gap" }, el("summary", { text: "Notes" }),
+          el("ul", {}, data.notes.map((note) => el("li", { class: "small", text: note })))) : null);
+      return;
+    }
+    buildTables();
+    ui.content = el("div", { class: "content" });
+    ui.panel = el("aside", { class: "panel", "aria-label": "Details", "aria-live": "polite" });
+    ui.zoomLabel = el("span", { class: "status", text: `${Math.round(view.scale * 100)}%` });
+    ui.matchLabel = el("span", { class: "status" });
+    const filter = Shell.filterBox({
+      placeholder: "Filter rails, parts, findings", label: "Filter the power tree",
+      value: view.query,
+      onInput: (text) => {
+        view.query = text;
+        highlight();
+        for (const tableView of Object.values(ui.tables)) tableView.setQuery(text);
+      },
+      onEnter: () => {
+        if (ui.matches && ui.matches.length) select(ui.matches[0]);
+      },
+    });
+    const tabBar = Shell.tabs([
+      { id: "diagram", label: "Diagram" },
+      { id: "rails", label: `Rails (${data.rails.length})` },
+      { id: "converters", label: `Converters (${data.converters.length})` },
+      { id: "sources", label: `Sources (${data.sources.length})` },
+      { id: "findings", label: `Findings (${data.findings.length})` },
+      { id: "notes", label: "Notes" },
+    ], (id) => {
+      view.tab = id;
+      diagramTools.hidden = id !== "diagram";
+      renderTab();
+    }, view.tab);
+    const diagramTools = el("span", { class: "toolbar" },
+      el("button", { type: "button", class: "btn", text: "−", title: "Zoom out", "aria-label": "Zoom out", on: { click: () => zoomBy(1 / 1.2) } }),
+      ui.zoomLabel,
+      el("button", { type: "button", class: "btn", text: "+", title: "Zoom in", "aria-label": "Zoom in", on: { click: () => zoomBy(1.2) } }),
+      el("button", { type: "button", class: "btn", text: "Fit", title: "Fit the width", on: { click: fitWidth } }),
+      el("button", { type: "button", class: "btn", text: "Collapse all", title: "Show the sources and the rails nothing feeds",
+                     on: { click: () => {
+                       view.collapsed = new Set([...view.model.nodes.values()].filter((item) => !item.in.length && item.out.length).map((item) => item.id));
+                       drawDiagram();
+                     } } }),
+      el("button", { type: "button", class: "btn", text: "Expand all", on: { click: () => { view.collapsed = new Set(); drawDiagram(); } } }),
+      el("button", { type: "button", class: "btn", text: "Loads", title: "Show or hide every rail's loads",
+                     on: { click: () => {
+                       const rails = [...view.model.nodes.values()].filter((item) => item.kind === "rail" && item.row && item.row.load_count);
+                       view.loadsOpen = view.loadsOpen.size ? new Set() : new Set(rails.map((item) => item.id));
+                       drawDiagram();
+                     } } }));
+    diagramTools.hidden = view.tab !== "diagram";
+    ui.displayButton = el("button", { type: "button", class: "btn", on: { click: async () => {
+      const mode = displayTarget();
+      if (!mode) return;
+      try {
+        await Shell.requestDisplayMode(mode);
+      } catch (error) {
+        app.prepend(Shell.notice("error", error.message));
+      }
+      syncDisplayButton();
+    } } });
+    syncDisplayButton();
+    const actions = el("span", { class: "toolbar" }, ui.displayButton,
+      canCall() ? el("button", { type: "button", class: "btn", text: "Refresh", title: "Call get_power_tree again", on: { click: refresh } }) : null);
+    const warnings = [];
+    if (view.incomplete) {
+      warnings.push(Shell.notice("warning", `Read ${view.pages} page(s) of get_power_tree, then stopped: ${view.stopReason}. ` +
+        "Rails and converters on the pages not read are drawn dashed, as not read."));
+    }
+    const unlisted = view.model.unlisted;
+    if (unlisted.length) {
+      const total = unlisted.reduce((sum, item) => sum + item.count, 0);
+      warnings.push(Shell.notice("warning", `${total} link(s) are not drawn: get_power_tree lists a rail's first ${FEEDS_LISTED} links and first ${FED_BY_LISTED} feeders, ` +
+        `and nothing else names these (from ${unlisted.slice(0, 4).map((item) => `${item.rail} +${item.count}`).join(", ")}${unlisted.length > 4 ? ", …" : ""}).`));
+    }
+    if (!canCall()) {
+      warnings.push(Shell.notice("info", "This host does not let the view call the server's tools: details for a rail or part, more pages and Refresh are off."));
+    }
+    if (view.warnings.length) warnings.push(Shell.notice("warning", `The result is not quite the shape this view reads: ${view.warnings.slice(0, 3).join("; ")}.`));
+    clear(app).append(
+      el("div", { class: "head" },
+        el("h1", { text: "Power tree" }),
+        el("span", { class: "muted small", text: `variant ${data.variant}` }),
+        el("span", { class: "summary" }, summaryBadges())),
+      ...warnings,
+      el("div", { class: "toolbar" }, filter, ui.matchLabel, el("span", { class: "grow" }), diagramTools, actions),
+      tabBar.el,
+      el("div", { class: "layout" }, ui.content, ui.panel));
+    renderTab();
+    renderPanel();
+    syncTables();
+  }
+
+  // ---------- display mode ----------
+
+  /** The mode the full-screen button asks for, if the host offers it (the spec has the view
+   *  check availableDisplayModes before every request, the way back to inline too). */
+  function displayTarget() {
+    const mode = Shell.context().displayMode === "fullscreen" ? "inline" : "fullscreen";
+    return Shell.canDisplay(mode) ? mode : null;
+  }
+
+  /** The button follows the host's display mode, also when the host changes it itself. */
+  function syncDisplayButton() {
+    if (!ui.displayButton) return;
+    const mode = displayTarget();
+    ui.displayButton.hidden = !mode;
+    ui.displayButton.textContent = mode === "inline" ? "Exit full screen" : "Full screen";
+  }
+
+  // ---------- host ----------
+
+  Shell.on("context", syncDisplayButton);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && view.selected && !event.defaultPrevented) select(null);
+  });
+  Shell.on("toolInput", (args) => {
+    view.args = args || {};
+    if (!view.data && !view.busy) showState("loading", "Reading the power tree", "get_power_tree is running.");
+  });
+  Shell.on("toolInputPartial", () => {
+    if (!view.data && !view.busy) showState("loading", "Reading the power tree", "Waiting for the tool's arguments.");
+  });
+  Shell.on("toolResult", (result) => {
+    view.busy = true;
+    return loadResult(result);
+  });
+  Shell.on("toolCancelled", (reason) => {
+    if (!view.data) showState("info", "The power tree call was cancelled", reason);
+  });
+  Shell.on("teardown", () => {
+    view.closed = true;
+  });
+
+  showState("loading", "Connecting to the host", "");
+  Shell.connect({ name: "altium-copilot-kc power tree", version: "1.0.0" })
+    .then(() => {
+      if (!view.data && !view.busy) showState("loading", "Waiting for get_power_tree", "The diagram appears when the tool's result arrives.");
+    })
+    .catch((error) => showState("error", "This view needs a host that shows MCP Apps", error.message));
+})();
+</script>
+</body>
+</html>

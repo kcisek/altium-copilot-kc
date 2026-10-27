@@ -6,6 +6,47 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [Unreleased]
 
 ### Added
+- Interactive views for MCP Apps hosts (roadmap #58) and the interactive power tree
+  (roadmap #59). Claude Desktop (and other MCP Apps hosts that run local servers) opens
+  `get_power_tree`'s result as an interactive panel; Claude Code and other text-only
+  hosts show the text as before. claude.ai on the web does not run this local server.
+  - Plumbing: `server/services/ui_views.py` registers each view as a `ui://` resource
+    (MIME type `text/html;profile=mcp-app`, MCP Apps spec 2026-01-26) whose `_meta.ui`
+    declares no network, resource, frame or base-URI domain (the host's strictest
+    content security policy) and links it from its tool's `_meta.ui.resourceUri` (and
+    the deprecated flat `ui/resourceUri` for older hosts). Adding a view is one entry in
+    `VIEWS`, one page in `server/ui` and the link in its tool's meta. The link is static
+    (the same tool list for every client; hosts without the extension ignore it), and
+    the pages are listed in `resources/list`, so text-only hosts see them there as
+    resources marked as MCP Apps pages.
+  - Shared shell (`server/ui/shell.css`, `shell.js`), inlined into every page so each
+    resource is one self-contained file: the host bridge (`ui/initialize`, tool input,
+    result and cancellation, `tools/call` with request ids and timeouts when the host
+    offers `serverTools`, host context changes, teardown, size changes with the panes
+    fitted to the host's container height), the host's theme and style variables with
+    light and dark fallbacks, a sortable table with a column chooser, sticky header and
+    keyboard focus, a filter box, tabs, and empty, loading and error states. The page's
+    own policy forbids any load or connection.
+  - Tool results are unchanged, byte for byte: the views read the same JSON text
+    (FastMCP's `structuredContent` `{"result": text}` as before). No `structuredContent`
+    is added for the views and no app-only tool is registered: the power tree view pages
+    through `get_power_tree` itself and asks `query_net` and `get_component` for details.
+  - Power tree view: sources, connector outlets, series parts, converters and rails in
+    columns by depth with curved links, voltages, feedback dividers (Vout, implied Vref)
+    and finding badges; collapse and expand, a rail's loads, the upstream and downstream
+    path of a selected rail or part highlighted, details in a side panel, a filter, zoom
+    and fit, full screen where the host allows it, tables of rails, converters, sources
+    and power inputs and findings, and an empty state for a project with no power tree.
+    A connector that is an outlet for one rail and an input for another is two nodes, a
+    converter a filter left out is drawn as a converter outside the view, links past
+    `get_power_tree`'s per-rail lists are counted on their rail, and a page that cannot
+    be read (or a host without tool calls) leaves the pages already read drawn with a
+    notice.
+  - The release build and `pack.ps1` bundle `server/ui` (`--add-data`), read from
+    `sys._MEIPASS/ui` when frozen. `requirements.txt` now asks for `mcp>=1.26.0`, the
+    first release that carries a resource's `_meta` on `resources/list` and
+    `resources/read`. The extension manifest has no field for views: its tool list is
+    unchanged.
 - `trace_net_across_boards`, `check_multiboard` and `get_system_connections` (roadmap
   #54): multi-board systems (`.PrjMbd`) read offline; the loaded project is never
   changed and none of the three needs its netlist.
