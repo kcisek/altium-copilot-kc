@@ -62,6 +62,8 @@ NETLIST_TOOL_CALLS = {
     "generate_rule_file": lambda: main.generate_rule_file(),
     "schematic_review": lambda: main.schematic_review(),
     "package_for_xfn": lambda: main.package_for_xfn(),
+    "get_db_part": lambda: main.get_db_part("R1"),
+    "check_db_parameters": lambda: main.check_db_parameters(),
 }
 
 

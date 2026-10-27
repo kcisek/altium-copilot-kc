@@ -6,6 +6,97 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [Unreleased]
 
 ### Added
+- `get_db_part` and `check_db_parameters` (roadmap #53): parts placed from a database
+  library (`.DbLib`, `.SVNDbLib`) or linked through a database link file (`.DbLink`)
+  against their database record; netlist required, read-only throughout.
+  - Parser (`server/parsers/db_lib.py`): the INI layout of Altium's database library
+    editor (UTF-8, older files Windows-1252, a `.udl` UTF-16): `[DatabaseLinks]`
+    (connection, default update options, quote characters, schema, the simple-mode
+    database type and path, relative to the library when DatabasePathRelative is set,
+    the DbLib's library search path; an SVNDbLib's repository keys, masked), `[Table<n>]`
+    (enabled, key lookup or UserWhere with its WHERE clause) and `[FieldMap<n>]` Options
+    lists (field, table, key or normal, the parameter or system field it maps to:
+    `[Library Ref]`, `[Library Path]`, `[Footprint Ref]` and its numbered copies,
+    `[Footprint Path]`, `[Description]`, `[None]`; VisibleOnAdd; the field's own Add,
+    Remove and Update options: Default, Never, Always, if not blank / if blank in the
+    database). The key names and option values come from Altium's own binaries, as no
+    database library with tables could be read. Lines end at CR or LF only and a section
+    met twice is read once, as Altium's INI reader does. Connections are reduced to a
+    safe description: kind (access, excel, text, sql_server, mysql, postgresql, oracle,
+    odbc_dsn, other), provider, data source, whether credentials are present, and the
+    string with every password, user name and token masked (keys matched anywhere in
+    their name: Passwd, SVNUserName, Login; inside a nested Extended Properties string;
+    a URL's user:password@ and Oracle's user/password@ in any value; a segment without
+    '=' is never joined to the next key and is masked unless it is an ISAM name such as
+    `Excel 8.0`); `File Name=<x.udl>` reads the Data Link file (one on a network share
+    or in a OneDrive folder only with allow_network=true); an ODBC data source name is
+    looked up in the registry and counts as a file source when it names a local Access,
+    Excel or text file.
+  - Finding the libraries: the project's documents, the installed libraries and search
+    paths `services/libraries.py` reads, and the library a part names (SourceLibraryName,
+    DatabaseLibraryName, LibraryPath); each says which found it, and parts naming a
+    database library none has are listed. The sheet parser now keeps DatabaseLibraryName,
+    UseDBTableName and the names of parameters left empty on the sheet (blank_params;
+    params and the BOM are unchanged), and the netlist components carry them.
+  - Query layer (`server/services/db_query.py`, `server/scripts/query_db.ps1`): only
+    `SELECT * FROM <table> WHERE <comparisons>`, built from checked and quoted names and a
+    comparison tree whose values are parameters, with a row limit and a timeout. `.xlsx`
+    and `.xlsm` workbooks are read in-process with the existing workbook reader; anything
+    else goes to Windows PowerShell's .NET OleDb / Odbc in one process per library, the
+    request (connection included) on its standard input, never on a command line. Files
+    are opened read-only (Mode=Read, ReadOnly=1): the library's provider, then ACE 16 and
+    12, then the Access, Excel or text ODBC driver (an ODBC string tries its driver
+    first; Jet has no 64-bit build); ODBC strings are written the ODBC way (no quotes,
+    braces only around a ';'). Database servers, ODBC data sources that are not a local
+    file, unknown providers, URLs, network shares and OneDrive folders (SharePoint and
+    Teams libraries OneDrive syncs, from the registry, and cloud-only files included) are
+    skipped unless allow_network=true, for every path the connection names (a workgroup
+    file too), and inside a local Access file only its own tables are read: a linked
+    table or saved query, which can read another database or a server, is refused per
+    query (not_local_table). Workbooks give dates, numbers and blank-looking cells as the
+    Excel driver does, and text compares without trailing spaces, as Jet does. Errors
+    are fixed codes, never the provider's message.
+  - Linking: a DbLib part by its table's key field (the part's parameter or system field
+    the key maps to, else its Design Item ID, both tried when they differ) or the
+    table's WHERE clause with `{Parameter}` placeholders (comparisons, AND, OR, NOT,
+    LIKE, IS NULL, nested at most 32 deep as the script allows; `"..."` is a string for
+    Access, Excel and text sources; anything else is where_unsupported); a DbLink in
+    every enabled table (only the part's DatabaseTableName's table when UseDBTableName
+    is set; parts restricted to a table it lacks or has disabled are counted) by the key
+    parameter, parts without it counted as not linked. Tables are tried in the library's
+    order and the first with a record is used. A table or field name that cannot be
+    quoted safely leaves out only its own lookups (bad_name).
+  - check_db_parameters: a preview of Update Parameters From Database with each field's
+    update options (would_change, would_add with VisibleOnAdd, would_remove,
+    differs_not_updated, blank_in_database, case-only differences as info; a parameter
+    left empty on the sheet counts as present; the key field's own parameter is compared
+    when the Design Item ID found the record), record_not_found, duplicate_records (with
+    more_records when more than 5), key_conflict (the key parameter and the Design Item
+    ID name different records), found_in_several_tables, symbol_differs,
+    footprint_differs ([Footprint Ref] first, then [Footprint Ref 2] ...; info when the
+    current footprint is another of the record's, or the record's is another of the
+    part's models), library_path_differs (when the part records a library file),
+    description_differs, key_missing, table problems (once per table for a DbLink) and
+    bad_name, reported even when the source is skipped, query_failed, library_not_found,
+    library_unreadable, library_skipped with the reason (no_driver,
+    network_not_allowed, file_missing, onedrive_or_share, unreadable), no_tables and the
+    variant's alternate parts; per-library rows (found by, connection, tables, parts
+    linked, records found, queries, seconds). Pages read one cached model (2 minutes).
+  - get_db_part: a placed part, a Design Item ID or a key value: the record with every
+    mapped field, its parameter, both values and what the update would do, unmapped
+    fields, the symbol and footprint the record names against the placed ones, how it
+    was matched with a confidence (exact; design_item_id whenever the Design Item ID
+    stood in for the key parameter; ambiguous for several records or a key conflict)
+    and alternates (same Value and `[Footprint Ref]`, or alternates_by=; records with the
+    part's own key value left out).
+  - Calibration: synthetic DbLib + Access (a copy of Altium's Empty.mdb with generic
+    tables), DbLib + `.xlsx`, a DbLink, a WHERE-clause table, a `.udl` connection and a SQL
+    Server connection (skipped as network_not_allowed) all linked and compared as
+    expected, about 0.9 s per Access library (PowerShell start included) and 0.02 s per
+    workbook. On 63 private projects (4380 parts): 6 list a `.DbLink` (the only database
+    files there, all found by the project), each an Access connection with no tables and a
+    data source not on this PC (no_tables, data source file_missing), no part placed from
+    a database library, no credentials; checks take 0.016 s at most.
 - `get_active_bom` (roadmap #43): the project's ActiveBOM document (`.BomDoc`) read
   offline (`server/parsers/bom_doc.py`, `server/services/active_bom.py`), so the copilot
   sees the engineer's sourcing decisions; netlist required. No supplier is queried: stock,

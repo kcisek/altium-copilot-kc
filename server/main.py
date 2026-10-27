@@ -166,6 +166,7 @@ try:
         page_library_checks, page_library_part, project_files, project_libraries,
         registry_projects, run_library_checks,
     )
+    from services import db_parts
     from parsers.pin_table import PinTableError, parse_pin_file, parse_pin_text
     from services.pin_table import (
         check_pins as check_pin_rows, page as page_pin_table, placed_pins, symbol_pins,
@@ -337,6 +338,7 @@ except ImportError:
         page_library_checks, page_library_part, project_files, project_libraries,
         registry_projects, run_library_checks,
     )
+    from server.services import db_parts
     from server.parsers.pin_table import PinTableError, parse_pin_file, parse_pin_text
     from server.services.pin_table import (
         check_pins as check_pin_rows, page as page_pin_table, placed_pins, symbol_pins,
@@ -594,8 +596,28 @@ DNP reasons, fabrication requirements. Use it.
   pad, Altium's SchLib and PcbLib Component Rule Checks, net ties, 3D bodies against the
   fallback Height and where-used across the registered projects (library= checks a whole
   library). A drift finding says the board and the library differ, not which is right:
-  ask the user before suggesting Update From PCB Libraries. Workspace (Altium 365) and
-  DbLib parts are not readable offline: say so instead of calling them missing.
+  ask the user before suggesting Update From PCB Libraries. Workspace (Altium 365) parts
+  are not readable offline: say so instead of calling them missing. DbLib parts take
+  their symbol and footprint from a database: the two tools below read it.
+
+## Database Libraries
+
+- get_db_part — "what is the approved MPN and alternates for C12?", "is this part in our
+  database at all?", "what does the database say about U3?": the database record behind
+  a placed part (designator=), a Design Item ID or a key value, from the project's
+  .DbLib, .SVNDbLib and .DbLink files: how it was matched (key field or WHERE clause) and
+  how sure (confidence), every mapped field with its parameter, database and schematic
+  values, the symbol and footprint the record names, and alternates (same Value and
+  footprint). Quote matched_by and confidence; "not found" holds only for the libraries
+  that were queried: name skipped ones and their reason.
+- check_db_parameters — "are my parameters in sync with the database?", "what would
+  Update Parameters From Database change?", "which parts are missing from the database?":
+  every database-linked part against its record (would_change, would_add, would_remove,
+  record_not_found, duplicate_records, symbol and footprint differences), per library.
+  It is a preview: Altium's Update Parameters From Database applies it. Sources are
+  opened read-only; servers, ODBC data sources, network shares, OneDrive folders and
+  linked tables inside an Access file only with allow_network=true: ask the user before
+  passing it. Never ask for or repeat a password; connection strings are shown masked.
 
 ## Pin Tables
 
@@ -1172,7 +1194,8 @@ NETLIST_TOOLS = (
     "get_power_tree", "check_derating", "check_logic_levels", "get_circuit_calculations",
     "check_thermal", "check_hv_clearance", "check_power_paths", "get_firmware_pin_map",
     "run_erc", "check_sch_pcb_sync", "check_directive_sync", "get_constraints_brief",
-    "generate_rule_file", "schematic_review", "package_for_xfn",
+    "generate_rule_file", "schematic_review", "package_for_xfn", "get_db_part",
+    "check_db_parameters",
 )
 
 
@@ -8613,7 +8636,7 @@ def get_library_part(
     library's, as check_libraries) and 3d on the board. Pins, pads and bodies page
     together (offset from next_offset); lengths in units (default the board's display
     unit). Workspace (Altium 365) and database-library parts are not readable offline:
-    not_available_offline says so."""
+    not_available_offline says so (get_db_part reads a database part's record)."""
     try:
         project, netlist, _ = _require_project(netlist=False)
     except ProjectNotReady as error:
@@ -8735,8 +8758,9 @@ def check_libraries(
     Findings (errors first, items many share grouped per library) are paginated (offset
     from next_offset); lengths in units (default the board's display unit). A drift
     finding says the board and the library differ, not which is right. Workspace (Altium
-    365) parts and DbLib parts (roadmap #53) are not readable offline:
-    not_available_offline and not_readable_offline_parts say so."""
+    365) parts and DbLib parts are not readable offline: not_available_offline and
+    not_readable_offline_parts say so (check_db_parameters checks DbLib parts against
+    their database)."""
     try:
         project, netlist, _ = _require_project(netlist=False)
     except ProjectNotReady as error:
@@ -8778,6 +8802,234 @@ def check_libraries(
         "findings_omitted": "The result is too large even at 1 finding per page: call again "
                             "with checks= narrowed to one check or part= to a few parts."}
     return json.dumps(_convert_units(brief, to_mm), indent=2)
+
+
+# ---------- database library parts (roadmap #53) ----------
+
+DB_PART_STEPS = ((10, 10, 200), (5, 5, 60), (3, 3, 20), (1, 1, 5), (1, 0, 0))
+DB_CHECK_STEPS = (100, 50, 25, 10, 5, 1)
+DB_SECURITY_NOTE = (
+    "Database sources are opened read-only (SELECT with parameters, a row limit and a "
+    "timeout); connection strings are never shown unmasked. Servers, ODBC data sources "
+    "that are not a local file, network shares and OneDrive folders are queried only with "
+    "allow_network=true.")
+
+
+def _db_failure(tool: str, failure: Exception) -> str:
+    """The error of a database tool that raised: the exception's type only (its message
+    could quote a connection string or a path)."""
+    logging.warning("%s failed: %s", tool, type(failure).__name__)
+    return json.dumps({"error": "database_lookup_failed",
+                       "message": f"The database lookup failed ({type(failure).__name__})."})
+
+
+@mcp.tool(
+    title="Get Database Part",
+    annotations=ToolAnnotations(readOnlyHint=True),
+    meta={"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS},
+)
+def get_db_part(
+    designator: str | None = None,
+    design_item: str | None = None,
+    key: str | None = None,
+    library: str | None = None,
+    table: str | None = None,
+    variant: str | None = None,
+    allow_network: bool = False,
+    alternates_by: list[str] | None = None,
+    offset: int = 0,
+) -> str:
+    """The database record behind a part, read from the project's database libraries
+    (.DbLib, .SVNDbLib) and database link files (.DbLink): "what is the approved MPN and
+    alternates for C12?", "is this part in our database at all?", "what does the database
+    say about U3?", "which symbol and footprint does the record name?". Not: the library
+    symbol or footprint files themselves (get_library_part), every part's drift
+    (check_db_parameters).
+
+    designator= a placed part: its record by the table's key field (the part's parameter
+    or system field the key maps to, else its Design Item ID) or WHERE clause
+    ({Parameter} placeholders take the part's values), in the table the part names (a
+    DbLib part; a DbLink part with UseDBTableName) or the enabled tables in order, the
+    first table with a record winning (also_found_in_tables lists the others).
+    design_item= a Design Item ID (a placed part that has it, else looked up as a key
+    value); key= a key value looked up in every enabled table (narrow with library= and
+    table=). Each match gives the library and how it was found (found_by: project,
+    installed, search path, part's library path), matched_by (key field and value, or the
+    WHERE clause and its values), confidence (exact; design_item_id: found by the Design
+    Item ID standing in for a key parameter the part lacks or holds another value in;
+    ambiguous: several records, or the key parameter and the Design Item ID name
+    different records, key_conflict), every mapped field with the parameter it maps to,
+    the database and schematic values, its update options (with visible_on_add) and what
+    Update Parameters From Database would do (status: same, would_change, would_add,
+    would_remove, differs_not_updated, blank_in_database, key; a footprint field after
+    the first: part_model or not_on_part; a library path the part does not record:
+    not_recorded), the unmapped fields, the symbol and footprint the record names against
+    the placed ones, and drift findings. records_truncated: more records than the 5 a
+    lookup reads. alternates: other records of the table with the same Value and
+    [Footprint Ref] (alternates_by= other parameters or system fields; records with the
+    part's own key value are left out), at most 10. The variant (default: the active one)
+    says whether the part is fitted and looks up its alternate part.
+
+    A library whose source cannot be read is listed in skipped with the reason
+    (no_driver, network_not_allowed, file_missing, onedrive_or_share, unreadable). Data
+    sources are opened read-only; a database server, an ODBC data source that is not a
+    local file, a network share or a OneDrive folder (also a path elsewhere in the
+    connection, a Data Link file, or a linked table or saved query inside a local Access
+    file: problem query_failed, not_local_table) only with allow_network=true. The
+    connection is described (kind, provider, data source, credentials present) with every
+    secret masked. Matches are paginated (offset from next_offset)."""
+    try:
+        project, netlist, variant_state = _require_project()
+    except ProjectNotReady as error:
+        return json.dumps(error.payload)
+    no_components = _no_components_error(netlist)
+    if no_components:
+        return json.dumps(no_components)
+    if not any(str(value or "").strip() for value in (designator, design_item, key)):
+        return json.dumps({"error": "nothing_to_look_up",
+                           "message": "Pass designator= (a placed part), design_item= (a "
+                                      "Design Item ID) or key= (a key field value)."})
+    if alternates_by is not None and not (
+            isinstance(alternates_by, list) and all(isinstance(name, str) for name in alternates_by)):
+        return json.dumps({"error": "invalid_alternates_by",
+                           "message": "alternates_by is a list of parameter names or system "
+                                      "fields such as '[Footprint Ref]'."})
+    plan, _, error = _bom_plan(netlist, variant_state, variant)
+    if error:
+        return json.dumps(error)
+    try:
+        model = db_parts.build_part(db_parts.PartInputs(
+            project["prj_pcb_path"], netlist, plan, _installed_libraries(),
+            designator=designator, design_item=design_item, key=key, library=library,
+            table=table, allow_network=bool(allow_network), alternates_by=alternates_by))
+        if "error" not in model:
+            db_parts.add_alternates(model, alternates_by, bool(allow_network))
+    except Exception as failure:  # a database problem must never break the server
+        return _db_failure("get_db_part", failure)
+    if "error" in model:
+        return json.dumps(model)
+    header = {"variant": plan.name, "allow_network": bool(allow_network),
+              "security": DB_SECURITY_NOTE}
+    offset = max(0, int(offset or 0))
+    matches = model.get("matches") or []
+    result: dict = {}
+    for limit, alternates, unmapped in DB_PART_STEPS:
+        page = dict(model)
+        page["matches"] = matches[offset:offset + limit]
+        result = {**header, **db_parts.page_part(page, alternates, unmapped)}
+        result["matches_total"] = len(matches)
+        result["offset"] = offset
+        result["has_more"] = offset + limit < len(matches)
+        if result["has_more"]:
+            result["next_offset"] = offset + limit
+        if (limit, alternates, unmapped) != DB_PART_STEPS[0]:
+            result["limited_to"] = {"matches": limit, "alternates": alternates,
+                                    "unmapped_fields": unmapped}
+        rendered = json.dumps(result, indent=2)
+        if len(rendered) <= QUERY_NET_MAX_RESULT_SIZE_CHARS:
+            return rendered
+    brief = {key_: value for key_, value in result.items() if key_ not in ("matches", "alternates")}
+    brief["matches_omitted"] = ("The record is too large even trimmed: call again with "
+                                "table= or library= to narrow it.")
+    return json.dumps(brief, indent=2)
+
+
+@mcp.tool(
+    title="Check Database Parameters",
+    annotations=ToolAnnotations(readOnlyHint=True),
+    meta={"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS},
+)
+def check_db_parameters(
+    variant: str | None = None,
+    library: str | None = None,
+    table: str | None = None,
+    allow_network: bool = False,
+    offset: int = 0,
+) -> str:
+    """Every part placed from a database library (.DbLib, .SVNDbLib) or linked through a
+    database link file (.DbLink) against its database record: a read-only preview of
+    Altium's Update Parameters From Database. "Are my parameters in sync with the
+    database?", "which parts are not in our database?", "what would Update Parameters
+    From Database change?", before a release or a BOM export. Nothing is changed: run
+    the update in Altium to apply it.
+
+    Findings (warnings first; per part, library and table): would_change (the part's
+    value differs and the field's update option is Always; a parameter on the sheet with
+    an empty value counts as present), would_add (the part lacks a mapped parameter the
+    update adds: Always, or If not blank with a value; with visible_on_add), would_remove
+    (blank in the database, remove option If blank), differs_not_updated (update option
+    Never), blank_in_database (kept), case-only differences as info; the key field's own
+    parameter is compared too when the record was found by the Design Item ID.
+    record_not_found, duplicate_records (several records match: the first is compared;
+    more_records when more than the 5 read), key_conflict (the key parameter and the
+    Design Item ID name different records: the key parameter's is compared),
+    found_in_several_tables (info: the first table in the library's order is used),
+    symbol_differs ([Library Ref] against the placed symbol), footprint_differs
+    ([Footprint Ref] against the current footprint: info when it is another of the
+    part's models), library_path_differs (only when the part records a library file),
+    description_differs, key_missing (a DbLib part without the key value),
+    table_not_in_library, table_disabled, no_lookup, where_unsupported (a WHERE clause
+    beyond comparisons with AND, OR, NOT, LIKE, IS NULL), bad_name (a table or field name
+    that cannot be quoted safely: only its lookups are left out), query_failed (with the
+    error, e.g. not_local_table: a linked table or saved query in a local Access file,
+    queried only with allow_network=true), library_not_found (parts name a database
+    library the project cannot find), library_unreadable, library_skipped (with the
+    reason: no_driver, network_not_allowed, file_missing, onedrive_or_share,
+    unreadable, or the query layer's code), no_tables, and alternate_record_not_found
+    (the variant's alternate part). Lookup problems that need no query are reported
+    even when the source is skipped; a database link file's table problems once per
+    table with its parts. A DbLink links a part by its key parameter: parts without it
+    are counted (parts_without_key), not reported; parts restricted to a table it lacks
+    or has disabled (UseDBTableName) are counted (parts_table_not_in_link,
+    parts_table_disabled).
+
+    libraries: each library with found_by (project, installed, search path, part's
+    library path), the connection described with every secret masked, update defaults,
+    tables (lookup by key field or WHERE clause, mapped fields, symbol and footprint
+    fields), parts linked, records found, queries and seconds, finding counts. variant
+    (default: the active one) marks Not Fitted parts (fitted false) and the values its
+    parameter variations set (variant_value); parameters compare on the base design, as
+    the update does. library= and table= narrow the check; allow_network=true also queries
+    database servers, ODBC data sources that are not a local file, network shares and
+    OneDrive folders (read-only). Findings are paginated (offset from next_offset)."""
+    try:
+        project, netlist, variant_state = _require_project()
+    except ProjectNotReady as error:
+        return json.dumps(error.payload)
+    no_components = _no_components_error(netlist)
+    if no_components:
+        return json.dumps(no_components)
+    plan, _, error = _bom_plan(netlist, variant_state, variant)
+    if error:
+        return json.dumps(error)
+    inputs = db_parts.CheckInputs(project["prj_pcb_path"], netlist, plan,
+                                  _installed_libraries(), library=library, table=table,
+                                  allow_network=bool(allow_network))
+    key = (project["prj_pcb_path"], id(netlist), _netlist_last_updated, plan.name,
+           (library or "").strip().lower(), (table or "").strip().lower(), bool(allow_network),
+           db_parts.library_signature(project["prj_pcb_path"]))
+    try:
+        model = db_parts.cached_check(key, lambda: db_parts.build_check(inputs))
+    except Exception as failure:  # a database problem must never break the server
+        return _db_failure("check_db_parameters", failure)
+    if "error" in model:
+        return json.dumps(model)
+    header = {"variant": plan.name, "allow_network": bool(allow_network),
+              "security": DB_SECURITY_NOTE}
+    offset = max(0, int(offset or 0))
+    result: dict = {}
+    for limit in DB_CHECK_STEPS:
+        result = {**header, **db_parts.page_check(model, offset, limit)}
+        if limit != DB_CHECK_STEPS[0]:
+            result["findings_limited_to"] = limit
+        rendered = json.dumps(result, indent=2)
+        if len(rendered) <= QUERY_NET_MAX_RESULT_SIZE_CHARS:
+            return rendered
+    brief = {**header, "summary": model["summary"],
+             "findings_total": len(model["findings"]),
+             "findings_omitted": "The result is too large even at 1 finding per page: call "
+                                 "again with library= or table= to narrow it."}
+    return json.dumps(brief, indent=2)
 
 
 # ---------- check_pin_table (roadmap #22) ----------

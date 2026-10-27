@@ -337,6 +337,10 @@ def _make_enriched(meta: "ComponentMeta", comp_pins: dict) -> dict:
         "library_path": meta.library_path,
         "workspace_part": meta.workspace_part,
         "database_table": meta.database_table,
+        "database_library": meta.database_library,
+        "use_db_table_name": meta.use_db_table_name,
+        # Parameters present on the sheet with an empty value (for check_db_parameters).
+        "blank_params": [name for name in meta.blank_params if name not in meta.params],
         "footprint_library": meta.footprint_library,
         "footprint_from_component_library": meta.footprint_from_component_library,
         "compile_masked": meta.compile_masked,
