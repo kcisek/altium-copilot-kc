@@ -282,7 +282,8 @@
       const key = CONTRACT.paged[kind];
       const data = { ...first, [key]: [...(first[key] || [])] };
       const { pages, stopped } = await Shell.readPages({
-        first, tool: "run_erc", budget: Shell.pageBudget(MAX_PAGES), closed: () => view.closed,
+        // The first page counts: a stop says "at most 60 pages" after 60 pages read.
+        first, tool: "run_erc", budget: Shell.pageBudget(MAX_PAGES, 1), closed: () => view.closed,
         pageOffset: (page) => (page.next_offset === undefined ? null : page.next_offset),
         getPage: (offset) => getPage(offset, baseArgs(), first.total),
         onPage: (page) => data[key].push(...(page[key] || [])),

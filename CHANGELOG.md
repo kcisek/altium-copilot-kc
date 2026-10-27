@@ -100,6 +100,66 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
     description, waived tables sharing a title, a rule counted but not listed), paging
     the way the views page gives every row once, a later page, narrowed calls, single-pin
     nets, and the shell's contrast, style-value, teardown, grid and focus rules.
+- Variant comparison view (roadmap #61): Claude Desktop opens `compare_variants`' result
+  as an interactive side-by-side comparison; the tool's text result is unchanged, byte for
+  byte (only its `_meta` links the view), and Claude Code shows the text as before.
+  - `server/ui/variants.html`, linked from `compare_variants` only. `list_variants` links
+    no view (the model calls it at every session start, where a panel would repeat the
+    text) and only fills the view's picker through `tools/call`; the registry stays one
+    tool per view.
+  - Every page of `compare_variants` read (a later page as the result: from offset 0, else
+    the documentation, stale entries and notes shown as not known), each page checked to be
+    one of the same comparison. One row per designator and difference with variant a,
+    variant b and the base design, grouped by kind (fitted in one only, values, other
+    parameters, alternate parts, variant parameters) or by part, with counts, sort, a text
+    filter, kind chips and a column chooser; Fitted and Not Fitted as badges (with the
+    fitted side's varied parameters or alternate part), a value that differs from the base
+    design highlighted and one equal to it marked; no sheet grouping, since
+    `compare_variants` gives no sheet.
+  - A picker for a and b filled from `list_variants` (with the base design) that asks
+    `compare_variants` again (Compare, Swap a and b): it only compares, and the page says
+    so; no view calls `set_active_variant` or any tool that changes the copilot's state
+    (the page refuses any tool but `compare_variants`, `list_variants` and
+    `get_component`, and a test checks that every tool any view page names is registered
+    and read-only).
+  - A Documentation tab: per variant, the OutJob outputs set to it (BOM, pick and place,
+    assembly drawing), the missing ones as findings (a's and b's listed, the others
+    counted), the Draftsman drawings set to it or whose notes name it, and the stale
+    variant entries.
+  - A details pane per part: its differences across a, b and the base design, its
+    alternate part's library data, and a button that asks `get_component`, labelled as the
+    ACTIVE variant's view: `list_variants` is asked first, each answer names the active
+    variant it was asked under (the one `get_component`'s variant_changes names when it
+    has them), a kept answer is asked again when `list_variants` names another active
+    variant, and an answer can be asked again. Without a netlist (which `get_component`
+    needs) the button is not offered.
+  - States: no variants (empty, with the tool's text), two identical variants (empty, with a
+    note), no project, an unknown variant (with the picker, starting from the side of the
+    call the project has; a failed compare from there keeps the state and the picker), a
+    cancelled call, paging stopped with its reason, the view closed (no more asks); the
+    picker and the filters fold behind a disclosure unless the host leaves the table (and,
+    on a host 980 px wide or less, the details pane under it) about five rows, and on a
+    short host 980 px wide or less a part's details take the table's place (Close or Esc
+    brings the table back, with focus on its row). Groups and the Part column follow
+    `compare_variants`' natural order; the a and b headers wrap; a value that differs from
+    the base design keeps a ring on a selected row; `compare_variants`' cap of 20 stale
+    entries per variant shows as "at least".
+  - Shell: the details cache can forget an answer that may be out of date
+    (`toolCache().forget`); keyboard focus stays in a redrawn container when the control
+    it was on is gone (a Retry or Ask again replaced by "Asking…"): on a fallback the
+    page gives, else the control now at its place; a page budget can count the result's
+    first page (`pageBudget(total, used)`), so the run_erc and compare_variants views
+    stop after 60 pages read in all, as their notice says; and a frame measured before
+    it has a size is measured again on a timer, so its first size-changed is sent where
+    animation frames and ResizeObserver callbacks are held back.
+  - Tests (`tests/test_ui_variants.py`): the resource and link, the self-contained page,
+    the read-only rule for every view's calls, the data contract against `compare_variants`
+    and `list_variants` on the repo's Demo project and a copy of Altium's public
+    SpiritLevel example with four variants added (Not Fitted parts, varied parameters, an
+    alternate part with its `.PrjPcbVariants` copy, variant parameters, OutJob outputs per
+    variant, stale entries, more than one page of differences, no netlist), paging the way
+    the view pages gives every difference once (also with trimmed pages), a later page,
+    the error payloads and empty states, and unchanged text results.
 - `trace_net_across_boards`, `check_multiboard` and `get_system_connections` (roadmap
   #54): multi-board systems (`.PrjMbd`) read offline; the loaded project is never
   changed and none of the three needs its netlist.

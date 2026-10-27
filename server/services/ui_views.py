@@ -43,6 +43,13 @@ for both. Their results share the table and its details but little else (ERC's s
 report levels, suppressed counts and advisories; DRC's assessment, board units and
 origin, per-rule paging, health, waived and warning sections), so each page carries one
 tool's data contract and the registry keeps one tool per view.
+
+The variant comparison (roadmap #61) is linked from compare_variants only. list_variants
+feeds its picker through tools/call and links no view: the model calls it at the start of
+every session, where a panel would only show the variant list the text already gives, and
+the registry stays one tool per view. The picker only compares: no view calls
+set_active_variant or any other tool that changes the server's state (every tool a page
+calls is a read-only one; tests/test_ui_variants.py checks each page).
 """
 
 from __future__ import annotations
@@ -141,6 +148,24 @@ VIEWS = (
             "PCB health issues, waived violations and report warnings, and a details pane "
             "per violation with the board around its location, its parts and nets from "
             "query_pcb_region, get_component and query_net."
+        ),
+    ),
+    View(
+        name="variant-comparison",
+        tool="compare_variants",
+        file="variants.html",
+        title="Variant comparison",
+        description=(
+            "HTML page (MCP Apps view) that hosts showing MCP Apps draw next to "
+            "compare_variants' result; not for reading as text. Two variants side by "
+            "side: one row per designator and difference with variant a, variant b and "
+            "the base design (parts fitted in one only, values, other parameters, "
+            "alternate parts, variant parameters), grouped by kind or by part with "
+            "counts, sortable and filterable, values equal to the base design marked; a "
+            "picker for a and b filled from list_variants that only compares (it never "
+            "switches the active variant); the per-variant documentation check and stale "
+            "variant entries; and a details pane per part with get_component, which shows "
+            "the active variant."
         ),
     ),
 )
