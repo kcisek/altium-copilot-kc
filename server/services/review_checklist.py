@@ -70,9 +70,9 @@ EVIDENCE_TOOLS = (
     "check_rule_compliance", "check_lengths", "check_diff_pairs", "list_diff_pairs",
     "get_classes", "get_design_rules", "check_vias", "check_testpoints", "check_dfm",
     "check_thermal", "check_hv_clearance", "check_power_paths", "check_return_path",
-    "check_diff_pair_geometry", "check_fab_drawing", "get_output_jobs", "verify_outputs",
-    "check_release_readiness", "check_libraries", "get_drc_report", "get_board_info",
-    "get_design_notes", "get_clone_status",
+    "check_diff_pair_geometry", "check_mechanical_fit", "check_fab_drawing", "get_output_jobs",
+    "verify_outputs", "check_release_readiness", "check_libraries", "get_drc_report",
+    "get_board_info", "get_design_notes", "get_clone_status",
 )
 RESERVED_ARGS = ("offset", "format")
 CUSTOM_TOOL = "run_custom_checks"  # answers the custom items

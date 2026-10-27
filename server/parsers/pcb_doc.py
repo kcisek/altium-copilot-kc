@@ -937,6 +937,10 @@ class PcbLayer:
     diel_const: float | None = None
     material: str | None = None
     v7_id: int | None = None
+    # The layer stacks (V9_SUBSTACKn_ID, upper case) that hold this stack layer: those
+    # whose V9_STACK_LAYERn_{id}CONTEXT is 0 (a rigid-flex board's flex stack leaves the
+    # rigid-only layers out with 1); None when the stack records no CONTEXT for it.
+    substacks: frozenset[str] | None = None
 
 
 @dataclass
@@ -1317,6 +1321,9 @@ def _copper_v6(layer_id: int | None) -> int | None:
     return None
 
 
+_STACK_CONTEXT = re.compile(r"V9_STACK_LAYER(\d+)_(\{[^}]*\})CONTEXT")
+
+
 def decode_board(records: list[dict[str, str]]) -> BoardInfo:
     """Decode Board6 text properties into coordinate and stackup metadata."""
     properties = records[0] if records else {}
@@ -1328,6 +1335,13 @@ def decode_board(records: list[dict[str, str]]) -> BoardInfo:
 
     layers: list[PcbLayer] = []
     plane_pullbacks: dict[int, tuple[float, str]] = {}
+    # Stack layer order -> {layer stack id: its CONTEXT value} (PcbLayer.substacks).
+    stack_contexts: dict[int, dict[str, str]] = {}
+    for key, value in properties.items():
+        match = _STACK_CONTEXT.fullmatch(key)
+        if match:
+            stack_contexts.setdefault(int(match.group(1)), {})[match.group(2).upper()] = \
+                value.strip()
     order = 0
     stackup_source = "legacy"
     while True:
@@ -1358,6 +1372,7 @@ def decode_board(records: list[dict[str, str]]) -> BoardInfo:
             pullback = parse_dim_mil(properties.get(f"{prefix}PULLBACKDISTANCE"))
             if pullback is not None and pullback >= 0:
                 plane_pullbacks[v6_id] = (pullback, "stack")
+        contexts = stack_contexts.get(order, {})
         layers.append(
             PcbLayer(
                 v6_id=v6_id if v6_id is not None else name_to_v6.get(name.lower()),
@@ -1373,6 +1388,8 @@ def decode_board(records: list[dict[str, str]]) -> BoardInfo:
                 ),
                 material=properties.get(f"{prefix}DIELMATERIAL"),
                 v7_id=layer_id,
+                substacks=frozenset(stack for stack, value in contexts.items() if value == "0")
+                if contexts else None,
             )
         )
         order += 1
@@ -1805,6 +1822,11 @@ class PcbRegion:
     name: str = ""
     # The mechanical layer number its V7_LAYER names (MECHANICAL17), None when unset.
     mechanical: int | None = None
+    # BoardRegions records: the layer stack (V9_SUBSTACKn_ID, BoardInfo.substacks) the
+    # region uses (LAYERSTACKID) and its bending line count (BENDINGLINECOUNT); None and 0
+    # elsewhere.
+    layer_stack_id: str | None = None
+    bending_lines: int = 0
 
 
 _V7_LAYER_NAME = re.compile(r"MECHANICAL(\d+)", re.IGNORECASE)
@@ -1841,16 +1863,20 @@ def _read_shape_vertices(payload: bytes, at: int) -> tuple[list[ShapeVertex], in
     return vertices, at
 
 
-def decode_region_records(data: bytes, shape_based: bool) -> tuple[list[PcbRegion], int]:
+def decode_region_records(data: bytes, shape_based: bool,
+                          layers: set[int] | None = None) -> tuple[list[PcbRegion], int]:
     """Region records (_region_heads) with their shapes, on any layer: the outline
     as u32 count + (double x, double y) vertices (Regions6, BoardRegions) or as
     _read_shape_vertices reads it (shape_based: ShapeBasedRegions6, with arcs).
-    Unreadable records and records on no valid layer are counted as skipped."""
+    Unreadable records and records on no valid layer are counted as skipped. layers, when
+    given, keeps the records on those v6 layers only (the others are not read)."""
     regions: list[PcbRegion] = []
     skipped = 0
     for index, payload, head in _region_heads(data):
         if head is None or not _valid_layer(head.layer):
             skipped += 1
+            continue
+        if layers is not None and head.layer not in layers:
             continue
         try:
             if shape_based:
@@ -1881,6 +1907,8 @@ def decode_region_records(data: bytes, shape_based: bool) -> tuple[list[PcbRegio
             holes=holes,
             name=head.properties.get("NAME", ""),
             mechanical=v7_layer_mechanical(head.properties.get("V7_LAYER")),
+            layer_stack_id=head.properties.get("LAYERSTACKID", "").strip() or None,
+            bending_lines=_optional_int(head.properties.get("BENDINGLINECOUNT")) or 0,
         ))
     return regions, skipped
 

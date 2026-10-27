@@ -1174,6 +1174,21 @@ def review_testpoints(
     return result
 
 
+def probe_sides(index, probe_side: str | None = None) -> tuple[str | None, str, list[Probe]]:
+    """(side, chosen_by, probe points) of an in-circuit test as check_testpoints decides
+    it: probe_side as given (chosen_by "given"), else the ict profile's auto choice (the
+    side reaching more nets, then the side with more probe points). side is None when the
+    board has no probe site and none is given. side may be "both"."""
+    profile, _ = build_profile(DEFAULT_PROFILE)
+    if probe_side:
+        profile = {**profile, "probe_side": probe_side, "probe_side_chosen_by": "given"}
+    review = _Review(index, profile, set(), None, "mil")
+    if not review.probes and not probe_side:
+        return None, "no_probe_sites", []
+    side, chosen_by = review.probe_side
+    return side, chosen_by, list(review.probes)
+
+
 def page_result(full: dict, offset: int = 0, limit: int = 100) -> dict:
     """A page of review_testpoints' result: findings from offset."""
     result = dict(full)

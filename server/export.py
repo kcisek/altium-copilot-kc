@@ -116,7 +116,100 @@ def _create_derived_schema(conn: sqlite3.Connection) -> None:
           data        TEXT NOT NULL DEFAULT '{}'  -- alternate part: library, footprint, JSON
         );
         CREATE INDEX idx_variant_variations_refdes ON variant_variations(refdes);
+        -- The mechanical handoff (get_mechanical_handoff) of the project's PcbDoc, for the
+        -- mechanical team: lengths in mm, coordinates relative to the board origin, viewed
+        -- from the top; polygons are JSON [[x, y], ...]. Plan view only (not STEP / IDX).
+        CREATE TABLE mech_board (
+          id            INTEGER PRIMARY KEY,
+          pcb_doc       TEXT,
+          thickness_mm  REAL,                     -- from the layer stack; NULL when unknown
+          width_mm      REAL,
+          height_mm     REAL,
+          area_mm2      REAL,
+          origin_x_mm   REAL,                     -- the board origin, absolute
+          origin_y_mm   REAL,
+          data          TEXT NOT NULL DEFAULT '{}'  -- per-side summaries, JSON
+        );
+        CREATE TABLE mech_outline (
+          id       INTEGER PRIMARY KEY,
+          kind     TEXT NOT NULL,                 -- 'outline' | 'cutout' | 'board_region'
+          name     TEXT,
+          polygon  TEXT NOT NULL,
+          data     TEXT NOT NULL DEFAULT '{}'     -- board regions: layer_stack, is_flex
+        );
+        CREATE TABLE mech_mounting_holes (
+          id                INTEGER PRIMARY KEY,
+          refdes            TEXT,                 -- the mounting-hole part; NULL: a free hole
+          x_mm              REAL NOT NULL,
+          y_mm              REAL NOT NULL,
+          drill_mm          REAL NOT NULL,
+          slot_length_mm    REAL,
+          plated            INTEGER,
+          net_name          TEXT,
+          pad_mm            REAL,
+          screw             TEXT,                 -- 'M3': the largest thread that passes
+          free_radius_mm    REAL,                 -- to the nearest copper, body or edge
+          limited_by        TEXT,
+          edge_distance_mm  REAL,                 -- hole wall to the board edge
+          fitted            INTEGER NOT NULL DEFAULT 1  -- 0: its part is Not Fitted (the
+                                                         -- hole is drilled all the same)
+        );
+        CREATE TABLE mech_connectors (
+          id              INTEGER PRIMARY KEY,
+          refdes          TEXT NOT NULL,
+          x_mm            REAL,
+          y_mm            REAL,
+          rotation        REAL,
+          side            TEXT,
+          edge            TEXT,                   -- left | right | top | bottom | outline | cutout
+          edge_offset_mm  REAL,                   -- negative: past the edge (overhang)
+          overhang_mm     REAL,
+          facing          TEXT,                   -- '+X', '-Y' ... when at the edge
+          kind            TEXT,                   -- external | internal | unknown
+          data            TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE TABLE mech_regions (
+          id             INTEGER PRIMARY KEY,
+          kind           TEXT NOT NULL,           -- keepout_layer, copper_keepout, room ...
+          name           TEXT,
+          side           TEXT,
+          polygon        TEXT NOT NULL,
+          max_height_mm  REAL,
+          data           TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE TABLE mech_parts (
+          id             INTEGER PRIMARY KEY,
+          refdes         TEXT NOT NULL,
+          side           TEXT,
+          x_mm           REAL,
+          y_mm           REAL,
+          rotation       REAL,
+          height_mm      REAL,
+          standoff_mm    REAL,
+          height_source  TEXT NOT NULL,           -- body | footprint_height | library_body
+                                                  -- | none | not_fitted
+          fitted         INTEGER NOT NULL,
+          extent         TEXT                     -- [min x, min y, max x, max y], JSON
+        );
+        CREATE INDEX idx_mech_parts_refdes ON mech_parts(refdes);
     """)
+
+
+# Columns of the mech_* tables in insert order; JSON columns are dumped.
+MECHANICAL_TABLES = {
+    "mech_board": ("pcb_doc", "thickness_mm", "width_mm", "height_mm", "area_mm2",
+                   "origin_x_mm", "origin_y_mm", "data"),
+    "mech_outline": ("kind", "name", "polygon", "data"),
+    "mech_mounting_holes": ("refdes", "x_mm", "y_mm", "drill_mm", "slot_length_mm", "plated",
+                            "net_name", "pad_mm", "screw", "free_radius_mm", "limited_by",
+                            "edge_distance_mm", "fitted"),
+    "mech_connectors": ("refdes", "x_mm", "y_mm", "rotation", "side", "edge", "edge_offset_mm",
+                        "overhang_mm", "facing", "kind", "data"),
+    "mech_regions": ("kind", "name", "side", "polygon", "max_height_mm", "data"),
+    "mech_parts": ("refdes", "side", "x_mm", "y_mm", "rotation", "height_mm", "standoff_mm",
+                   "height_source", "fitted", "extent"),
+}
+_JSON_COLUMNS = {"data", "polygon", "extent"}
 
 
 def export_project(
@@ -127,13 +220,15 @@ def export_project(
     notes: list[dict] | None = None,
     firmware_pins: list[dict] | None = None,
     variant_variations: list[dict] | None = None,
+    mechanical: dict[str, list[dict]] | None = None,
 ) -> str:
     """Write in-memory project to a pcb-copilot .db file next to the .PrjPcb.
 
     notes are rows for the notes table (services.design_notes.note_rows); sheet notes
     are linked to their sheet by name. firmware_pins are rows for the firmware_pins table
     (services.firmware_pins.export_rows). variant_variations are rows for the
-    variant_variations table (services.variants.export_rows).
+    variant_variations table (services.variants.export_rows). mechanical holds the mech_*
+    tables' rows by table (services.mechanical_fit.export_rows).
     Returns the absolute path to the written file.
     Raises ValueError if a duplicate refdes is detected during INSERT.
     Always overwrites any existing file at the same path.
@@ -272,6 +367,18 @@ def export_project(
                     json.dumps(row.get("data") or {}),
                 ),
             )
+
+        for table, columns in MECHANICAL_TABLES.items():
+            for row in (mechanical or {}).get(table) or []:
+                values = []
+                for column in columns:
+                    value = row.get(column)
+                    if column in _JSON_COLUMNS and not (column == "extent" and value is None):
+                        value = json.dumps(value if value is not None else {})
+                    values.append(value)
+                conn.execute(
+                    f"INSERT INTO {table} ({', '.join(columns)}) VALUES "
+                    f"({', '.join('?' for _ in columns)})", values)
 
         conn.commit()
         _committed = True

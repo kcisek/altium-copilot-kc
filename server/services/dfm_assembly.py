@@ -437,7 +437,7 @@ def _span_size(span: float) -> str | None:
     return None
 
 
-def _box(points) -> tuple[float, float, float, float]:
+def points_box(points) -> tuple[float, float, float, float]:
     xs = [point[0] for point in points]
     ys = [point[1] for point in points]
     return min(xs), min(ys), max(xs), max(ys)
@@ -445,7 +445,7 @@ def _box(points) -> tuple[float, float, float, float]:
 
 def _middle(points) -> tuple[float, float]:
     """The centre of the points' box."""
-    box = _box(points)
+    box = points_box(points)
     return (box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0
 
 
@@ -503,8 +503,8 @@ def _centroid(pcb, part, holes) -> Centroid:
     turn = part.rotation % 90.0
     if min(turn, 90.0 - turn) > ORTHOGONAL_DEG:
         ox, oy = reference
-        local = _middle(_rotate(points, -part.rotation, ox, oy))
-        if _moved(_rotate([local], part.rotation, ox, oy)[0], centre):
+        local = _middle(rotate_points(points, -part.rotation, ox, oy))
+        if _moved(rotate_points([local], part.rotation, ox, oy)[0], centre):
             unverified.append("rotation")
     box = part.body_box or part.pad_box
     extent = basis = offset = None
@@ -541,7 +541,7 @@ def _box_gap(first, second) -> float:
     return math.hypot(dx, dy)
 
 
-def _rotate(points, angle: float, ox: float, oy: float) -> list[tuple[float, float]]:
+def rotate_points(points, angle: float, ox: float, oy: float) -> list[tuple[float, float]]:
     cosine, sine = math.cos(math.radians(angle)), math.sin(math.radians(angle))
     return [(ox + (x - ox) * cosine - (y - oy) * sine, oy + (x - ox) * sine + (y - oy) * cosine)
             for x, y in points]
@@ -633,7 +633,7 @@ def _fiducial_size(primitive) -> bool:
     return FIDUCIAL_MIN_MIL <= max(primitive.width, primitive.height or 0.0) <= FIDUCIAL_MAX_MIL
 
 
-def _area(polygon) -> float:
+def polygon_area(polygon) -> float:
     closed = list(polygon) + [polygon[0]]
     return abs(sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(closed, closed[1:]))) / 2.0
 
@@ -691,12 +691,12 @@ def _clip(subject, clip, sign: float) -> list[tuple[float, float]]:
     return output
 
 
-def _boundary_distance(x: float, y: float, polygon) -> float:
+def boundary_distance(x: float, y: float, polygon) -> float:
     closed = list(polygon) + [polygon[0]]
     return min(point_seg_distance(x, y, a[0], a[1], b[0], b[1]) for a, b in zip(closed, closed[1:]))
 
 
-def _overlap(first, second) -> bool:
+def outlines_overlap(first, second) -> bool:
     """Do two outlines share area (more than OVERLAP_AREA_MIL2), not just an edge?
     Exact when one is convex (clipping); else a vertex or centre of one well inside the
     other."""
@@ -704,11 +704,11 @@ def _overlap(first, second) -> bool:
         sign = _orientation(clip)
         if sign:
             part = _clip(subject, clip, sign)
-            return len(part) >= 3 and _area(part) > OVERLAP_AREA_MIL2
+            return len(part) >= 3 and polygon_area(part) > OVERLAP_AREA_MIL2
     for polygon, other in ((first, second), (second, first)):
         centre = (sum(x for x, _ in polygon) / len(polygon), sum(y for _, y in polygon) / len(polygon))
         for x, y in [*polygon, centre]:
-            if point_in_polygon(x, y, other) and _boundary_distance(x, y, other) > geometry.TOUCH_MIL:
+            if point_in_polygon(x, y, other) and boundary_distance(x, y, other) > geometry.TOUCH_MIL:
                 return True
     return False
 
@@ -760,7 +760,7 @@ class _RingCopper:
 
     def __init__(self, area):
         self.rings = [area.outline, *(hole for hole in area.holes if len(hole) >= 3)]
-        self.bbox = _box(area.outline)
+        self.bbox = points_box(area.outline)
         self._edges: list[tuple] | None = None
         self._bands: dict[int, list[int]] = {}
 
@@ -921,10 +921,10 @@ class _Model:
         pad_rect = pad_box = None
         if primitives:
             corners = [point for pad in primitives for point in _pad_corners(pad)]
-            local = _box(_rotate(corners, -rotation, ox, oy))
-            pad_rect = _rotate([(local[0], local[1]), (local[2], local[1]), (local[2], local[3]),
+            local = points_box(rotate_points(corners, -rotation, ox, oy))
+            pad_rect = rotate_points([(local[0], local[1]), (local[2], local[1]), (local[2], local[3]),
                                 (local[0], local[3])], rotation, ox, oy)
-            pad_box = _box(pad_rect)  # holds every pad's copper (and the rectangle)
+            pad_box = points_box(pad_rect)  # holds every pad's copper (and the rectangle)
         kept = tuple(
             Body(list(body.outline), body.overall_height_mil, body.standoff_height_mil,
                  body.model_type, body.layer)
@@ -932,7 +932,7 @@ class _Model:
         )
         body_box = None
         for body in kept:
-            body_box = _union(body_box, _box(body.outline))
+            body_box = _union(body_box, points_box(body.outline))
         heights = [body.overall_height_mil for body in kept if body.overall_height_mil is not None]
         if pad_box is not None:
             centre = ((pad_box[0] + pad_box[2]) / 2.0, (pad_box[1] + pad_box[3]) / 2.0)
@@ -951,7 +951,7 @@ class _Model:
             basis = "footprint" if size else None
             if size is None and kept:
                 outline = [point for body in kept for point in body.outline]
-                local = _box(_rotate(outline, -rotation, ox, oy))
+                local = points_box(rotate_points(outline, -rotation, ox, oy))
                 length, width = local[2] - local[0], local[3] - local[1]
                 size = _body_size(max(length, width), min(length, width))
                 basis = "body" if size else None
@@ -1005,7 +1005,7 @@ class _Model:
         rectangle), or its pad extent when it has no body (cached)."""
         found = self._shapes.get(part.component)
         if found is None:
-            bodies = [(_box(body.outline), _polygon(body.outline), body.outline)
+            bodies = [(points_box(body.outline), _polygon(body.outline), body.outline)
                       for body in part.bodies]
             pads = []
             if not part.bodies:
@@ -1055,7 +1055,7 @@ class _Model:
                         best = gap
                         if not overlap:
                             closest, basis = (shape, other), kind
-                    if not overlap and gap <= geometry.TOUCH_MIL and _overlap(
+                    if not overlap and gap <= geometry.TOUCH_MIL and outlines_overlap(
                         outline, other_outline
                     ):
                         overlap, closest, basis = True, (shape, other), kind
@@ -1244,7 +1244,7 @@ class _Model:
                                                pad_shapes)
             if part.bodies:
                 def body_shapes(part=part):
-                    return [(_box(body.outline), _polygon(body.outline)) for body in part.bodies]
+                    return [(points_box(body.outline), _polygon(body.outline)) for body in part.bodies]
                 near_body = self._nearest_piece(grid, part.body_box, search, part.component,
                                                 body_shapes)
             if near_pad is None and near_body is None:
@@ -1348,7 +1348,7 @@ class _Model:
     def _connection(index, sql, row: int, pad, areas) -> PadConnection:
         if pad.net is None:
             return PadConnection(row, pad.layer, None, "none", 0.0, 0.0)
-        ring_box = _grow(_box(oriented_rect_vertices(
+        ring_box = _grow(points_box(oriented_rect_vertices(
             pad.x1, pad.y1, pad.width + 2.0 * RING_MIL,
             (pad.height or pad.width) + 2.0 * RING_MIL, pad.rotation or 0.0,
         )), geometry.TOUCH_MIL)

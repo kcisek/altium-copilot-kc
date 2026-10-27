@@ -1438,6 +1438,39 @@ class ItemLoader:
         return self.kinds_declared.get(os.path.normcase(hit.path), False)
 
 
+def footprint_body_heights(components, libraries: "ProjectLibraries") -> dict[int, dict]:
+    """The library footprint's tallest 3D body for PcbDoc components (pcb_doc.PcbComponent)
+    whose footprint the project's libraries hold: {component index: {height_mil,
+    standoff_mil, library (file name), footprint, bodies}}. Components whose footprint is
+    not found or has no body with a height are left out (the libraries are read once
+    each, as check_libraries reads them)."""
+    components = list(components)
+    if not components:
+        return {}
+    resolver = LibraryResolver(libraries)
+    loader = ItemLoader()
+    results = resolver.resolve_pcb(components)
+    loader.load(footprints=[result.footprint_hit for result in results
+                            if result.footprint_hit is not None])
+    found: dict[int, dict] = {}
+    for component, result in zip(components, results):
+        footprint = loader.footprint(result.footprint_hit)
+        if footprint is None:
+            continue
+        bodies = [body for body in footprint.bodies if body.overall_height_mil]
+        if not bodies:
+            continue
+        tallest = max(bodies, key=lambda body: body.overall_height_mil)
+        found[component.index] = {
+            "height_mil": tallest.overall_height_mil,
+            "standoff_mil": tallest.standoff_height_mil,
+            "library": _library_name(result.footprint_hit.path),
+            "footprint": footprint.name,
+            "bodies": len(bodies),
+        }
+    return found
+
+
 def _library_name(path: str) -> str:
     return os.path.basename(path)
 

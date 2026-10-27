@@ -425,19 +425,19 @@ def _summary(findings: list[dict]) -> dict:
 # ---------- text lines ----------
 
 @dataclass(eq=False)
-class _Line:
+class NoteLine:
     text: str      # whitespace collapsed
     where: str
     source: str    # note | text | table | parameter | layer_note
 
 
-def _lines(doc: DraftsmanDoc) -> list[_Line]:
-    lines: list[_Line] = []
+def note_lines(doc: DraftsmanDoc) -> list[NoteLine]:
+    lines: list[NoteLine] = []
 
     def add(text: str | None, where: str, source: str) -> None:
         text = " ".join((text or "").split())
         if text:
-            lines.append(_Line(text, where, source))
+            lines.append(NoteLine(text, where, source))
 
     for name, value in doc.parameters.items():
         add(f"{name}: {value}", f"document parameter {name}", "parameter")
@@ -468,7 +468,7 @@ def _short(text: str | None, limit: int) -> str:
     return text if len(text) <= limit else text[:limit - 3].rstrip() + "..."
 
 
-def _quote(line: _Line, match: re.Match | None) -> dict:
+def _quote(line: NoteLine, match: re.Match | None) -> dict:
     text = line.text
     if len(text) > QUOTE_CHARS:
         start = match.start() if match else 0
@@ -551,7 +551,7 @@ _BOARD_WORDS = re.compile(r"\b(?:board|pcb|pwb|finished|overall|total|final|nomi
 _NOT_BOARD = re.compile(r"ohm|Ω|\b[OoОо]m\b|impedance|copper|\bcu\b|mask|silk|plating|"
                         r"gold|nickel|coating|trace|width|\boz\b|foil|stiffener|coverlay|"
                         r"dielectric|prepreg|core\b", re.I)
-_LENGTH = re.compile(_NUM + r"\s*(mm|mils?|thou|µm|um\b|microns?|in(?:ch(?:es)?)?\b|\"|'')?",
+LENGTH = re.compile(_NUM + r"\s*(mm|mils?|thou|µm|um\b|microns?|in(?:ch(?:es)?)?\b|\"|'')?",
                      re.I)
 # A length right before "thick" ("1.6 mm thick"), its unit required.
 _LENGTH_BEFORE = re.compile(_NUM + r"\s*(mm|mils?|thou|µm|um|microns?|in(?:ch(?:es)?)?|\"|'')"
@@ -563,7 +563,7 @@ _WORD = re.compile(r"[^\W\d_]{3,}")
 # Words that may stand between a thickness and its own tolerance.
 _VALUE_WORDS = {"nom", "nominal", "thick", "thk", "total", "finished", "overall", "approx",
                 "and", "with", "mil", "mils", "inch", "inches", "thou", "microns"}
-_MAX_WORDS = re.compile(r"\bmax(?:imum)?\b|≤|<|\bup\s+to\b|\bnot\s+(?:to\s+)?exceed|"
+MAX_WORDS = re.compile(r"\bmax(?:imum)?\b|≤|<|\bup\s+to\b|\bnot\s+(?:to\s+)?exceed|"
                         r"\bat\s+most\b", re.I)
 _MIN_WORDS = re.compile(r"\bmin(?:imum)?\b|≥|>|\bat\s+least\b", re.I)
 _TOLERANCE = re.compile(_PM + r"\s*" + _NUM + r"\s*(%|mm|mils?|in\b|\")?|"
@@ -619,7 +619,7 @@ def _tolerance_parts(match: re.Match) -> tuple[float, str | None]:
     return _number(match.group(3)), match.group(4)
 
 
-def _length_mm(value: float, unit: str | None) -> tuple[float, bool]:
+def length_mm(value: float, unit: str | None) -> tuple[float, bool]:
     """(mm, unit assumed): a bare number below 0.3 reads as inches, up to 10 as mm,
     above as mil."""
     unit = (unit or "").lower()
@@ -653,7 +653,7 @@ class _Drawing:
         self.bom = bom
         self.history = history
         self.outputs = [o for o in outputs if o.get("drawing") and _same_file(o["drawing"], path)]
-        self.lines = _lines(doc)
+        self.lines = note_lines(doc)
         self.views = [item for item in doc.items if item.kind == "view"]
         self.view_kinds = {item.view for item in self.views}
         self.findings: list[dict] = []
@@ -664,9 +664,9 @@ class _Drawing:
         # Values the notes state, for the cross-checks and contradictions.
         # {mm, tol (mm or None), assumed (unit), bound (None, "max", "min"), line, match}
         self.thickness_values: list[dict] = []
-        self.finishes: dict[str, list[tuple[_Line, re.Match]]] = {}
-        self.classes: dict[str, list[tuple[_Line, re.Match]]] = {}
-        self.colours: dict[str, dict[str, list[tuple[_Line, re.Match]]]] = {"mask": {},
+        self.finishes: dict[str, list[tuple[NoteLine, re.Match]]] = {}
+        self.classes: dict[str, list[tuple[NoteLine, re.Match]]] = {}
+        self.colours: dict[str, dict[str, list[tuple[NoteLine, re.Match]]]] = {"mask": {},
                                                                              "silkscreen": {}}
 
     # --- classification ---
@@ -850,7 +850,7 @@ class _Drawing:
             if keyword is None:
                 continue
             start = keyword.end()
-            value = _LENGTH.search(line.text, start, start + 40)
+            value = LENGTH.search(line.text, start, start + 40)
             gap = line.text[start:value.start()] if value else ""
             if value and _TOLERANCE_ANY.search(gap):
                 # "Thickness tolerance: +/- 10%": the tolerance of a thickness stated
@@ -861,7 +861,7 @@ class _Drawing:
                     if unit == "%":
                         tolerances.append(("%", amount))
                     elif unit:
-                        tolerances.append(("mm", _length_mm(amount, unit)[0]))
+                        tolerances.append(("mm", length_mm(amount, unit)[0]))
                     hits.append((line, tolerance))
                 continue
             if value and not value.group(2) and not _BARE_GAP.fullmatch(gap):
@@ -879,7 +879,7 @@ class _Drawing:
                 tolerance = None  # "1.6 mm, hole tolerance +/- 0.05 mm": another tolerance
             amount, unit = _tolerance_parts(tolerance) if tolerance else (None, None)
             # "1.6 +/- 0.16 mm": the tolerance's unit is the value's.
-            mm, assumed = _length_mm(stated, value.group(2) or (
+            mm, assumed = length_mm(stated, value.group(2) or (
                 unit if unit and unit != "%" else None))
             if not 0.1 <= mm <= 10:
                 continue
@@ -888,12 +888,12 @@ class _Drawing:
                 if unit == "%":
                     tol_mm = mm * amount / 100
                 elif unit:
-                    tol_mm = _length_mm(amount, unit)[0]
+                    tol_mm = length_mm(amount, unit)[0]
                 else:  # no unit: the value's own
                     tol_mm = amount * mm / stated
             lead = line.text[max(0, min(keyword.start(), value.start()) - 20):
                              max(keyword.end(), value.start())]
-            bound = "max" if _MAX_WORDS.search(lead) else "min" if _MIN_WORDS.search(lead) else None
+            bound = "max" if MAX_WORDS.search(lead) else "min" if _MIN_WORDS.search(lead) else None
             # Without a unit the number may be mm, inches or mil: the check takes the
             # reading nearest the stack (a tolerance in % or without a unit scales with it).
             readings = sorted({round(v, 4) for v in (stated, stated * 25.4, stated * MM_PER_MIL)
@@ -995,7 +995,7 @@ class _Drawing:
                       "radius <value> in the bend areas.")
 
     @staticmethod
-    def board_thickness_word(line: _Line) -> re.Match | None:
+    def board_thickness_word(line: NoteLine) -> re.Match | None:
         """The "thickness" of a line stating the board's thickness: not a line about
         impedance (trace thickness), and not one preceded by what else has a thickness
         (copper, mask, plating, a dielectric ...); in a long line, preceded by a board
@@ -1011,7 +1011,7 @@ class _Drawing:
                 return keyword
         return None
 
-    def impedance_lines(self) -> list[tuple[_Line, re.Match]]:
+    def impedance_lines(self) -> list[tuple[NoteLine, re.Match]]:
         """Lines about controlled impedance: naming it, or giving ohm values with a line
         type or tolerance, or inside a note that names it (a resistor value elsewhere is
         not)."""
@@ -1236,7 +1236,7 @@ class _Drawing:
                 "layers.", wrong, FIXES["stack_numbers"]))
 
     def check_materials(self) -> None:
-        named: dict[str, tuple[_Line, re.Match]] = {}
+        named: dict[str, tuple[NoteLine, re.Match]] = {}
         for line in self.lines:
             for match in _MATERIAL.finditer(line.text):
                 token = match.group(1)
