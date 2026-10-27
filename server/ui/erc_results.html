@@ -1,0 +1,1026 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!--@csp-->
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ERC results</title>
+<style>/*@shell.css*/</style>
+<style>
+/* ERC results view (roadmap #60): run_erc's violations as a grouped, sortable and
+   filterable table with a details pane, the suppressed counts, the advisories and the
+   report levels; or its single-pin-net report. */
+.head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 0 0 6px; }
+.head h1 { font-size: var(--fs-lg); margin: 0; font-weight: var(--fw-bold); }
+.head > .muted { min-width: 0; overflow-wrap: anywhere; }
+.summary { display: flex; flex-wrap: wrap; gap: 4px; }
+.approx { font-size: var(--fs-xs); color: var(--c-text3); margin: 0 0 8px; }
+.filters { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; margin: 0 0 8px; }
+.msg { overflow-wrap: anywhere; }
+.examples { margin: 4px 0; padding-left: 18px; }
+.status { font-size: var(--fs-xs); color: var(--c-text3); }
+.section-gap { margin-top: 14px; }
+.pins { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 2px 8px; }
+.list-inline { display: flex; flex-wrap: wrap; gap: 4px 8px; }
+</style>
+</head>
+<body>
+<main id="app"></main>
+<script type="application/json" id="data-contract">
+{
+  "tool": "run_erc",
+  "paged": {"violations": "violations", "single_pin_nets": "nets"},
+  "shapes": {
+    "result": {
+      "required": ["approximation", "total", "offset"],
+      "optional": ["project", "net_identifier_scope", "netlist_updated_utc", "compiled_from",
+                   "netlist_note", "compile_warnings", "sheet_errors", "next_offset",
+                   "page_limited_to", "drawing_note", "summary", "levels", "checks_run",
+                   "not_checked", "notes", "advisories", "advisories_total", "violations",
+                   "nets", "level", "note"]
+    },
+    "summary": {"required": ["reported", "by_level", "by_violation", "suppressed"], "optional": []},
+    "summary.by_violation[]": {"required": ["violation", "group", "count"], "optional": []},
+    "summary.suppressed": {"required": ["no_report", "no_erc"], "optional": []},
+    "levels": {"required": ["source", "connection_matrix", "by_check"], "optional": []},
+    "compile_warnings[]": {"required": ["kind", "count"], "optional": []},
+    "violations[]": {
+      "required": ["violation", "level", "group", "sheet", "message", "fix"],
+      "optional": ["object", "net", "netlist_net", "x_mil", "y_mil", "suppressed",
+                   "suppressed_by_no_erc", "count", "examples", "names", "net_copies", "port",
+                   "port_object", "inputs", "pair", "placed", "sheets", "note", "unused_parts",
+                   "parameters", "paths", "pin", "at", "file_name", "child", "parent", "symbol"]
+    },
+    "violations[].suppressed_by_no_erc": {"required": ["sheet", "x_mil", "y_mil"], "optional": []},
+    "advisories[]": {
+      "required": ["advisory", "level", "message"],
+      "optional": ["voltage", "nets", "names", "sheets", "sheet", "ends", "nets_total", "ends_total"]
+    },
+    "nets[]": {
+      "required": ["net", "pin", "sheet", "x_mil", "y_mil", "attached", "wired"],
+      "optional": ["no_erc"]
+    }
+  }
+}
+</script>
+<script>/*@shell.js*/</script>
+<script>
+(() => {
+  "use strict";
+  const { el, clear } = Shell;
+  const CONTRACT = JSON.parse(document.getElementById("data-contract").textContent);
+  const app = document.getElementById("app");
+
+  const MAX_PAGES = 60;
+  const LEVEL_RANK = { "Fatal Error": 3, "Error": 2, "Warning": 1, "No Report": 0 };
+  const LEVELS = ["Fatal Error", "Error", "Warning", "No Report"];
+  // The types the Connection Matrix judges: their level is the matrix cell's.
+  const MATRIX_TYPES = ["Nets with possible connection problems", "Nets containing multiple similar objects",
+                        "Unconnected objects in net"];
+  // Violations about a net with a single pin: the netlist (what query_net reads) leaves
+  // such nets out, so the view offers no query_net button for them.
+  const SINGLE_PIN_TYPES = ["Nets with only one pin", "Nets containing floating input pins"];
+  const SINGLE_PIN_NOTE = "query_net does not know this net: the netlist leaves out nets with a single pin.";
+  // Fields some violation types add, shown in the details pane under these labels.
+  const EXTRA_FIELDS = {
+    "names": "Names on the net", "net_copies": "Net copies", "port": "Port", "port_object": "Port object",
+    "inputs": "Input pins", "pair": "Object types", "placed": "Times placed", "sheets": "Sheets",
+    "note": "Note", "unused_parts": "Unused parts", "parameters": "Parameters", "paths": "Paths",
+    "pin": "Pin", "at": "At", "file_name": "File name", "child": "Child sheet", "parent": "Parent sheet",
+    "symbol": "Sheet symbol", "count": "Count",
+  };
+  const SHOWN_FIELDS = new Set(["violation", "level", "group", "sheet", "object", "net", "netlist_net", "x_mil",
+                                "y_mil", "message", "fix", "suppressed", "suppressed_by_no_erc", "examples",
+                                "_id", "_n"]);
+  const GROUPINGS = [
+    { id: "violation", label: "Type", title: "Group by violation type" },
+    { id: "level", label: "Level" },
+    { id: "group", label: "Group", title: "Altium's groups: Components, Documents, Nets, Others" },
+    { id: "sheet", label: "Sheet" },
+  ];
+
+  const view = {
+    args: {}, argsKnown: false, data: null, kind: "violations", pages: 0, incomplete: false, stopReason: "",
+    warnings: [], query: "", groupBy: "violation", levelsOn: null, groupsOn: null, statesOn: null,
+    tab: "violations", selected: null, asked: [], busy: false, closed: false, keepFloor: null, floorNote: "",
+    filtersOpen: null,
+  };
+  const ui = {};
+  const details = Shell.toolCache((tool, args, entry) => {
+    renderPane();
+    if (entry && !entry.loading) Shell.announce(`${tool} ${entry.error ? "failed" : "answered"}`);
+  });
+
+  // ---------- helpers ----------
+
+  const canCall = () => Shell.canCallTools();
+  const naturally = Shell.naturally;
+  const plural = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
+  const sum = (values) => values.reduce((total, value) => total + (Number(value) || 0), 0);
+  const mil = (row) => (typeof row.x_mil === "number" ? `${row.x_mil}, ${row.y_mil} mil` : "");
+  const isSuppressed = (row) => Boolean(row.suppressed);
+  // A drawing row (off-grid, off-sheet) stands for count violations on one sheet.
+  const violationsIn = (row) => (Array.isArray(row.examples) ? Number(row.count) || 1 : 1);
+  const valueText = (value) => {
+    if (value === null || value === undefined) return "";
+    if (Array.isArray(value)) return value.map(valueText).join(", ");
+    if (typeof value === "object") return Object.entries(value).map(([key, item]) => `${key} ${valueText(item)}`).join(", ");
+    return String(value);
+  };
+
+  /** The designators a violation names: its object, its pins (Pin U1-5) and components. */
+  function designators(row) {
+    const found = [];
+    const add = (name) => {
+      if (name && !name.includes("?") && !found.includes(name)) found.push(name);
+    };
+    const object = String(row.object || "");
+    if (row.group === "Components" && object && !/\s/.test(object)) {
+      // Components containing duplicate sub-parts names the part with its letter (U1A).
+      const part = row.violation === "Components containing duplicate sub-parts" ? object.replace(/(\d)[A-Z]+$/, "$1") : object;
+      add(part);
+    }
+    const text = `${object} ${row.message || ""} ${row.pin ? "Pin " + row.pin : ""}`;
+    for (const match of text.matchAll(/\bPin ([^\s,()]+)-[^\s,()]+/g)) add(match[1]);
+    // "Component U1 has unused sub-part(s)", not "Duplicate Component Designators C15".
+    for (const match of text.matchAll(/\bComponent ([^\s,()]+) has\b/g)) add(match[1]);
+    return found.slice(0, 8);
+  }
+
+  /** The level a violation has and why (the project's report level, Altium's default, or
+   *  the Connection Matrix cell for the matrix types). */
+  function levelWhy(row) {
+    const levels = (view.data && view.data.levels) || {};
+    const byCheck = levels.by_check || {};
+    const typeLevel = byCheck[row.violation];
+    if (row.suppressed === "No Report") {
+      return `No Report: the report level of "${row.violation}" is ${typeLevel || "No Report"}, so Altium does not report it (counted in the summary).`;
+    }
+    const parts = [];
+    if (MATRIX_TYPES.includes(row.violation)) {
+      parts.push(`${row.level}: the Connection Matrix (${levels.connection_matrix || "?"}) cell${row.pair ? " for " + row.pair.join(" against ") : ""} sets it; the type's report level is ${typeLevel || "?"}.`);
+    } else if (typeLevel) {
+      const source = /\((default|assumed)\)$/.test(typeLevel) ? "" : ` (${levels.source === "project" ? "the project's Error Reporting" : levels.source || "?"})`;
+      parts.push(`${row.level}: the report level of "${row.violation}" is ${typeLevel}${source}.`);
+    } else {
+      parts.push(`${row.level}.`);
+    }
+    if (row.suppressed === "No ERC") {
+      const mark = row.suppressed_by_no_erc;
+      parts.push(`Suppressed: a No ERC directive${mark ? ` on ${mark.sheet} at ${mark.x_mil}, ${mark.y_mil} mil` : ""} covers it, so Altium does not report it.`);
+    }
+    return parts.join(" ");
+  }
+
+  // ---------- data contract ----------
+
+  function rowsAt(data, path) {
+    if (path === "result") return [data];
+    let rows = [data];
+    for (const part of path.split(".")) {
+      const key = part.replace(/\[\]$/, "");
+      rows = rows.flatMap((row) => {
+        const value = row && typeof row === "object" ? row[key] : undefined;
+        if (part.endsWith("[]")) return Array.isArray(value) ? value : [];
+        return value === undefined || value === null ? [] : [value];
+      });
+    }
+    return rows;
+  }
+
+  function checkContract(data) {
+    const problems = [];
+    for (const [path, shape] of Object.entries(CONTRACT.shapes)) {
+      for (const key of shape.required) {
+        const missing = rowsAt(data, path).filter((row) => !(key in row)).length;
+        if (missing) problems.push(`${path}: ${key} missing in ${missing} row(s)`);
+      }
+    }
+    return problems;
+  }
+
+  // ---------- loading ----------
+
+  function baseArgs() {
+    const args = { ...view.args };
+    delete args.offset;
+    return args;
+  }
+
+  function showState(kind, title, detail) {
+    clear(app).appendChild(Shell.state(kind, title, detail));
+  }
+
+  const ERROR_TITLES = {
+    no_project: "No project is loaded",
+    netlist_required: "The netlist is not loaded",
+    no_components_loaded: "No components were loaded",
+    compile_failed: "The offline compile failed",
+    unknown_checks: "run_erc does not know these checks",
+    invalid_min_level: "run_erc did not accept min_level",
+    invalid_report: "run_erc did not accept report",
+  };
+
+  function showError(payload) {
+    clear(app).appendChild(Shell.state("error", ERROR_TITLES[payload.error] || "run_erc answered with an error",
+                                       payload.message || payload.error));
+    const more = [];
+    if (payload.accepted) {
+      for (const [kind, names] of Object.entries(payload.accepted)) more.push(el("li", { text: `${kind}: ${names.join(", ")}` }));
+    }
+    for (const sheet of payload.sheet_errors || []) more.push(el("li", { text: valueText(sheet) }));
+    if (more.length) app.appendChild(el("details", { class: "more section-gap" }, el("summary", { text: "Details" }), el("ul", { class: "small" }, more)));
+  }
+
+  async function getPage(offset, args = baseArgs(), total = null) {
+    const page = Shell.resultJson(await Shell.callTool("run_erc", { ...args, offset }));
+    if (page && page.error) throw new Error(page.message || page.error);
+    // A page of another listing (the call's arguments not known) is not merged.
+    if (total !== null && page.total !== total) {
+      throw new Error(`its total (${page.total}) is not the result's (${total})${view.argsKnown ? "" : ": the host did not send the call's arguments"}`);
+    }
+    return page;
+  }
+
+  async function loadResult(result) {
+    let first;
+    try {
+      first = Shell.resultJson(result);
+    } catch (error) {
+      view.busy = false;
+      showState("error", "The ERC result could not be read", error.message);
+      return;
+    }
+    await loadFrom(first);
+  }
+
+  async function loadFrom(first) {
+    view.busy = true;
+    try {
+      if (!first || typeof first !== "object") throw new Error("The result is not an ERC result.");
+      if (first.error) {
+        showError(first);
+        return;
+      }
+      const reasons = [];
+      if (first.offset > 0) {
+        // A later page: the earlier rows, the summary, levels and advisories come with the
+        // first page, which the view asks for when it can.
+        let firstPage = null;
+        if (canCall() && !view.closed) {
+          showState("loading", "Reading the ERC results", "Asking run_erc for its first page.");
+          try {
+            firstPage = await getPage(0, baseArgs(), first.total);
+          } catch (error) {
+            reasons.push(`its first page could not be read: ${error.message}`);
+          }
+        }
+        if (firstPage) first = firstPage;
+        else reasons.unshift(`this result starts at offset ${first.offset}, so its first ${plural(first.offset, "row")}, the summary, the suppressed counts, the report levels and the advisories (which come with run_erc's first page) are not in it`);
+      }
+      const kind = Array.isArray(first.nets) && !Array.isArray(first.violations) ? "single_pin_nets" : "violations";
+      const key = CONTRACT.paged[kind];
+      const data = { ...first, [key]: [...(first[key] || [])] };
+      const { pages, stopped } = await Shell.readPages({
+        first, tool: "run_erc", budget: Shell.pageBudget(MAX_PAGES), closed: () => view.closed,
+        pageOffset: (page) => (page.next_offset === undefined ? null : page.next_offset),
+        getPage: (offset) => getPage(offset, baseArgs(), first.total),
+        onPage: (page) => data[key].push(...(page[key] || [])),
+        progress: (page, offset) => showState("loading", "Reading the ERC results", `run_erc pages its rows: page ${page} (offset ${offset}).`),
+      });
+      if (stopped) reasons.push(stopped);
+      data[key].forEach((row, index) => {
+        row._id = index;
+        row._n = violationsIn(row);
+      });
+      view.kind = kind;
+      view.pages = pages;
+      view.incomplete = reasons.length > 0;
+      view.stopReason = reasons.join("; ");
+      view.data = data;
+      view.warnings = checkContract(data);
+      view.selected = null;
+      view.asked = [];
+      view.levelsOn = null;
+      view.groupsOn = null;
+      view.statesOn = null;
+      view.floorNote = "";
+      if (view.keepFloor && kind === "violations") {
+        // "List them" asked for every level: the Level chips keep the first call's floor
+        // (and the No Report rows, the suppressed ones it was asked for).
+        const floor = view.keepFloor === "fatal" ? 3 : 2;
+        view.levelsOn = new Set(LEVELS.filter((level) => (LEVEL_RANK[level] || 0) >= floor || level === "No Report"));
+        view.floorNote = `Listed with min_level "all", so every level is in the table. The Level chips keep the first call's floor (${view.keepFloor} and above) and the No Report rows; turn the other Level chips on for the rest (a No ERC row keeps its own level).`;
+      }
+      view.keepFloor = null;
+      if (kind === "single_pin_nets") {
+        view.tab = "nets";
+        if (view.groupBy !== "sheet" && view.groupBy !== "none") view.groupBy = "sheet";
+      } else if (view.tab === "nets") {
+        view.tab = "violations";
+      }
+      renderAll();
+    } catch (error) {
+      showState("error", "The ERC results could not be read", error.message);
+    } finally {
+      view.busy = false;
+    }
+  }
+
+  /** Call run_erc again (Refresh, or min_level="all" to list the suppressed rows); the
+   *  table already drawn stays when the call fails. */
+  async function reload(args, why) {
+    if (view.busy || !canCall() || view.closed) return;
+    const previous = view.args;
+    const tab = view.tab;
+    // The control that had keyboard focus gets it back after the page is drawn again.
+    const mark = Shell.focusMark(app);
+    view.busy = true;
+    view.args = args;
+    showState("loading", why, "Calling run_erc.");
+    try {
+      await loadFrom(await getPage(0, args));
+    } catch (error) {
+      view.busy = false;
+      view.args = previous;
+      view.tab = tab;
+      view.keepFloor = null;
+      if (!view.data) {
+        showState("error", "The ERC results could not be read", error.message);
+        return;
+      }
+      renderAll();
+      app.prepend(Shell.notice("error", `${why} failed: ${error.message}`));
+    }
+    if (mark) Shell.refocus(app, mark, () => (ui.table && ui.table.focus(null) ? document.activeElement : ui.tabBar && ui.tabBar.selected()));
+  }
+
+  function listSuppressed() {
+    if (view.busy || !canCall()) return;
+    view.tab = "violations";  // the listed rows are marked there
+    const floor = view.args.min_level;
+    view.keepFloor = floor === "error" || floor === "fatal" ? floor : null;
+    reload({ ...baseArgs(), min_level: "all", report: "violations" }, "Listing the suppressed violations");
+  }
+  const refresh = () => reload(baseArgs(), "Reading the ERC results again");
+
+  // ---------- violations table ----------
+
+  function groupSpec() {
+    const by = view.groupBy;
+    if (by === "none") return null;
+    const field = by === "violation" ? "violation" : by;
+    const rank = (rows) => Math.max(...rows.map((row) => LEVEL_RANK[row.level] || 0));
+    return {
+      key: (row) => (view.kind === "single_pin_nets" ? row.sheet : row[field]),
+      label: (key, rows) => {
+        if (by === "level") return Shell.levelBadge(key);
+        if (by === "violation" && rows[0]) return [key, " ", el("span", { class: "muted small", text: rows[0].group })];
+        return key || "(none)";
+      },
+      count: (key, rows) => {
+        const total = sum(rows.map((row) => row._n));
+        const hidden = sum(rows.filter(isSuppressed).map((row) => row._n));
+        const word = view.kind === "single_pin_nets" ? "net" : "violation";
+        return [
+          by !== "level" && view.kind !== "single_pin_nets" ? Shell.levelBadge(LEVELS[3 - rank(rows)] || "Warning") : null,
+          el("span", { class: "badge", text: plural(total, word) }),
+          hidden ? el("span", { class: "badge muted", text: `${hidden} suppressed` }) : null,
+          total !== rows.length ? el("span", { class: "badge muted", text: plural(rows.length, "row") }) : null,
+        ];
+      },
+      order: (a, b, buckets) => {
+        if (by === "level") return (LEVEL_RANK[b] || 0) - (LEVEL_RANK[a] || 0);
+        if (by === "sheet") return naturally(a, b);
+        const x = buckets.get(a);
+        const y = buckets.get(b);
+        return (by === "violation" ? rank(y) - rank(x) : 0) || sum(y.map((row) => row._n)) - sum(x.map((row) => row._n)) || naturally(a, b);
+      },
+      // A long result opens with its groups closed (a single group open).
+      open: (key, rows, groups) => groups === 1 || rowsOf().length <= 60,
+    };
+  }
+
+  function rowsOf() {
+    if (!view.data) return [];
+    return view.kind === "single_pin_nets" ? view.data.nets || [] : view.data.violations || [];
+  }
+
+  function rowFilter(row) {
+    if (view.kind === "single_pin_nets") return true;
+    if (view.levelsOn && !view.levelsOn.has(row.level)) return false;
+    if (view.groupsOn && !view.groupsOn.has(row.group)) return false;
+    if (view.statesOn && !view.statesOn.has(isSuppressed(row) ? "suppressed" : "reported")) return false;
+    return true;
+  }
+
+  function violationTable() {
+    const listed = rowsOf().some(isSuppressed);
+    return Shell.table({
+      label: "ERC violations", ownFilter: false, rows: rowsOf(), group: groupSpec(), filter: rowFilter,
+      rowKey: (row) => row._id, onActivate: select,
+      empty: "No violation in this result.",
+      columns: [
+        { key: "level", label: "Level", value: (row) => LEVEL_RANK[row.level] || 0, text: (row) => row.level,
+          render: (row) => Shell.levelBadge(row.level) },
+        { key: "violation", label: "Violation" },
+        { key: "group", label: "Group", hidden: true },
+        { key: "sheet", label: "Sheet", cls: "c-name" },
+        { key: "object", label: "Object", cls: "c-name" },
+        { key: "net", label: "Net", cls: "c-name" },
+        { key: "location", label: "Location", hidden: true, value: (row) => (typeof row.x_mil === "number" ? row.x_mil * 1e6 + row.y_mil : null), text: mil,
+          render: mil },
+        { key: "message", label: "Message", cls: "c-msg", render: (row) => el("span", { class: "msg", text: row.message }) },
+        { key: "count", label: "Count", numeric: true, hidden: true, value: (row) => row._n },
+        { key: "suppressed", label: "Suppressed", hidden: !listed, value: (row) => row.suppressed || "",
+          render: (row) => (row.suppressed ? Shell.levelBadge("No Report", row.suppressed) : "") },
+        { key: "fix", label: "Suggested fix", hidden: true },
+      ],
+    });
+  }
+
+  function netTable() {
+    return Shell.table({
+      label: "Single-pin nets", ownFilter: false, rows: rowsOf(), group: groupSpec(),
+      rowKey: (row) => row._id, onActivate: select, empty: "No single-pin net in this project.",
+      columns: [
+        { key: "net", label: "Net", cls: "c-name" },
+        { key: "pin", label: "Pin" },
+        { key: "sheet", label: "Sheet", cls: "c-name" },
+        { key: "location", label: "Location", value: (row) => row.x_mil * 1e6 + row.y_mil, text: mil, render: mil },
+        { key: "attached", label: "Also on the net", value: (row) => row.attached || [] },
+        { key: "wired", label: "Wired", value: (row) => (row.wired ? "yes" : "no") },
+        { key: "no_erc", label: "No ERC", value: (row) => (row.no_erc ? "yes" : ""),
+          render: (row) => (row.no_erc ? Shell.levelBadge("No Report", "No ERC") : "") },
+      ],
+    });
+  }
+
+  function regroup(id) {
+    view.groupBy = id;
+    if (ui.table) ui.table.setGroup(groupSpec());
+  }
+
+  // ---------- selection and details pane ----------
+
+  function select(row) {
+    view.selected = row;
+    view.asked = [];
+    if (ui.table) ui.table.select((other) => other === row);
+    if (ui.advisories) ui.advisories.select((other) => other === row);
+    renderPane();
+    if (row) Shell.announce(`Details: ${row.violation || row.net || (row.advisory || "").replace(/_/g, " ")}`);
+  }
+
+  /** Close the details (Close, or Esc): keyboard focus that was in the pane, or that the
+   *  rebuild would drop, goes back to the row that was selected. */
+  function closeDetails() {
+    const row = view.selected;
+    const inPane = ui.pane && ui.pane.contains(document.activeElement);
+    select(null);
+    if (!inPane && document.activeElement && document.activeElement !== document.body) return;
+    const same = (other) => other === row;
+    if (ui.table && ui.table.focus(same)) return;
+    if (ui.advisories && ui.advisories.focus(same)) return;
+    if (ui.tabBar) ui.tabBar.focus();
+  }
+
+  /** Ask the server for a sheet, part or net of the selection; the newest answer is drawn
+   *  first under the buttons. */
+  function ask(tool, args, label) {
+    const key = JSON.stringify([tool, args]);
+    view.asked = [[tool, args, label], ...view.asked.filter(([other, otherArgs]) => JSON.stringify([other, otherArgs]) !== key)];
+    renderPane();
+    details.load(tool, args);
+  }
+
+  /** Whether a row is about a single-pin net (not in the netlist query_net reads). */
+  const singlePin = (row) => view.kind === "single_pin_nets" || SINGLE_PIN_TYPES.includes(row.violation);
+
+  /** The calls a row's buttons make: its sheet, the parts it names, its net. */
+  function serverCalls(row) {
+    const calls = [];
+    if (row.sheet) calls.push(["get_sheet_context", { sheet_name: row.sheet }, `Sheet ${row.sheet}`, "Ask get_sheet_context for the sheet's parts and nets"]);
+    for (const name of designators(row)) calls.push(["get_component", { refdes: name }, `Part ${name}`, `Ask get_component for ${name}`]);
+    const net = row.netlist_net || row.net;
+    if (net && !singlePin(row)) calls.push(["query_net", { pattern: Shell.exactPattern(net) }, `Net ${net}`, `Ask query_net for ${net}`]);
+    return calls;
+  }
+
+  function componentLink(name) {
+    if (!canCall()) return name;
+    return el("button", { type: "button", class: "btn-link", text: name, title: `Ask get_component for ${name}`,
+                          on: { click: () => ask("get_component", { refdes: name }, `Part ${name}`) } });
+  }
+
+  function netLink(name) {
+    if (!canCall()) return name;
+    return el("button", { type: "button", class: "btn-link", text: name, title: `Ask query_net for ${name}`,
+                          on: { click: () => ask("query_net", { pattern: Shell.exactPattern(name) }, `Net ${name}`) } });
+  }
+
+  function parsed(entry) {
+    const text = Shell.resultText(entry.data);
+    try {
+      return { json: JSON.parse(text), text };
+    } catch (error) {
+      return { json: null, text };
+    }
+  }
+
+  /** What a details call answered. */
+  function answer(tool, args, title) {
+    const entry = details.get(tool, args);
+    const head = el("h3", { text: title });
+    if (!entry || entry.loading) return [head, el("p", { class: "muted", text: `Asking ${tool}…` })];
+    if (entry.error) {
+      return [head, el("div", { class: "notice error" }, el("span", { class: "grow", text: entry.error }),
+        el("button", { type: "button", class: "btn-link", text: "Retry", on: { click: () => ask(tool, args, title) } }))];
+    }
+    const { json, text } = parsed(entry);
+    if (json && json.error) return [head, el("div", { class: "notice warning", text: json.message || json.error })];
+    if (tool === "get_sheet_context" || !json) {
+      // get_sheet_context answers in text: its first lines (the sheet's parts and pins).
+      const lines = String(text).split("\n");
+      const shown = lines.slice(0, 80);
+      return [head, el("pre", { class: "text", text: shown.join("\n") }),
+        lines.length > shown.length ? el("p", { class: "muted", text: `${lines.length - shown.length} more lines: ask Claude for the whole sheet.` }) : null];
+    }
+    if (tool === "query_net") {
+      // query_net matches case-insensitively: keep the net whose name is exactly the one asked.
+      const all = json.nets || [json];
+      const exact = all.filter((net) => Shell.exactPattern(net.net) === args.pattern);
+      return [head, ...(exact.length ? exact : all).map((net) => {
+        const pins = net.pins || net.pins_sample || [];
+        return el("div", {},
+          Shell.facts([["Net", net.net], ["Pins", net.pin_count === undefined ? null : String(net.pin_count)]]),
+          net.message ? el("p", { class: "muted", text: net.message }) : null,
+          el("div", { class: "pins" }, pins.map((pin) => el("span", {}, componentLink(pin.refdes), `.${pin.pin}`))));
+      })];
+    }
+    const pins = Object.entries(json.pins || {}).sort((a, b) => naturally(a[0], b[0]));
+    return [head,
+      Shell.facts([["Description", json.description], ["MPN", json.mpn], ["Value", json.value],
+                   ["Fitted", json.dnp ? "no (DNP in this variant)" : "yes"], ["Sheet", json.sheet]]),
+      pins.length ? Shell.table({
+        label: `Pins of ${json.refdes}`, ownFilter: pins.length > 12,
+        rows: pins.map(([pin, info]) => ({ pin, name: info.name, net: info.net })),
+        columns: [{ key: "pin", label: "Pin" }, { key: "name", label: "Name" },
+                  { key: "net", label: "Net", render: (row) => (row.net ? netLink(row.net) : "") }],
+      }).el : null];
+  }
+
+  function serverSection(calls, note = null) {
+    if (!calls.length && !view.asked.length) return null;
+    const head = el("h3", { text: "From the server" });
+    if (!canCall()) {
+      return [head, el("p", { class: "muted", text: "This host does not let the view call the server's tools: ask Claude in the conversation for the sheet, part or net." })];
+    }
+    return [head,
+      el("div", { class: "btn-row" }, calls.map(([tool, args, label, title]) => el("button", {
+        type: "button", class: "btn", text: label, title, on: { click: () => ask(tool, args, label) } }))),
+      note ? el("p", { class: "muted small", text: note }) : null,
+      ...view.asked.map(([tool, args, label]) => answer(tool, args, label))];
+  }
+
+  function closeButton() {
+    return el("button", { type: "button", class: "btn", text: "Close", on: { click: closeDetails } });
+  }
+
+  function violationPane(row) {
+    // A drawing row's count is its Count fact; any other row's count is the type's own field.
+    const extras = Object.entries(row).filter(([key]) => !SHOWN_FIELDS.has(key) && !(key === "count" && Array.isArray(row.examples)))
+      .map(([key, value]) => [EXTRA_FIELDS[key] || key.replace(/_/g, " "), valueText(value)]);
+    return [
+      el("div", { class: "row" }, el("h2", { text: row.violation }), closeButton()),
+      el("div", { class: "summary" }, Shell.levelBadge(row.level), el("span", { class: "badge", text: row.group }),
+        row.suppressed ? Shell.levelBadge("No Report", `suppressed: ${row.suppressed}`) : null),
+      Shell.facts([
+        ["Message", el("span", { class: "msg", text: row.message })],
+        ["Object", row.object], ["Sheet", row.sheet],
+        ["Net", row.net ? `${row.net}${row.netlist_net ? ` (query_net knows it as ${row.netlist_net})` : ""}` : null],
+        ["Location", typeof row.x_mil === "number" ? `${row.x_mil}, ${row.y_mil} mil on the sheet` : null],
+        ["Count", Array.isArray(row.examples) ? `${row.count} on this sheet` : null],
+        ["Suggested fix", row.fix],
+        ["Level", levelWhy(row)],
+        ...extras,
+      ], "facts section-gap"),
+      Array.isArray(row.examples) && row.examples.length ? [el("h3", { text: "Examples" }),
+        el("ul", { class: "examples" }, row.examples.map((text) => el("li", { text })))] : null,
+      serverSection(serverCalls(row), (row.netlist_net || row.net) && singlePin(row) ? SINGLE_PIN_NOTE : null),
+    ];
+  }
+
+  function netPane(row) {
+    return [
+      el("div", { class: "row" }, el("h2", { text: row.net }), closeButton()),
+      el("div", { class: "summary" }, el("span", { class: "badge", text: "single-pin net" }),
+        row.no_erc ? Shell.levelBadge("No Report", "No ERC") : null),
+      Shell.facts([
+        ["Pin", row.pin], ["Sheet", row.sheet], ["Location", `${row.x_mil}, ${row.y_mil} mil on the sheet`],
+        ["Also on the net", (row.attached || []).join(", ") || "nothing else"],
+        ["Wired", row.wired ? "yes" : "no"],
+        ["No ERC", row.no_erc ? "a No ERC directive covers it" : null],
+        ["Level", view.data.level ? `"Nets with only one pin" is ${view.data.level} in this project` : null],
+      ], "facts section-gap"),
+      serverSection(serverCalls({ sheet: row.sheet, net: row.net, object: `Pin ${row.pin}`, message: "" }), SINGLE_PIN_NOTE),
+    ];
+  }
+
+  function advisoryPane(row) {
+    const nets = (row.nets || []).map((item) => (typeof item === "object" ? item : { net: item }));
+    // run_erc caps an advisory's lists at 40 entries (nets_total, ends_total count them all).
+    const totals = { nets: row.nets_total, ends: row.ends_total };
+    const listNote = (key) => (totals[key] ? ` (the first ${row[key].length} of ${totals[key]})` : "");
+    return [
+      el("div", { class: "row" }, el("h2", { text: row.advisory.replace(/_/g, " ") }), closeButton()),
+      el("div", { class: "summary" }, Shell.levelBadge("info", "advisory (not an Altium violation)")),
+      Shell.facts([
+        ["Message", row.message],
+        ["Voltage", typeof row.voltage === "number" ? `${row.voltage} V` : null],
+        ["Names", (row.names || []).join(" / ")],
+        ["Sheet", row.sheet],
+        ["Sheets", (row.sheets || []).join(", ")],
+      ], "facts section-gap"),
+      nets.length ? [el("h3", { text: `Nets${listNote("nets")}` }),
+        el("div", { class: "list-inline" }, nets.map((item) => el("span", {}, netLink(item.net),
+          item.pins === undefined ? "" : ` ${plural(item.pins, "pin")}`, item.sheets === undefined ? "" : `, ${plural(item.sheets, "sheet")}`)))] : null,
+      (row.ends || []).length ? [el("h3", { text: `Wire ends${listNote("ends")}` }),
+        el("ul", {}, row.ends.map((end) => el("li", { text: `${end.pin} at ${end.x_mil}, ${end.y_mil} mil: ${end.distance_mil} mil short` })))] : null,
+      serverSection(row.sheet ? [["get_sheet_context", { sheet_name: row.sheet }, `Sheet ${row.sheet}`, "Ask get_sheet_context for the sheet"]] : []),
+    ];
+  }
+
+  function renderPane() {
+    if (ui.pane) Shell.keepFocus(ui.pane, drawPane);
+  }
+
+  function drawPane() {
+    clear(ui.pane);
+    const row = view.selected;
+    ui.pane.classList.toggle("idle", !row);
+    if (!row) {
+      const what = view.kind === "single_pin_nets" ? "a net" : view.tab === "advisories" ? "an advisory" : "a violation";
+      Shell.append(ui.pane, [
+        el("h2", { text: `Select ${what}` }),
+        el("p", { class: "help", text: "Click a row (or move to it and press Enter) for its message, object, sheet, net, location in mil, suggested fix and why it has its level." }),
+        el("p", { class: "help", text: canCall()
+          ? "Its buttons ask get_sheet_context for the sheet, get_component for a part and query_net for a net."
+          : "This host does not let the view call tools: ask Claude in the conversation for a sheet, part or net." }),
+        el("p", { class: "help", text: "Keys: Up and Down move between rows and group headers, Enter selects or opens and closes a group, Left and Right close and open a group, Esc clears." }),
+      ]);
+      return;
+    }
+    if (row.advisory) Shell.append(ui.pane, advisoryPane(row));
+    else if (view.kind === "single_pin_nets") Shell.append(ui.pane, netPane(row));
+    else Shell.append(ui.pane, violationPane(row));
+  }
+
+  // ---------- other tabs ----------
+
+  /** run_erc's first page carries the summary, levels and advisories: a result that is a
+   *  later page (and the view could not read the first) has none of them. */
+  const FIRST_PAGE_NOTE = "This result is a later page of run_erc: the summary, the suppressed counts, the report levels and the advisories come with its first page (offset 0), which the view could not read. Ask Claude to run it again without offset.";
+
+  /** Whether the call narrowed the listing (checks, a sheet, a floor above warning): its
+   *  summary then still counts the whole project, not the rows listed. */
+  function narrowed() {
+    const args = view.args || {};
+    if ((args.checks || []).length || args.sheet || args.min_level === "error" || args.min_level === "fatal") return true;
+    const summary = view.data && view.data.summary;
+    if (!summary || view.incomplete || view.kind !== "violations") return false;
+    return sum(rowsOf().filter((row) => !isSuppressed(row)).map((row) => row._n)) !== summary.reported;
+  }
+
+  function suppressedTotals() {
+    const suppressed = (view.data.summary && view.data.summary.suppressed) || {};
+    return sum(Object.values(suppressed.no_report || {})) + sum(Object.values(suppressed.no_erc || {}));
+  }
+
+  function suppressedBlock() {
+    const data = view.data;
+    if (!data.summary) {
+      return el("div", { class: "pane" }, el("h2", { text: "Suppressed: not known" }), el("p", { text: FIRST_PAGE_NOTE }));
+    }
+    const suppressed = data.summary.suppressed || { no_report: {}, no_erc: {} };
+    const rows = [
+      ...Object.entries(suppressed.no_report || {}).map(([violation, count]) => ({ violation, why: "No Report", count })),
+      ...Object.entries(suppressed.no_erc || {}).map(([violation, count]) => ({ violation, why: "No ERC", count })),
+    ];
+    const listed = rowsOf().filter(isSuppressed);
+    const total = sum(rows.map((row) => row.count));
+    const whole = narrowed();
+    const block = el("div", { class: "pane" },
+      el("h2", { text: `Suppressed${whole ? " in the whole project" : ""}: ${plural(total, "violation")}` }),
+      el("p", { class: "help", text: "Types set to No Report in the project's Error Reporting, and violations a No ERC directive covers, are counted here and not reported, as in Altium's Messages panel." }),
+      whole ? el("p", { class: "help", text: "run_erc's summary counts the whole project: the checks, sheet or min_level of this call do not narrow these counts." }) : null);
+    if (listed.length) {
+      block.appendChild(el("p", { text: `This result lists ${whole ? "those the call asked for" : "them"} (min_level "all"): ${plural(sum(listed.map((row) => row._n)), "suppressed violation")} in ${plural(listed.length, "row")} of the Violations table, marked. The State chips show or hide them.` }));
+    } else if (total) {
+      block.appendChild(el("p", { text: "This result counts them but does not list them." }));
+      block.appendChild(canCall()
+        ? el("div", { class: "btn-row" }, el("button", { type: "button", class: "btn", text: "List them",
+            title: 'Call run_erc again with min_level "all" (every level; the Level chips keep the floor of this call)', on: { click: listSuppressed } }))
+        : el("p", { class: "muted", text: 'This host does not let the view call run_erc: ask Claude to run it with min_level "all" to list them.' }));
+    }
+    if (rows.length) {
+      block.appendChild(Shell.table({
+        label: "Suppressed counts", ownFilter: false, rows, sort: { key: "count", dir: -1 },
+        columns: [{ key: "violation", label: "Violation" },
+                  { key: "why", label: "Why", render: (row) => Shell.levelBadge("No Report", row.why) },
+                  { key: "count", label: "Count", numeric: true }],
+      }).el);
+    }
+    return block;
+  }
+
+  function advisoriesBlock() {
+    const data = view.data;
+    if (!data.summary) return [el("p", { class: "help", text: FIRST_PAGE_NOTE })];
+    const rows = data.advisories || [];
+    ui.advisories = Shell.table({
+      label: "Advisories", ownFilter: false, rows, onActivate: select,
+      empty: "No advisory: no near-duplicate power names, no names differing only in case, no near-miss wire ends.",
+      columns: [
+        { key: "advisory", label: "Advisory", value: (row) => row.advisory.replace(/_/g, " ") },
+        { key: "message", label: "Message", cls: "c-msg", render: (row) => el("span", { class: "msg", text: row.message }) },
+        { key: "detail", label: "About", cls: "c-name", value: (row) => (row.nets || []).map((item) => (typeof item === "object" ? item.net : item))
+          .concat(row.names || [], row.sheet ? [row.sheet] : [], (row.ends || []).map((end) => end.pin)) },
+      ],
+    });
+    return [
+      el("p", { class: "help small", text: "Findings that are not Altium violations (level info): rails named for one voltage under different names, names differing only in case, wire ends a few mil short of a pin, the ground nets." }),
+      data.advisories_total ? Shell.notice("info", `run_erc lists the first ${rows.length} of ${data.advisories_total} advisories.`) : null,
+      ui.advisories.el,
+    ];
+  }
+
+  function levelsBlock() {
+    if (!view.data.levels) return el("p", { class: "help", text: FIRST_PAGE_NOTE });
+    const levels = view.data.levels;
+    const rows = Object.entries(levels.by_check || {}).map(([check, level]) => ({
+      check, level: level.replace(/ \((default|assumed)\)$/, ""), source: (level.match(/\((default|assumed)\)$/) || [])[1] || "project",
+    }));
+    return el("div", {},
+      Shell.facts([["Report levels", levels.source], ["Connection Matrix", levels.connection_matrix]]),
+      el("p", { class: "help small", text: '"default" is Altium\'s default level for a type the project does not set; "assumed" is No Report where Altium documents no default. The matrix types take the Connection Matrix cell\'s level.' }),
+      Shell.table({
+        label: "Report level per check", ownFilter: false, rows,
+        columns: [{ key: "check", label: "Check" },
+                  { key: "level", label: "Level", value: (row) => LEVEL_RANK[row.level] || 0, text: (row) => row.level,
+                    render: (row) => Shell.levelBadge(row.level) },
+                  { key: "source", label: "From" }],
+      }).el);
+  }
+
+  function notesBlock() {
+    const data = view.data;
+    return el("div", { class: "pane" },
+      el("h2", { text: "Notes" }),
+      el("p", { text: data.approximation }),
+      Shell.facts([
+        ["Project", data.project], ["Net scope", data.net_identifier_scope], ["Compiled from", data.compiled_from],
+        ["Netlist", data.netlist_note],
+        ["Compile warnings", (data.compile_warnings || []).map((item) => `${item.kind} (${item.count})`).join(", ")],
+        ["Sheet errors", (data.sheet_errors || []).map(valueText).join("; ")],
+        ["Single-pin nets", data.note],
+        ["Off-grid rows", data.drawing_note],
+        ["Reported by type", ((data.summary || {}).by_violation || []).map((row) => `${row.violation} (${row.group}) ${row.count}`).join("; ")],
+        ["Not checked", (data.not_checked || []).join(", ")],
+        ["Netlist updated (UTC)", data.netlist_updated_utc],
+        ["Page size", data.page_limited_to ? `run_erc cut its pages to ${data.page_limited_to} rows to fit its size limit` : null],
+      ], "facts section-gap"),
+      (data.notes || []).length ? [el("h3", { text: "Notes from the checks" }), el("ul", {}, data.notes.map((note) => el("li", { text: note })))] : null,
+      el("p", { class: "status", text: `Read in ${plural(view.pages, "page")} of run_erc${view.incomplete ? `, then stopped: ${view.stopReason}` : ""}.` }));
+  }
+
+  // ---------- page ----------
+
+  function summaryBadges() {
+    const data = view.data;
+    if (view.kind === "single_pin_nets") {
+      return [el("span", { class: "badge", text: plural(data.total || 0, "single-pin net") }),
+        data.level ? Shell.levelBadge(data.level, `"Nets with only one pin": ${data.level}`) : null];
+    }
+    const summary = data.summary || {};
+    const hidden = suppressedTotals();
+    const advisories = data.advisories_total || (data.advisories || []).length;
+    const levelBadges = (byLevel) => ["Fatal Error", "Error", "Warning"].filter((level) => byLevel[level])
+      .map((level) => Shell.levelBadge(level, `${byLevel[level]} ${level.toLowerCase()}${byLevel[level] === 1 ? "" : "s"}`));
+    if (!data.summary || narrowed()) {
+      // The rows this result lists, counted by the view; the summary (when there is one)
+      // counts the whole project, so it is marked as such.
+      const rows = rowsOf();
+      const reported = rows.filter((row) => !isSuppressed(row));
+      const byLevel = {};
+      for (const row of reported) byLevel[row.level] = (byLevel[row.level] || 0) + row._n;
+      const listedHidden = sum(rows.filter(isSuppressed).map((row) => row._n));
+      return [
+        el("span", { class: "badge", text: `${sum(reported.map((row) => row._n))} listed` }),
+        ...levelBadges(byLevel),
+        listedHidden ? Shell.levelBadge("No Report", `${listedHidden} suppressed listed`) : null,
+        data.summary ? el("span", { class: "badge muted", title: "run_erc's summary counts the whole project, whatever the call's checks, sheet or min_level",
+                                    text: `whole project: ${summary.reported} reported${hidden ? ` · ${hidden} suppressed` : ""}` })
+          : el("span", { class: "badge muted", title: "The summary comes with run_erc's first page", text: "summary not in this page" }),
+        advisories ? Shell.levelBadge("info", plural(advisories, "advisory").replace(/advisorys$/, "advisories")) : null,
+      ];
+    }
+    return [
+      el("span", { class: "badge", text: `${summary.reported} reported` }),
+      ...levelBadges(summary.by_level || {}),
+      hidden ? Shell.levelBadge("No Report", `${hidden} suppressed`) : null,
+      advisories ? Shell.levelBadge("info", plural(advisories, "advisory").replace(/advisorys$/, "advisories")) : null,
+    ];
+  }
+
+  function chipRow() {
+    if (view.kind === "single_pin_nets") return null;
+    const rows = rowsOf();
+    const count = (test) => sum(rows.filter(test).map((row) => row._n));
+    const levels = LEVELS.filter((level) => rows.some((row) => row.level === level));
+    const groups = [...new Set(rows.map((row) => row.group))].sort(naturally);
+    const apply = () => ui.table && ui.table.setFilter(rowFilter);
+    const parts = [];
+    if (levels.length > 1) {
+      parts.push(Shell.chips({ label: "Level", items: levels.map((level) => ({ id: level, label: level, count: count((row) => row.level === level) })),
+        selected: view.levelsOn, onChange: (on) => { view.levelsOn = on; apply(); } }).el);
+    }
+    if (groups.length > 1) {
+      parts.push(Shell.chips({ label: "Group", items: groups.map((group) => ({ id: group, label: group, count: count((row) => row.group === group) })),
+        selected: view.groupsOn, onChange: (on) => { view.groupsOn = on; apply(); } }).el);
+    }
+    if (rows.some(isSuppressed)) {
+      parts.push(Shell.chips({ label: "State", items: [
+        { id: "reported", label: "Reported", count: count((row) => !isSuppressed(row)) },
+        { id: "suppressed", label: "Suppressed", count: count(isSuppressed), title: "No Report and No ERC rows" }],
+      selected: view.statesOn, onChange: (on) => { view.statesOn = on; apply(); } }).el);
+    }
+    return parts.length ? el("div", { class: "filters" }, parts) : null;
+  }
+
+  function emptyBlock() {
+    const data = view.data;
+    const hidden = suppressedTotals();
+    const floor = view.args.min_level === "error" || view.args.min_level === "fatal" ? ` at level ${view.args.min_level} or above` : "";
+    const filtered = (view.args.checks || []).length || view.args.sheet ? " for the checks or sheet asked for" : "";
+    const whole = narrowed() ? " in the whole project" : "";
+    const suppressedText = !data.summary ? ""
+      : hidden ? `${plural(hidden, "violation")}${whole} ${hidden === 1 ? "is" : "are"} suppressed (No Report or No ERC): see the Suppressed tab.`
+        : `Nothing is suppressed${whole}.`;
+    return el("div", {},
+      Shell.state("empty", "No ERC violations",
+        `run_erc reports no violation${floor}${filtered}` +
+        (data.checks_run ? `: ${plural(data.checks_run.length, "check")} run on the saved sheets. ` : ". ") + suppressedText),
+      el("p", { class: "approx section-gap", text: data.approximation }));
+  }
+
+  function renderTab() {
+    clear(ui.content);
+    ui.advisories = null;
+    if (view.tab === "violations" || view.tab === "nets") {
+      const rows = rowsOf();
+      if (!rows.length && view.kind === "violations") {
+        ui.table = null;
+        ui.content.appendChild(emptyBlock());
+        return;
+      }
+      ui.table = view.kind === "single_pin_nets" ? netTable() : violationTable();
+      ui.table.setQuery(view.query);
+      if (view.selected) ui.table.select((other) => other === view.selected);
+      ui.content.appendChild(ui.table.el);
+      return;
+    }
+    ui.table = null;
+    if (view.tab === "suppressed") ui.content.appendChild(suppressedBlock());
+    else if (view.tab === "advisories") Shell.append(ui.content, advisoriesBlock());
+    else if (view.tab === "levels") ui.content.appendChild(levelsBlock());
+    else ui.content.appendChild(notesBlock());
+  }
+
+  function tabItems() {
+    const data = view.data;
+    if (view.kind === "single_pin_nets") {
+      return [{ id: "nets", label: `Nets (${rowsOf().length})` }, { id: "notes", label: "Notes" }];
+    }
+    // Without the first page the suppressed counts and advisories are not known (not 0).
+    const known = Boolean(data.summary);
+    const advisories = data.advisories_total || (data.advisories || []).length;
+    return [
+      { id: "violations", label: `Violations (${sum(rowsOf().map((row) => row._n))})` },
+      { id: "suppressed", label: `Suppressed (${known ? suppressedTotals() + (narrowed() ? " in project" : "") : "?"})` },
+      { id: "advisories", label: `Advisories (${known ? advisories : "?"})` },
+      { id: "levels", label: "Levels" },
+      { id: "notes", label: "Notes" },
+    ];
+  }
+
+  function renderAll() {
+    const data = view.data;
+    ui.content = el("div", { class: "content" });
+    // Not a live region: the pane is rebuilt on each answer; Shell.announce says what changed.
+    ui.pane = el("aside", { class: "pane", "aria-label": "Details" });
+    const split = el("div", { class: "split" }, ui.content, ui.pane);
+    const filter = Shell.filterBox({
+      placeholder: view.kind === "single_pin_nets" ? "Filter nets, pins, sheets" : "Filter violations, objects, nets, sheets",
+      label: "Filter the ERC results", value: view.query,
+      onInput: (text) => {
+        view.query = text;
+        if (ui.table) ui.table.setQuery(text);
+        if (ui.advisories) ui.advisories.setQuery(text);
+      },
+    });
+    const groupings = view.kind === "single_pin_nets"
+      ? [{ id: "sheet", label: "Sheet" }, { id: "none", label: "None" }]
+      : [...GROUPINGS, { id: "none", label: "None", title: "No groups: one sortable table" }];
+    const switcher = Shell.segmented({ label: "Group by", items: groupings, current: view.groupBy, onChange: regroup });
+    const groupTools = el("span", { class: "toolbar" },
+      el("button", { type: "button", class: "btn", text: "Expand all", on: { click: () => ui.table && ui.table.expandAll() } }),
+      el("button", { type: "button", class: "btn", text: "Collapse all", on: { click: () => ui.table && ui.table.collapseAll() } }));
+    const tabBar = Shell.tabs(tabItems(), (id) => {
+      view.tab = id;
+      const tableTab = id === "violations" || id === "nets";
+      tableTools.hidden = !tableTab;
+      // A selection belongs to its tab's table.
+      view.selected = null;
+      view.asked = [];
+      renderTab();
+      renderPane();
+    }, view.tab, split);
+    ui.tabBar = tabBar;
+    // Grouping and filters: open where there is room, else behind a one-line disclosure
+    // (a short or narrow host), which the user opens or closes.
+    const chips = chipRow();
+    const off = [view.levelsOn, view.groupsOn, view.statesOn].filter(Boolean).length;
+    if (view.filtersOpen === null) view.filtersOpen = Shell.roomy();
+    const tableTools = el("details", { class: "filters-box", open: view.filtersOpen },
+      el("summary", { text: "Group and filter" }, off ? el("span", { class: "badge info", text: "filtered" }) : null),
+      el("div", { class: "toolbar" }, switcher.el, groupTools), chips);
+    tableTools.addEventListener("toggle", () => { view.filtersOpen = tableTools.open; });
+    tableTools.hidden = !(view.tab === "violations" || view.tab === "nets");
+    // One full-screen button for the page's life: it follows the host's display mode.
+    ui.displayButton = ui.displayButton || Shell.displayModeButton((error) => app.prepend(Shell.notice("error", error.message)));
+    const actions = el("span", { class: "toolbar" }, ui.displayButton,
+      canCall() ? el("button", { type: "button", class: "btn", text: "Refresh", title: "Call run_erc again", on: { click: refresh } }) : null);
+    const warnings = [];
+    if (view.incomplete) {
+      warnings.push(Shell.notice("warning", `Read ${plural(view.pages, "page")} of run_erc, then stopped: ${view.stopReason}. ` +
+        `The table holds ${rowsOf().length} of ${data.total} rows.`));
+    }
+    if ((data.sheet_errors || []).length) {
+      warnings.push(Shell.notice("warning", `${plural(data.sheet_errors.length, "sheet")} could not be read, so the ERC did not check them: ${data.sheet_errors.map(valueText).slice(0, 3).join("; ")}.`));
+    }
+    if (view.floorNote) warnings.push(Shell.notice("info", view.floorNote));
+    if (!canCall()) {
+      warnings.push(Shell.notice("info", "This host does not let the view call tools: more pages, the sheet, part and net details, List them and Refresh are off."));
+    }
+    if (view.warnings.length) warnings.push(Shell.notice("warning", `The result is not quite the shape this view reads: ${view.warnings.slice(0, 3).join("; ")}.`));
+    const title = view.kind === "single_pin_nets" ? "Single-pin nets" : "ERC";
+    clear(app).append(
+      el("div", { class: "head" },
+        el("h1", { text: title }),
+        data.project ? el("span", { class: "muted small", text: data.project }) : null,
+        el("span", { class: "summary" }, summaryBadges())),
+      el("p", { class: "approx", text: "Offline approximation of Altium's ERC: Compile in Altium is the final word." }),
+      ...warnings,
+      el("div", { class: "toolbar" }, filter, el("span", { class: "grow" }), actions),
+      tableTools,
+      tabBar.el,
+      split);
+    renderTab();
+    renderPane();
+  }
+
+  // ---------- host ----------
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && view.selected && !event.defaultPrevented) closeDetails();
+  });
+  Shell.on("toolInput", (args) => {
+    view.args = args || {};
+    view.argsKnown = true;
+    if (!view.data && !view.busy) showState("loading", "Running the ERC", "run_erc is compiling the saved sheets.");
+  });
+  Shell.on("toolInputPartial", () => {
+    if (!view.data && !view.busy) showState("loading", "Running the ERC", "Waiting for the tool's arguments.");
+  });
+  Shell.on("toolResult", (result) => {
+    view.busy = true;
+    return loadResult(result);
+  });
+  Shell.on("toolCancelled", (reason) => {
+    if (!view.data) showState("info", "The run_erc call was cancelled", reason || "No result to show.");
+  });
+  Shell.on("teardown", () => {
+    view.closed = true;
+  });
+
+  showState("loading", "Connecting to the host", "");
+  Shell.connect({ name: "altium-copilot-kc ERC results", version: "1.0.0" })
+    .then(() => {
+      if (!view.data && !view.busy) showState("loading", "Waiting for run_erc", "The table appears when the tool's result arrives.");
+    })
+    .catch((error) => showState("error", "This view needs a host that shows MCP Apps", error.message));
+})();
+</script>
+</body>
+</html>
