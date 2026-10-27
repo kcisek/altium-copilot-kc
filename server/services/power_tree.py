@@ -658,7 +658,9 @@ def _classify_parts(tree: _Tree) -> None:
             tree.not_fitted[ref] = converter
 
 
-def _inductors_on(tree: _Tree, net: str, ferrite: bool = False) -> list[tuple[str, str]]:
+def inductors_on(tree: _Tree, net: str, ferrite: bool = False) -> list[tuple[str, str]]:
+    """Fitted two-net inductors (ferrites when ferrite) with a pin on net: (part, the other
+    net)."""
     out = []
     for ref, _ in tree.members(net):
         if tree.kind(ref) != "inductive" or not tree.fitted(ref):
@@ -767,7 +769,7 @@ def _trace_io(tree: _Tree, conv: _Converter) -> None:
             continue
         channel = next((_channel(name) for _, name, sw in conv.pins.get("sw", ())
                         if sw == net), None)
-        for inductor, far in _inductors_on(tree, net):
+        for inductor, far in inductors_on(tree, net):
             if far in grounds or far in conv.switch_nodes:
                 continue
             if far in conv.inputs:
@@ -1141,7 +1143,7 @@ def _find_sources(tree: _Tree) -> None:
                     "supply", "ground", "ref", "cap", "in"):
                 note("driven", net, pin, f"{clean or pin} (an output pin)")
             elif _INTERNAL_SW.fullmatch(clean) and net not in tree.grounds:
-                for inductor, far in _inductors_on(tree, net):
+                for inductor, far in inductors_on(tree, net):
                     if far in nodes:
                         note("internal", far, pin,
                              f"{clean} through {inductor} (an internal SMPS)")
@@ -1303,7 +1305,7 @@ def _output_group(tree: _Tree, nets) -> set[str]:
                     other not in tree.grounds:
                 group.add(other)
                 queue.append(other)
-        for _, other in _inductors_on(tree, net, ferrite=True):
+        for _, other in inductors_on(tree, net, ferrite=True):
             if other not in group and other not in tree.grounds:
                 group.add(other)
                 queue.append(other)
@@ -2166,7 +2168,7 @@ def _upstream_unrecognised(tree: _Tree, net: str) -> list[dict]:
                 other not in tree.grounds:
             out.append({"part": ref, "type": "resistor", "from": other})
     for ferrite in (False, True):
-        for ref, other in _inductors_on(tree, net, ferrite):
+        for ref, other in inductors_on(tree, net, ferrite):
             if other not in nodes and other not in tree.grounds:
                 out.append({"part": ref, "type": "ferrite" if ferrite else "inductor",
                             "from": other})

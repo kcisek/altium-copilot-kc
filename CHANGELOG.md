@@ -6,6 +6,118 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [Unreleased]
 
 ### Added
+- `get_constraints_brief` and `generate_rule_file` (roadmap #48): a schematic-to-layout
+  constraints brief and the files to apply an agreed constraint plan, offline
+  (`server/services/constraints_brief.py`). Neither edits a design file.
+  - `get_constraints_brief` (netlist required; the PcbDoc, when it loads, says what
+    already exists and measures placements). Each item carries its evidence and whether
+    the PCB (classes with the same members, pairs, rules not scoped All whose scope takes
+    the members) or the schematic directives already cover it. A board rule covers an item
+    only when its values and mode ask at least as much: a Width rule the IPC width on
+    every layer, a Clearance the IPC-2221B gap, a MatchedLengths rule in the same mode
+    (within each pair, or across the group, through xSignals too) and no looser than the
+    typical tolerance (5 % slack); a rule that takes the members but asks less is listed
+    as weaker and named in the plan rule's board_rules. `existing` adds the project type
+    (classic or Constraint Manager, `detect_project_type`), the directives and
+    check_directive_sync's summary. net_classes: differential pairs from PCB pairs (legs
+    under their netlist spelling), Differential Pair directives and pair naming
+    (`diff_pair_checks.netlist_pair_candidates`, new) grouped by interface from their
+    names, the parts on their legs (magnetics make Ethernet MDI, a memory part a DDR clock)
+    and processor pin roles (`firmware_pins.classify`), a USB port's D+/D- kept apart from
+    its SuperSpeed lanes, with typical impedance and in-pair skew from INTERFACE_TARGETS
+    (`TYPICAL_PAIRS`, every number the row's own, marked typical); power classes by rail
+    current (`power_paths.rail_currents`, new, current= as check_power_paths takes it) in
+    bands with the IPC-2221 width outside and inside for temp_rise and copper_oz (one
+    value, outer/inner, or per layer name; else the stack's thinnest copper, else 1 oz),
+    rails without a current in one class without a width; high-voltage classes above 30 V
+    peak (names, power tree, switch nodes, hv=) with the IPC-2221B B2 / B1 clearance; an RF
+    class only when an RF part's RF pin, an RF net name or an antenna corroborates a path
+    (a coax connector alone does not). length_matching: in-pair tolerances, DDR byte lanes
+    (DQ, DM and their DQS, one lane per side of series resistors; DDR4 2 ps, about 10 mil,
+    typical), address/command groups with their own channel's clocks (and S<n> chip
+    selects), RGMII groups with their clocks and schematic buses of memory or high-speed
+    lines, a group without a sourced tolerance getting none. placement: decoupling
+    capacitors per IC and rail (at a pin only when the schematic draws them within 600 mil
+    of it and clearly nearer it than the IC's other rail pins, else one per supply pin;
+    shared ones per rail), measured to that pin or the IC's nearest pad on the rail;
+    TVS/ESD parts at their connectors, crystal groups (load capacitors, series and feedback
+    resistors, oscillator pins and whether they are named so; active oscillators left
+    out), switching-converter groups (input capacitors, switch-node inductor and diode,
+    bootstrap capacitor, output capacitors, feedback divider), each measured pad to pad on
+    the PcbDoc. zones per sheet (digital, power, analog, io, filtering, rf) with the parts
+    or the sheet name behind each (load switches count as power; a coax connector is rf
+    only on an RF path); designer_notes: sheet notes that state placement intent, quoted.
+    plan: classes and rules with values in units (Width, Clearance, DiffPairsRouting only
+    from a board impedance profile at the typical target, MatchedLengths), a class the PCB
+    already holds under its PCB name, rules the PCB already covers left out and listed;
+    needs_input says what to ask (currents, voltages, impedance profiles). sections=,
+    sheet=, units, offset paging and a shrink loop; the plan is never cut: whole on the
+    first page, else a pointer to sections=['plan'], which pages a long plan by class with
+    each rule beside its class.
+  - `generate_rule_file` validates a plan (the brief's, or one passed as JSON: units,
+    class kinds, rule kinds, scopes (ASCII; scope2 for Clearance only), value keys,
+    ordering on the inner layers as merged, ranges (above 0 at Altium's 0.0001 mil, at
+    most 10000 mil, lengths 200000 mil), names, priorities unique per kind) and gives a
+    .RUL file, CSV class lists (class, kind, member, pair nets) and a Markdown step list:
+    classic projects get Parameter Set (ClassName) and Differential Pair directives,
+    Design > Classes and Import Rules; Constraint Manager projects get the Constraint
+    Manager's entries. Without plan= it rebuilds the brief's plan with the current=, hv=,
+    copper_oz= and temp_rise= given (plan_assumptions says which). Rule names avoid the
+    board's and the plan's own (numbered); priorities count from 1 per kind around the
+    plan's explicit ones, with where they sit against the board's rules of the kind
+    (board_priorities, the board rules overlapping each new rule, a board rule with the
+    same number) in the result and the steps; rules scoped to a class neither in the plan
+    nor on the PCB, and a board that was not read, are said. Scopes are InNetClass /
+    InDifferentialPairClass / InNet / InDifferentialPair or a parsed query; per-layer
+    width keys follow the board's own rule of that kind (substack GUIDs included). Files
+    only into the absolute output_dir named ('~' expanded; created when missing, never
+    over a file: -2, -3 ...; absolute paths returned); otherwise the texts come inline, cut
+    at a line.
+  - The .RUL format: no rule file exported by Altium was available (the install's only
+    *.rul is the router's route.rul; the private set's 111 *.rul files are not Rules6
+    records: other keys and a header line). Advpcb.dll's import names 'Invalid RUL file
+    structure!', RULEKIND and SCOPE1EXPRESSION, the PcbDoc Rules6 keys, so each rule is
+    written as its Rules6 text record, one per line (CRLF, ASCII), with the keys, key
+    order and value forms of Altium's own records: lengths in mil to 4 decimals,
+    OBJECTCLEARANCES on Clearance records (empty: the generic gap), MAXUNCOUPLEDLENGTH on
+    every DiffPairsRouting record (the plan's, else the board's rule scoped All, else
+    Altium's 500 mil, said), IMPEDANCEPROFILEVALUE beside a profile's ID. Every line is
+    parsed back with the PcbDoc's decoder (`pcb_doc.parse_text_properties`, made public),
+    every key and value compared; a record that does not read back as written withholds
+    the file. Advpcb.dll also holds 'Choose Design Rule Type' and 'Clear existing rules
+    prior to import?': the steps say to select only the file's kinds and answer No. Its
+    import into Altium, and whether it keeps the priorities, are untested: the tool, steps
+    and README say to try it on a copy of the board first.
+  - Made public in place: `decoupling.decoupling_design`, `directive_sync.pair_suffixes`,
+    `power_tree.inductors_on`, `firmware_pins.is_crystal`. `constraints_review` points to
+    the brief (Phase 1) and to generate_rule_file (Phase 2); the schematic checklist's
+    SCH-SIG-09 hint names the brief; the review checklist may call it as evidence.
+  - Calibrated on the AD25 examples (11 projects, 5 PcbDocs): 115 pairs (PCIe 29, DDR4
+    strobes 28 and clocks 7, Ethernet MDI 12, SerDes 12, clocks 12, DisplayPort 8, USB 2 3,
+    USB 3 3, 1 not recognised); 28 byte lanes (the SODIMM's 16 on either side of its series
+    resistors, matching its BL classes), 24 of them already matched through xSignal rules;
+    address/command groups with their own clocks; RGMII groups with RX_CLK / GTX_CLK; 28
+    proposed rules left out as covered, 8 MatchedLengths rules proposed, read back
+    identical. MiniPC by hand: its USB 3 port's SuperSpeed lanes and D+/D- pair apart, PCIe
+    lanes with reference clocks and AC-coupled halves, DisplayPort, MDI and SGMII pairs, 12
+    DDR4 byte lanes (the PCB's BYTELINE classes reused by name, all already matched), no RF
+    class from its clock SMA connectors; crystals Y1-Y4 on clock generators (no load
+    capacitors drawn), its active oscillators left out; 10 switching converters (8 PowerSoC
+    modules and 2 regulators found by their SW pin, no external inductor). Decoupling: 8
+    capacitors drawn at a pin, 166 at their IC, 230 as the only IC on the rail, 140 shared;
+    68 IC rails within 5 mm, 2 beyond, 12 with bulk capacitors only. On a private set of
+    63 boards, aggregates only: 160 pairs (Ethernet 56, USB 2 47, USB 3 6, CAN 1, 50 not
+    recognised, mostly board-to-board connector pairs) in 53 pair classes; 411 power rails
+    in 58 projects, none with a known current, so each asks for current= (with 3 A on every
+    rail, 6 width classes are taken by narrower board rules, none counted as covered); no
+    net above 30 V (5 projects with high-voltage names ask for hv=); decoupling: 25
+    capacitors drawn at a pin, 201 at their IC, 80 IC rails within 5 mm, 22 beyond; 21 TVS
+    placements (5 beyond 2 mm of the pin), 3 crystal groups, 90 switching converters; 76
+    placement notes quoted in 29 projects; plans with 49 rules in 30 projects (19
+    DiffPairsRouting from a board impedance profile, every IMPEDANCEPROFILEVALUE as the
+    board's own rules write it; 30 MatchedLengths), all 49 records and 178 of generic
+    hand plans read back identical, no priority repeated within a file; at most 0.28 s per
+    board after the compile, first page at most 29 KB.
 - `check_directive_sync` (roadmap #4, narrowed): whether the schematic's directives
   reached the PcbDoc, offline and read-only (`server/services/directive_sync.py`); it
   needs the netlist and a PcbDoc, and reads the sheets as saved now through the offline

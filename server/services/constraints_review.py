@@ -413,6 +413,8 @@ CONSTRAINTS_REVIEW_TOOLS = (
     "check_diff_pairs",
     "check_diff_pair_geometry",
     "check_directive_sync",
+    "get_constraints_brief",
+    "generate_rule_file",
     "get_drc_report",
     "get_net_neighbors",
     "search_components",
@@ -495,7 +497,9 @@ Do not proceed until the user answers.
 2. Nets — list_diff_pairs; get_classes(kind="diff_pair"), get_classes(kind="net") and
    get_classes(kind="xsignal"); query_net for interface nets that are not in a pair. Follow
    series parts (AC-coupling caps, common-mode chokes, resistors) with get_component: each
-   splits one signal into several nets.
+   splits one signal into several nets. get_constraints_brief(sections=["net_classes",
+   "length_matching"]) gives a first grouping of the pairs by interface with typical
+   targets and what the PCB already covers: a starting point to confirm, not evidence.
 3. Per interface record: standard and rate (from the datasheet), both endpoints
    (refdes:pin), series parts with their DNP state, nets and pairs, and their classes.
 4. Targets — find the actual part's layout guide (web search for its datasheet, hardware
@@ -550,6 +554,9 @@ Do not proceed to Phase 2 until then.
    interface? None means no rule checks reference continuity.
 7. Hygiene — stale scope references, disabled rules, and kinds the board's batch DRC leaves
    out (see the snapshot) that touch the interface.
+8. Missing rules — once the user agrees the targets, generate_rule_file(plan=...) can
+   write them as a .RUL file and a step list (its import into Altium is untested: a copy of
+   the board first).
 
 Done when: every interface in scope has been checked on every item.
 Do not proceed to Phase 3 until then.

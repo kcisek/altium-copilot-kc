@@ -1874,6 +1874,29 @@ def _analyzer_finding(net: str, covered: dict) -> dict | None:
 
 # ---------- the check ----------
 
+def rail_currents(tree, netlist: dict, plan=None, *, data: dict | None = None,
+                  current: dict[str, float] | None = None, eta=None,
+                  rails: dict[str, float] | None = None, nets=None) -> dict:
+    """Each rail's current as check_power_paths estimates it, without a PcbDoc: tree is
+    the power tree (build_tree), data its tree_data. {"currents": {rail: Current},
+    "volts": {net: Volt}, "notes": [...]}; a Current's amps is None when no load's current
+    is known. current= and eta= read as check_power_paths reads them; rails= gives
+    voltages. nets narrows the rails (default: the tree's rails and power-path nets)."""
+    data = data if data is not None else tree_data(tree)
+    notes: list[str] = []
+    parts, _, _ = read_parts(tree, netlist, plan)
+    volts, unknown_rails = net_voltages(tree, data, rails, parts)
+    if unknown_rails:
+        notes.append(f"rails names no net {unknown_rails}: ignored.")
+    currents = _Currents(tree, volts, current, eta, None, plan, netlist, notes)
+    if currents.unknown_names:
+        notes.append(f"current= names no rail or part {currents.unknown_names}: ignored.")
+    selected = nets if nets is not None else sorted(
+        (net for net in tree.nodes() if net not in tree.grounds), key=natural_key)
+    found = {net: currents.rail(net) for net in selected}
+    return {"currents": found, "volts": volts, "notes": notes}
+
+
 def prepare_power_paths(
     netlist: dict,
     plan=None,
