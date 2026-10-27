@@ -7824,7 +7824,8 @@ def _bom_header(netlist: dict, plan, parts: list, excluded: dict) -> dict:
 @mcp.tool(
     title="Get BOM",
     annotations=ToolAnnotations(readOnlyHint=True),
-    meta={"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS},
+    meta=ui_views.link_meta("get_bom",
+                            {"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS}),
 )
 def get_bom(
     variant: str | None = None,

@@ -50,6 +50,14 @@ every session, where a panel would only show the variant list the text already g
 the registry stays one tool per view. The picker only compares: no view calls
 set_active_variant or any other tool that changes the server's state (every tool a page
 calls is a read-only one; tests/test_ui_variants.py checks each page).
+
+The BOM view (roadmap #62) is linked from get_bom only. check_bom has no page of its own:
+its findings name parts, which read best on the BOM lines that hold them, so the view asks
+check_bom for the variant it shows through tools/call and marks each line with its
+findings (and lists them by check in a tab); a second page would repeat the BOM table.
+get_active_bom links no view either: the BOM view asks it for one line's ranked solutions
+in its details pane, and a whole-BomDoc page (sourcing, cached stock and prices) is not on
+the roadmap. The registry stays one tool per view.
 """
 
 from __future__ import annotations
@@ -166,6 +174,25 @@ VIEWS = (
             "switches the active variant); the per-variant documentation check and stale "
             "variant entries; and a details pane per part with get_component, which shows "
             "the active variant."
+        ),
+    ),
+    View(
+        name="bom",
+        tool="get_bom",
+        file="bom.html",
+        title="BOM",
+        description=(
+            "HTML page (MCP Apps view) that hosts showing MCP Apps draw next to get_bom's "
+            "result; not for reading as text. The BOM lines of a variant as a sortable, "
+            "filterable table (quantity, designators, Comment, value, footprint, "
+            "manufacturer, MPN, what varies within a line, alternate parts, BomDoc line "
+            "and chosen part) grouped by manufacturer, footprint or finding, with "
+            "check_bom's findings per line and by check, filters for Not Fitted parts, "
+            "missing MPNs and findings, a variant switch filled from list_variants that "
+            "only shows (it never switches the active variant), a local quantity for a "
+            "number of boards, and a details pane per line with its ranked BomDoc "
+            "solutions from get_active_bom (cached, with their cache dates) and "
+            "get_component, which shows the active variant."
         ),
     ),
 )
