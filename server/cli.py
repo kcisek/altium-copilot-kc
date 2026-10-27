@@ -62,7 +62,7 @@ FINDING_LISTS = ("findings", "violations", "advisories")
 # Tool errors that mean the check does not apply (skipped as not applicable); any other
 # error is skipped as could not run.
 NOT_RUN_ERRORS = ("no_pcb_document", "netlist_required", "no_components_loaded",
-                  "no_variants")
+                  "no_variants", "no_multiboard_system")
 OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"  # Altium's binary documents
 LFS_POINTER = b"version https://git-lfs"
 # Tools a check pack's tool rule may name that answer in text, not JSON: --checks leaves

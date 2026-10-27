@@ -167,6 +167,7 @@ try:
         registry_projects, run_library_checks,
     )
     from services import db_parts
+    from services import multiboard
     from parsers.pin_table import PinTableError, parse_pin_file, parse_pin_text
     from services.pin_table import (
         check_pins as check_pin_rows, page as page_pin_table, placed_pins, symbol_pins,
@@ -339,6 +340,7 @@ except ImportError:
         registry_projects, run_library_checks,
     )
     from server.services import db_parts
+    from server.services import multiboard
     from server.parsers.pin_table import PinTableError, parse_pin_file, parse_pin_text
     from server.services.pin_table import (
         check_pins as check_pin_rows, page as page_pin_table, placed_pins, symbol_pins,
@@ -618,6 +620,37 @@ DNP reasons, fabrication requirements. Use it.
   opened read-only; servers, ODBC data sources, network shares, OneDrive folders and
   linked tables inside an Access file only with allow_network=true: ask the user before
   passing it. Never ask for or repeat a password; connection strings are shown masked.
+
+## Multi-Board Systems
+
+For a multi-board project (.PrjMbd beside the loaded project or in a folder above it;
+system= names another): its boards (modules of the .MbsDoc, each child project compiled
+offline; the loaded project is not changed) and connections (direct matings, wires,
+cables, harnesses) pin by pin.
+
+- trace_net_across_boards — "where does this net go on the other boards?", "what does
+  J5 pin 3 reach on the backplane?" (net="J5-3" with board= its module), "is RESET_N
+  carried to the daughter card?": from one board's net through every mated connector pin
+  (a cable or harness through its plugs and wires) into the other boards, hop by hop,
+  with each board net's other pins.
+- check_multiboard — "check my multi-board connections", "do the mated pins carry the
+  same signals?", before releasing a system: Altium's five multi-board checks (Different
+  Net Names, No Net, No Mated Part, Entry Is Empty, Unresolved Conflict) with the
+  .PrjMbd's report levels, plus checks Altium has no counterpart for (nets of one board
+  shorted through another, rails and ground across the boards, unwired harness pins,
+  connectors changed in a child project since the last import) and a summary per
+  connection. Different names are normal when each board names a signal its own way:
+  info when the names look like one signal; quote the warnings and errors (a ground
+  against a rail, two voltages, another index, P against N, SDA against SCL, a swap) as
+  questions, not faults. Altium's Validate in the multi-board schematic is the final
+  word.
+- get_system_connections — "give me the inter-board pin table", "which pins does C1
+  mate?": every mated pin pair (connection, kind, each side's board, connector, pin and
+  net), by connection= or board=.
+Boards are named by module designator (M1), title or project. When the .MbsDoc is
+missing or unreadable, ask the user how the connectors mate and pass mating=[{board_a,
+connector_a, board_b, connector_b, pin_map}] (pin_map defaults to the same pin numbers);
+never invent a mating.
 
 ## Pin Tables
 
@@ -9029,6 +9062,277 @@ def check_db_parameters(
              "findings_total": len(model["findings"]),
              "findings_omitted": "The result is too large even at 1 finding per page: call "
                                  "again with library= or table= to narrow it."}
+    return json.dumps(brief, indent=2)
+
+
+# ---------- multi-board systems (roadmap #54) ----------
+
+MULTIBOARD_TRACE_STEPS = ((40, 10), (20, 5), (10, 3), (5, 1), (2, 0))
+MULTIBOARD_CHECK_STEPS = ((100, 8), (50, 5), (25, 3), (10, 2), (5, 1), (1, 0))
+MULTIBOARD_PIN_STEPS = (150, 100, 50, 25, 10, 5, 1)
+MultiboardMating = Annotated[
+    Any,
+    WithJsonSchema({"anyOf": [{"type": "array", "items": {"type": "object"}}, {"type": "null"}],
+                    "description": "Connections when the .MbsDoc is missing or unreadable: "
+                                   "[{board_a, connector_a, board_b, connector_b, pin_map?, "
+                                   "kind?, name?}]"}),
+]
+
+
+def _multiboard_system(system: str | None, mating) -> tuple[Any, dict | None]:
+    """(the multi-board system model, None) or (None, the structured error). The loaded
+    project's netlist is used for its own board; the loaded project is not changed."""
+    if mating is not None and not isinstance(mating, list):
+        return None, {"error": "invalid_mating", "message": multiboard.MATING_HELP}
+    project = _project
+    loaded = None
+    if project is not None and _altium._netlist is not None:
+        loaded = (project["prj_pcb_path"], _altium._netlist)
+    try:
+        path, found_by = multiboard.locate_system(
+            system, project["prj_pcb_path"] if project is not None else None)
+        model = multiboard.cached_system(path, found_by, mating, loaded, _netlist_last_updated)
+    except multiboard.MultiboardError as error:
+        return None, error.payload
+    except Exception as failure:  # a damaged system must never break the server
+        logging.warning("Multi-board system failed: %s", type(failure).__name__)
+        return None, {"error": "multiboard_failed",
+                      "message": f"The multi-board system could not be read "
+                                 f"({type(failure).__name__})."}
+    if model.source == "none":
+        return None, {
+            "error": "no_multiboard_schematic",
+            "message": ("The multi-board schematic (.MbsDoc) is "
+                        f"{model.mbs_status.replace('_', ' ')}: {model.mbs_message} Its "
+                        "connections are unknown. Ask the user how the boards' connectors mate "
+                        "and pass mating=. " + multiboard.MATING_HELP),
+            **multiboard.header(model),
+        }
+    return model, None
+
+
+def _multiboard_args(model, board: str | None, connection: str | None):
+    """(boards, connection, None) or (None, None, error) for the board= and connection=
+    filters."""
+    try:
+        return (multiboard.resolve_boards(model, board),
+                multiboard.resolve_connection(model, connection), None)
+    except multiboard.MultiboardError as error:
+        return None, None, error.payload
+
+
+@mcp.tool(
+    title="Trace Net Across Boards",
+    annotations=ToolAnnotations(readOnlyHint=True),
+    meta={"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS},
+)
+def trace_net_across_boards(
+    net: str,
+    board: str | None = None,
+    system: str | None = None,
+    mating: MultiboardMating = None,
+    offset: int = 0,
+) -> str:
+    """Follow a net from one board of a multi-board system (.PrjMbd) through every mated
+    connector pin into the other boards: "where does RESET_N go on the daughter card?",
+    "what does J5 pin 3 reach on the backplane?", "is 3V3 carried to the module, and on how
+    many pins?", "which boards share this ground?". Not: one board's own net (query_net),
+    the whole pin table (get_system_connections), the checks (check_multiboard).
+
+    The system is the .PrjMbd in the loaded project's folder or a folder above it that
+    lists the project (system= a .PrjMbd or its folder for another). Each board is a module
+    of the multi-board schematic (.MbsDoc) with its child project compiled offline (the
+    loaded project's own netlist for its board; the loaded project is not changed). net=
+    a net name on board= (a module designator such as M1, its title or its project; default:
+    the loaded project's board, else the board with that net: net_on_several_boards when
+    the connections do not join the boards that have it), or a module connector's pin
+    (J5-3, J5.3, "J5 pin 3": the trace starts from that pin's net, start.from_pin;
+    pin_has_no_net lists what an unconnected pin mates). From that board net the
+    trace follows every mated pin of the module's connectors through its connection (a
+    direct mating pin to pin; a cable or harness through its plugs and wires, a splice
+    reaching several boards) to the other board's pin and net, then on from that net,
+    recursively. system_net: the boards reached and every board net's name (different
+    names on mated pins are normal: hops carry names: reason and severity, as
+    check_multiboard reads them). board_nets: each board net with its depth (hops from the
+    start), class (ground, power, signal, auto: a name Altium generated, Net<part>_<pin>),
+    the voltage its name gives and its other pins (other_pins_total; connector pins are in
+    the hops). hops: per connection and pair of connectors, the pins mated (pin_count; via:
+    the plug pins of a cable or harness), status no_net when the other pin has no net;
+    unwired: pins whose cable or harness pin no wire continues (status unwired) or whose
+    wire ends in a plug pin no board mates (dead_end); pairs_between_reached_nets counts
+    splice links between nets already reached; two nets of one board joined elsewhere show
+    as two board_nets of that board. mating= stands in for a missing or unreadable .MbsDoc
+    (see check_multiboard). Hops are paginated (offset from next_offset)."""
+    model, error = _multiboard_system(system, mating)
+    if error:
+        return json.dumps(error)
+    try:
+        start, name, start_pin = multiboard.find_start(
+            model, net or "", board, _project["prj_pcb_path"] if _project else None)
+    except multiboard.MultiboardError as failure:
+        return json.dumps(failure.payload)
+    offset = max(0, int(offset or 0))
+    header = multiboard.header(model)
+    result: dict = {}
+    for limit, pins in MULTIBOARD_TRACE_STEPS:
+        traced = multiboard.trace(model, start, name, pins, start_pin)
+        result = {**header, **multiboard.page_trace(traced, offset, limit)}
+        if (limit, pins) != MULTIBOARD_TRACE_STEPS[0]:
+            result["limited_to"] = {"hops": limit, "pins_per_hop": pins}
+        rendered = json.dumps(result, indent=2)
+        if len(rendered) <= QUERY_NET_MAX_RESULT_SIZE_CHARS:
+            return rendered
+    brief = {key: value for key, value in result.items() if key not in ("hops", "board_nets")}
+    brief["hops_omitted"] = "The trace is too large even trimmed: page it with offset."
+    return json.dumps(brief, indent=2)
+
+
+@mcp.tool(
+    title="Check Multi-Board System",
+    annotations=ToolAnnotations(readOnlyHint=True),
+    meta={"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS},
+)
+def check_multiboard(
+    system: str | None = None,
+    board: str | None = None,
+    connection: str | None = None,
+    mating: MultiboardMating = None,
+    offset: int = 0,
+) -> str:
+    """The checks of a multi-board system (.PrjMbd) that Altium's Connection Manager does
+    not highlight: "check my multi-board connections", "do the mated pins carry the same
+    signals?", "is anything unmated?", "does ground reach every board?", before releasing
+    a system of boards. Not: one board's own ERC (run_erc), the pin table
+    (get_system_connections), one net's path (trace_net_across_boards).
+
+    The system and its boards are found as trace_net_across_boards finds them (system=,
+    the loaded project is not changed). Each finding has its check, severity (error,
+    warning, info), the connection, both pins (board, connector, pin, net) or the board
+    and connector, and a message. Five checks are Altium's own multi-board violations and
+    carry altium_check with the level the .PrjMbd's Error Reporting sets (altium_level; a
+    warning of a check set to No Report is shown as info, errors stay errors):
+    different_net_names (Different Net Names: two mated pins whose boards name the net
+    differently; info when the names look like one signal: a board prefix or shared tail,
+    a one-letter board suffix, leading zeros, an abbreviation, a common synonym (CLK and
+    SCK), a name Altium generated, nets numbered per board, two names of one rail, TX
+    against RX; warning or error when they suggest different signals: ground_to_power
+    and different_voltages are errors, ground_to_signal, power_to_signal, index_differs
+    (another index on the same stem or bus: a shifted or swapped pin, another bus, or an
+    intended remap), polarity_differs (P against N, DP against DM, H against L),
+    active_low_differs (RESET_N against RESET), same_group_other_signal (SPI_MOSI against
+    SPI_MISO), swapped (X mates Y while Y mates X) and unrelated_names warnings); no_net
+    (No Net, per pin as Altium counts it: every entry pin with no net on its board; a
+    warning when the other side carries a ground or rail, else info grouped as a signal on
+    one side, open on both sides or mating no board; summary.no_net_pins is the count);
+    no_mated_part (No Mated Part: an entry no connection mates, or whose cable or harness
+    reaches no other module); entry_is_empty (Entry Is Empty: an entry with no pins or no
+    connector part, or a connector whose child part lost System=Connector, which the next
+    import would empty); stored_conflict (Unresolved Conflict: what Altium recorded in the
+    .MbsDoc, quoted, not recomputed; stored_conflicts compares them with the findings
+    here). The others have no Altium counterpart: unwired_pin (a pin mated to a cable or
+    harness pin no wire continues, or whose wire ends in a plug no board mates);
+    board_nets_joined (two nets of one board joined through other boards: a warning for
+    signals, info for grounds or rails); power_rails (rails of different voltages or a
+    ground and a rail joined through more than one hop; ground_not_shared: a board whose
+    ground reaches none of the boards it connects to); unmated_pins (pins with a net that
+    no connection mates: info for mounting and shield pins); connector_not_in_system (a
+    System=Connector part the multi-board schematic does not place, or no mating names);
+    connector_not_in_project (a connector or pins the child project no longer has: they
+    keep the nets stored at the last import); net_names_unsynchronized (the child
+    project's net now differs from the one the .MbsDoc stored at its last import);
+    board_not_loaded (a child project that did not compile: its pins keep the stored
+    nets). Info findings of one kind on one connection are grouped (count, examples).
+    connections: per connection its kind, boards, connectors, pin pair counts by status
+    and finding counts; power_rails: every system net with a rail or ground, its board nets
+    with class and voltage and the pins per connection carrying it. board= and
+    connection= narrow the findings.
+
+    mating= replaces the .MbsDoc's connections (use it when the .MbsDoc is missing or in
+    a format that is not read: ask the user, never guess): [{board_a, connector_a,
+    board_b, connector_b, pin_map?, kind?, name?}], boards by module designator, title or
+    project, connectors by designator, pin_map {'1': '2'} or [['1', '2']] from board_a's
+    pins to board_b's (default: the same pin numbers), kind direct, wire, cable or
+    harness; mating a connector with itself is refused, and one connector in two direct
+    matings or one pair of connectors listed twice is warned about (system.warnings).
+    Findings are paginated (offset from next_offset)."""
+    model, error = _multiboard_system(system, mating)
+    if error:
+        return json.dumps(error)
+    boards, wanted, error = _multiboard_args(model, board, connection)
+    if error:
+        return json.dumps(error)
+    checked = multiboard.check(model, boards, wanted)
+    header = multiboard.header(model)
+    offset = max(0, int(offset or 0))
+    result: dict = {}
+    for limit, examples in MULTIBOARD_CHECK_STEPS:
+        result = {**header, **multiboard.page_check(checked, offset, limit, examples)}
+        if (limit, examples) != MULTIBOARD_CHECK_STEPS[0]:
+            result["limited_to"] = {"findings": limit, "examples": examples}
+        rendered = json.dumps(result, indent=2)
+        if len(rendered) <= QUERY_NET_MAX_RESULT_SIZE_CHARS:
+            return rendered
+    brief = {key: value for key, value in result.items()
+             if key not in ("findings", "power_rails", "connections")}
+    brief["findings_omitted"] = ("The result is too large even at 1 finding per page: call "
+                                 "again with board= or connection=.")
+    return json.dumps(brief, indent=2)
+
+
+@mcp.tool(
+    title="Get System Connections",
+    annotations=ToolAnnotations(readOnlyHint=True),
+    meta={"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS},
+)
+def get_system_connections(
+    system: str | None = None,
+    board: str | None = None,
+    connection: str | None = None,
+    net: str | None = None,
+    mating: MultiboardMating = None,
+    offset: int = 0,
+) -> str:
+    """The inter-board pin table of a multi-board system (.PrjMbd): "give me the
+    inter-board connection table", "which pins does C1 mate?", "what is on the
+    backplane connector's pins?", "export the board-to-board pinout". Not: one net's path
+    across several boards (trace_net_across_boards), the checks (check_multiboard).
+
+    The system and its boards are found as trace_net_across_boards finds them (system=,
+    the loaded project is not changed). connections: each connection with its kind
+    (direct, wire, cable, harness), boards, connectors, plugs (cable and harness) and pin
+    pair count. rows: one per pair of board pins a connection joins end to end
+    (connection, kind, a and b: board, connector, pin, pin_name, net), a cable or harness
+    followed through its plugs and wires (via; a splice gives one row per pair of ends),
+    with status same_net, different_names (names: reason and severity, as check_multiboard
+    reads them), no_net (one side has no net), unconnected (neither has), unwired (b null:
+    the cable or harness pin has no wire on) or dead_end (b null: the wire ends in a plug
+    pin no board mates). Rows are ordered by connection, board
+    and pin; board= (module designator, title or project), connection= and net= (either
+    side's net) narrow them. mating= stands in for a missing or unreadable .MbsDoc (see
+    check_multiboard). Rows are paginated (offset from next_offset)."""
+    model, error = _multiboard_system(system, mating)
+    if error:
+        return json.dumps(error)
+    boards, wanted, error = _multiboard_args(model, board, connection)
+    if error:
+        return json.dumps(error)
+    rows = multiboard.pin_rows(model, boards, wanted, net)
+    header = multiboard.header(model)
+    connections = [row for row in multiboard.connection_list(model)
+                   if (not wanted or row["connection"] == wanted)
+                   and (not boards or set(row["boards"]) & set(boards))]
+    offset = max(0, int(offset or 0))
+    result: dict = {}
+    for limit in MULTIBOARD_PIN_STEPS:
+        result = {**header, "connections": connections,
+                  **multiboard.page_rows(rows, offset, limit)}
+        if limit != MULTIBOARD_PIN_STEPS[0]:
+            result["rows_limited_to"] = limit
+        rendered = json.dumps(result, indent=2)
+        if len(rendered) <= QUERY_NET_MAX_RESULT_SIZE_CHARS:
+            return rendered
+    brief = {key: value for key, value in result.items() if key != "rows"}
+    brief["rows_omitted"] = "The table is too large even at 1 row per page."
     return json.dumps(brief, indent=2)
 
 

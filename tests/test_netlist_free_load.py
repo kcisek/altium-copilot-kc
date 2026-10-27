@@ -128,6 +128,9 @@ WORKING_TOOL_CALLS = {
     "set_active_variant": lambda: main.set_active_variant("Prod"),
     "compare_variants": lambda: main.compare_variants("Prod"),
     "get_clone_status": lambda: main.get_clone_status(),
+    "trace_net_across_boards": lambda: main.trace_net_across_boards("GND"),
+    "check_multiboard": lambda: main.check_multiboard(),
+    "get_system_connections": lambda: main.get_system_connections(),
 }
 
 
@@ -264,9 +267,9 @@ def test_other_tools_work_without_netlist(env, tool):
         error = json.loads(result).get("error")
     except ValueError:  # the review tools return a prompt, not JSON
         error = None
-    # There is no DRC report in the project folder, and it is no Altium 365 clone;
-    # everything else answers.
-    assert error in (None, "no_drc_report", "not_an_altium365_clone")
+    # There is no DRC report in the project folder, it is no Altium 365 clone and no
+    # multi-board project lists it; everything else answers.
+    assert error in (None, "no_drc_report", "not_an_altium365_clone", "no_multiboard_system")
     assert all(netlist is None for netlist in loads)
 
 
