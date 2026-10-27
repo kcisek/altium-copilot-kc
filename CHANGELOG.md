@@ -6,6 +6,99 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [Unreleased]
 
 ### Added
+- `trace_net_across_boards`, `check_multiboard` and `get_system_connections` (roadmap
+  #54): multi-board systems (`.PrjMbd`) read offline; the loaded project is never
+  changed and none of the three needs its netlist.
+  - Parsers: `server/parsers/prj_mbd.py` reads the `.PrjMbd` (the `.PrjPcb` INI layout:
+    `[Design]`, the Error Reporting levels, `[Document<n>]` child projects, multi-board
+    schematic, assembly, harness projects, parameters, variant names);
+    `server/parsers/mbs_doc.py` reads the AD25 `.MbsDoc` (a zip of JSON files: core.json
+    and logical.json) into modules (designator, title, child project, connector parts
+    with their UniqueId path, sheet and pins with the net stored at the last import),
+    entries and the pins each carries, connections by kind (direct, wire, cable,
+    harness; a cable's or harness's own plugs, entries and internal wires), pin pairs,
+    power ports and the conflicts Altium stored. Unknown keys and connection types are
+    kept (an unknown type is read by its pin pairs, with a warning); an `.MbsDoc` that is
+    an OLE compound file, a text record file, bare JSON or a zip without logical.json is
+    reported as unsupported, not guessed. The `.MbaDoc` (3D placement) is not read.
+  - The system: system= (a `.PrjMbd` or its folder), else the `.PrjMbd` in the loaded
+    project's folder or up to two folders above it (and their subfolders, so a sibling
+    folder holding the system is found) that lists the project. Each module is a board;
+    its child project is compiled offline (cached by its files; the loaded project's own
+    netlist serves its board), so two modules placing one project are two boards. A
+    module's connector is matched to its child part by the stored UniqueId path, then by
+    designator; pins by number; nets are the child project's now. A project that does not
+    compile (board_not_loaded), and a connector or pin the child project no longer has
+    (connector_not_in_project), keep the nets the `.MbsDoc` stored, so one deletion is one
+    finding. The model is rebuilt when any file it was read from changes, a module's
+    project the `.PrjMbd` omits included.
+  - Pin map: every pair of board pins a connection joins end to end, a cable or harness
+    followed through its plugs and wires (a splice gives one row per pair of ends, up to
+    64 ends per pin, with a system warning beyond), with status same_net,
+    different_names, no_net, unconnected, unwired (the plug pin has no wire on) or
+    dead_end (the wire ends in a plug pin no board mates); system nets join board nets
+    through mated pins.
+  - trace_net_across_boards: from a board's net, or the net on a connector pin (J5-3),
+    through every mated pin, hop by hop and recursively, with the system net, each board
+    net's depth, class, voltage and other pins, the hops (connection, kind, connectors,
+    pins, plug pins passed, name check), unwired and dead-end pins and splice links between
+    nets already reached.
+  - check_multiboard: Altium's five multi-board violations (Different Net Names, Entry Is
+    Empty, No Mated Part, No Net, Unresolved Conflict: Type114 to Type118) with the level
+    the `.PrjMbd` sets (a warning of a check set to No Report is shown as info); No Net
+    per pin as Altium counts it (every entry pin with no net, summary.no_net_pins), No
+    Mated Part also for an entry whose cable or harness reaches no other module, Entry Is
+    Empty also for a connector whose child part lost System=Connector (the next import
+    would empty it). Checks Altium has no counterpart for carry no Altium name: unwired
+    cable or harness pins, two nets of one board joined through other boards (a warning
+    for signals, info for grounds or rails), rails of different voltages or a ground and a
+    rail joined through more than one hop, ground not shared with the connected boards,
+    pins with a net that no connection mates, System=Connector parts the multi-board
+    schematic does not place, connectors or pins deleted from a child project and nets
+    changed in it since the last import. A summary per connection and the rails across
+    boards. Different names are read by a name policy: info when they look like one
+    signal (board prefix or shared tail, a one-letter board suffix, leading zeros, one
+    name in two active-low notations, an abbreviated stem, a common synonym such as CLK
+    and SCK, a name Altium generated (Net<part>_<pin>), nets numbered per board, two names
+    of one rail, TX against RX or SDO against SDI), warning or error when they suggest
+    different signals (ground against a rail or two voltages: error; ground or a rail
+    against a signal, another index on the stem or the bus (I2C1 against I2C2), P against
+    N (DP against DM, D+ against D-), an active-low mark on one side only, one bus or group
+    name ending in another signal (SPI_MOSI against SPI_MISO), two signals swapped between
+    the boards, unrelated names: warning). Info findings are grouped per connection.
+    Stored conflicts are quoted, not recomputed, and matched against the pins, entries
+    and connections the findings name (grouped ones included).
+  - get_system_connections: the inter-board table, filtered by connection, board or net.
+  - Fallback: mating=[{board_a, connector_a, board_b, connector_b, pin_map?, kind?,
+    name?}] replaces the `.MbsDoc`'s connections (missing or unreadable `.MbsDoc`: the
+    tools say so and list the boards). A connector mated with itself is refused; one
+    connector in two direct matings, or one pair of connectors listed twice, is warned
+    about.
+  - Registered in the manifest, the server instructions, the README, the review
+    checklist's evidence tools (check_multiboard) and the headless check command
+    (no_multiboard_system is not applicable).
+  - Calibration on Altium's two multi-board examples. Mini PC: 4 modules (two place the
+    same SODIMM project), 6 connectors all matched by UniqueId, 3 direct connections, 572
+    pin pairs (204 same net, 300 different names, 13 no net on one side, 55 unconnected),
+    142 system nets, 123 No Net pins; 7 warnings, all the second SODIMM socket wired to
+    the other rank (CKE1, CS1, ODT1, CK2/CK3 against the module's CKE0, S0, ODT0,
+    CK0/CK1), and 17 grouped info findings (board prefixes, VDD_DDR against VDD, unused
+    positions, the WiFi card's unused PCIe pins, each SODIMM's VDDSPD and VPP both fed
+    from the motherboard's IO_2V5, mounting pins); 46 pairs checked by hand against the
+    JEDEC DDR4 SODIMM and PCI Express Mini Card pin assignments, and all 572 re-derived
+    independently from logical.json and a fresh compile, identical. Harness Demo: 5
+    modules, one harness with 5 plugs and 12 internal wires (two splices), 18 pin pairs
+    (17 user net labels numbered per board, 1 unwired plug pin), 2 No Net mounting pins;
+    4 info findings. Edited copies of both (a connector deleted or renumbered in its child
+    project, a lost System=Connector, a USB pair swapped, one pin mated twice, a stored
+    conflict, a harness plug wired to nowhere, every check at No Report) each add only the
+    findings that name the edit, with no cascade of open pins. Neither file stores a
+    conflict. Mini PC builds in 1.4 s (child
+    compiles), cached calls take milliseconds; results 5 to 40 kB. On 63 private projects
+    (no multi-board files): every call answers no_multiboard_system in under 0.05 s, and
+    in memory each board mated to a copy of itself (1164 pin pairs) gave only No Net info
+    for unused positions and 8 ground_not_shared warnings (boards joined only through
+    signal connectors); the existing tools' outputs are unchanged.
 - `get_db_part` and `check_db_parameters` (roadmap #53): parts placed from a database
   library (`.DbLib`, `.SVNDbLib`) or linked through a database link file (`.DbLink`)
   against their database record; netlist required, read-only throughout.
