@@ -412,6 +412,7 @@ CONSTRAINTS_REVIEW_TOOLS = (
     "check_lengths",
     "check_diff_pairs",
     "check_diff_pair_geometry",
+    "check_directive_sync",
     "get_drc_report",
     "get_net_neighbors",
     "search_components",
@@ -520,9 +521,10 @@ Do not proceed to Phase 2 until then.
 
 1. Pairs — every P/N signal of an interface is a defined pair, its positive net on the P/+
    pin. check_diff_pairs(pattern=...) reports undeclared halves, polarity at pins and
-   asymmetric series parts; schematic Differential Pair directives are not compared with the
-   PCB yet (see not_checked). Confirm each finding with get_component and the datasheet
-   before calling it a defect: many receivers tolerate swapped polarity.
+   asymmetric series parts; check_directive_sync(kind="diff_pair") says whether each
+   schematic Differential Pair directive (and net class or rule directive) reached the PCB
+   with the same nets and values. Confirm each finding with get_component and the
+   datasheet before calling it a defect: many receivers tolerate swapped polarity.
 2. Rules — get_rules_for_net on a member net of each pair or group, and on the pair name:
    DiffPairsRouting, Width, Clearance, RoutingVias, RoutingLayers, MatchedLengths, Length
    (on an xSignal name it returns the xSignal's Length and MatchedLengths rules).

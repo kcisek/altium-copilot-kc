@@ -58,9 +58,8 @@ CHECKS = ("naming", "polarity", "series", "skew")
 # not_checked when they are requested (or when every check runs).
 DEFERRED_CHECKS = {
     "directives": (
-        "Schematic Differential Pair directives are not compared with the PCB "
-        "pairs yet: that needs schematic wire connectivity, which is not parsed. "
-        "Planned for a later release."
+        "Schematic Differential Pair directives are not compared with the PCB pairs "
+        "here: check_directive_sync compares them (and net class and rule directives)."
     ),
 }
 

@@ -51,6 +51,9 @@ try:
         PROPAGATION_UNIT_NOTE, impedance_profiles, profile_refs,
     )
     from services.sch_pcb_sync import net_matching_options, run_sync_check
+    from services.directive_sync import (
+        build_directive_sync_cached, detect_project_type, page_directive_sync,
+    )
     from services.drc_results import (
         load_report, assess, summarize, other_sections, DrcLinker, count_problem,
     )
@@ -204,6 +207,9 @@ except ImportError:
         PROPAGATION_UNIT_NOTE, impedance_profiles, profile_refs,
     )
     from server.services.sch_pcb_sync import net_matching_options, run_sync_check
+    from server.services.directive_sync import (
+        build_directive_sync_cached, detect_project_type, page_directive_sync,
+    )
     from server.services.drc_results import (
         load_report, assess, summarize, other_sections, DrcLinker, count_problem,
     )
@@ -975,6 +981,16 @@ component locations, distances):
     cutouts, thickness, mounting holes, connectors, keepout and room regions, rigid-flex
     regions, per-side summaries and part heights; DXF (R12) and SVG only when the user
     names an output_dir. Plan view only: not a STEP or IDX replacement.
+30. check_directive_sync — "did my net classes / differential pairs / schematic rules reach
+    the board?", "did Update PCB bring my directives over?", "why is this pair not on the
+    PCB?": each ClassName, Differential Pair and Rule directive (on wires, buses, harnesses
+    and blankets), bus net class and per-sheet component class and room against the
+    PcbDoc's classes, pairs, rooms and schematic-defined rules, nets renamed on the PCB
+    followed, with whether Class Generation enables each kind (a kind left out gives info
+    findings). Quote project_type and summary first: in a Constraint Manager project
+    (ConstraintManagerFlow) directives are ignored unless imported, so its findings are
+    info. Rule text is decoded leniently: confirm rule_values_differ in Altium. Show
+    Differences / Update PCB in Altium is the final word.
 
 get_board_info lists the stack manager's impedance profiles: target, solved width/gap and
 calculated impedance per layer, reference layers, the rules using each, and issues. Quote
@@ -1096,7 +1112,8 @@ NETLIST_TOOLS = (
     "check_bom", "check_decoupling", "check_pull_resistors", "check_interfaces",
     "get_power_tree", "check_derating", "check_logic_levels", "get_circuit_calculations",
     "check_thermal", "check_hv_clearance", "check_power_paths", "get_firmware_pin_map",
-    "run_erc", "check_sch_pcb_sync", "schematic_review", "package_for_xfn",
+    "run_erc", "check_sch_pcb_sync", "check_directive_sync", "schematic_review",
+    "package_for_xfn",
 )
 
 
@@ -4492,6 +4509,104 @@ def check_sch_pcb_sync(checks: list[str] | None = None, offset: int = 0) -> str:
             )
         if limit < 100:
             result["findings_limited_to"] = limit
+        rendered = json.dumps(result, indent=2)
+        if len(rendered) <= QUERY_NET_MAX_RESULT_SIZE_CHARS:
+            break
+    return rendered
+
+
+# ---------- check_directive_sync ----------
+
+DirectiveKind = Literal["net_class", "diff_pair", "rule", "component_class", "room"]
+# (findings, directive rows) per page, shrunk until the page fits.
+DIRECTIVE_SYNC_STEPS = ((100, 60), (60, 40), (40, 25), (25, 15), (15, 10), (10, 5), (5, 3),
+                        (2, 2), (1, 1))
+
+
+@mcp.tool(
+    title="Check Directive Sync",
+    annotations=ToolAnnotations(readOnlyHint=True),
+    meta={"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS},
+)
+def check_directive_sync(
+    kind: DirectiveKind | None = None,
+    sheet: str | None = None,
+    offset: int = 0,
+    directives_offset: int = 0,
+) -> str:
+    """Did the schematic's directives reach the PCB? Call it for "are my net classes /
+    differential pairs / schematic rules on the board?", "did Update PCB bring my
+    directives over?", "why is this pair not on the PCB?", or the constraint part of a
+    schematic-to-layout review. Offline, from the sheets as saved now and the saved PcbDoc.
+
+    Schematic side, per item with its sheets and nets: net classes from Parameter Set
+    directives with ClassName (on a wire, a bus's members, a signal harness's nets or the
+    nets under a blanket), differential pairs from Differential Pair directives (named by
+    the _P / _N suffixes and the project's own; with a ClassName, a differential pair
+    class), design rules from Rule parameters (kind, name, scope and values such as width,
+    clearance and pair gap, decoded leniently), net classes for buses, and per-sheet
+    component classes and rooms, each with whether the project's Class Generation options
+    enable it. PCB side: net, pair and component classes with their members, differential
+    pairs, rooms and the rules marked as defined by the schematic; nets renamed on the PCB
+    are followed (check_sch_pcb_sync's matching), and parts Update PCB may not place
+    (mechanical, graphical, no footprint) are left out of component classes. project_type
+    says classic or Constraint Manager (the .PrjPcb's [Design] ConstraintManagerFlow
+    switch, a Settings/Constraints file, the PcbDoc's constraint data; the switch at 0
+    means classic): in a Constraint Manager project directives are ignored unless
+    imported, so every finding is info.
+
+    Findings: directive_class_missing, bus_class_missing, class_name_differs (a class
+    matched by its members under another name), class_members_differ (members missing
+    from the PCB class: warning; PCB members no directive gives: info),
+    diff_pair_missing, diff_pair_nets_differ, diff_pair_name_differs (same nets, another
+    name: info), directive_rule_missing, rule_values_differ, rule_text_not_decoded,
+    component_class_missing, room_missing and stale_pcb_item (a PCB rule marked as from
+    the schematic, pair or class that no directive gives now: info). Where Class
+    Generation leaves a kind out, Update PCB neither adds nor changes its classes, so its
+    findings are info (option_off). summary counts per kind the items, transferred,
+    missing, differing, disabled by options and those from directives.
+
+    kind narrows to net_class, diff_pair, rule, component_class or room; sheet to items
+    on one sheet. Findings page with offset (next_offset), the directive rows with
+    directives_offset (next_directives_offset); the page shrinks to fit."""
+    try:
+        project, netlist, _ = _require_project()
+    except ProjectNotReady as e:
+        return json.dumps(e.payload)
+    index, error = _pcb_index_or_error()
+    if error:
+        return json.dumps(error)
+    prj_path = project["prj_pcb_path"]
+    sheet_paths = [s["path"] for s in project.get("sheets") or []] or None
+    try:
+        compiled = _altium.compiled_netlist(prj_path, sheet_paths)
+    except Exception as e:
+        return json.dumps({"error": "compile_failed", "message": f"{type(e).__name__}: {e}"})
+    try:
+        options = parse_prj_options(prj_path)
+    except (OSError, UnicodeDecodeError) as e:
+        return json.dumps({"error": "project_unreadable",
+                           "message": f"{type(e).__name__}: {e}"})
+    pcb_path = project["pcb_doc_paths"][0]
+    model = build_directive_sync_cached(
+        compiled, index, options, netlist, net_matching_options(prj_path),
+        detect_project_type(prj_path, pcb_path))
+    if "error" in model:
+        return json.dumps(model)
+    context: dict = {"pcb_doc": Path(pcb_path).name, "compiled_from": "the sheets as saved now"}
+    if len(project["pcb_doc_paths"]) > 1:
+        context["note"] = (f"Project lists {len(project['pcb_doc_paths'])} PcbDocs; compared "
+                           f"with '{Path(pcb_path).name}'.")
+    if compiled.sheet_errors:
+        context["sheet_errors"] = compiled.sheet_errors[:20]
+    for limit, rows in DIRECTIVE_SYNC_STEPS:
+        page = page_directive_sync(model, kind=kind, sheet=sheet, offset=offset, limit=limit,
+                                   rows_offset=directives_offset, rows_limit=rows)
+        if "error" in page:
+            return json.dumps(page)
+        result = {**context, **page}
+        if limit != DIRECTIVE_SYNC_STEPS[0][0]:
+            result["page_limited_to"] = limit
         rendered = json.dumps(result, indent=2)
         if len(rendered) <= QUERY_NET_MAX_RESULT_SIZE_CHARS:
             break

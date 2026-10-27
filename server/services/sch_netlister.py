@@ -165,15 +165,45 @@ class ErcPart:
 
 @dataclass
 class ErcParameterSet:
-    """A Parameter Set directive, per compiled copy, with the net it is attached to."""
+    """A Parameter Set directive, per compiled copy, with the net it is attached to and
+    every net it covers."""
     sheet: str
     copy: int
     room: str
     x_mil: float
     y_mil: float
     parameters: list[tuple[str, str]]
-    attached: bool            # on a wire, bus, harness or sheet symbol
+    attached: bool            # on a wire, bus, harness, blanket edge or sheet symbol
     net: str | None           # the wire's net (Altium's name), None when not on a net
+    # The nets it applies to by their netlist names: the wire's net, a bus's members, the
+    # nets in a signal harness, or the nets under a blanket.
+    nets: list[str] = field(default_factory=list)
+    via: str = ""             # wire, bus, harness, blanket, sheet_symbol; "" on nothing
+    unique_id: str = ""
+    parameter_ids: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ErcInstance:
+    """A compiled sheet copy: what per-sheet class generation names its component class
+    and room after."""
+    copy: int
+    sheet: str                # the sheet document's name
+    parent: int | None        # the copy placing it; None for a top sheet
+    designator: str           # the placing sheet symbol's designator ("" at the top)
+    level: str                # this level's name: the designator, or its channel name
+    room: str                 # channel (room) name, "" for a sheet compiled once
+    depth: int
+
+
+@dataclass
+class ErcBus:
+    """A bus as one compiled copy draws it: a ranged net label on a bus and the nets of
+    its members by their netlist names."""
+    name: str
+    sheet: str
+    copy: int
+    nets: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -245,6 +275,8 @@ class ErcFacts:
     nets: list[ErcNet] = field(default_factory=list)
     parts: list[ErcPart] = field(default_factory=list)
     parameter_sets: list[ErcParameterSet] = field(default_factory=list)
+    instances: list[ErcInstance] = field(default_factory=list)  # every compiled copy
+    buses: list[ErcBus] = field(default_factory=list)          # ranged labels on buses
     scope_changes: list[ErcScopeChange] = field(default_factory=list)
     naming: dict[str, str] = field(default_factory=dict)   # the project's net naming keys
     design: dict[str, str] = field(default_factory=dict)   # its [Design] options
@@ -323,9 +355,14 @@ class _Wiring:
     # no object or wire) and, for a No ERC, the object at its point.
     points: list[tuple[float, float]] = field(default_factory=list)
     wired: set[int] = field(default_factory=set)
+    buses: set[int] = field(default_factory=set)      # the groups holding a bus line
     masked_parts: set[int] = field(default_factory=set)
     no_ercs: list[tuple[NoErc, int | None, int | None]] = field(default_factory=list)
-    parameter_sets: list[tuple[ParameterSet, int | None, bool]] = field(default_factory=list)
+    # (parameter set, wire group, attached elsewhere, what it covers off a wire: ("bus" or
+    # "harness", the line's group), ("blanket", the groups under it) or ("symbol", its
+    # index); None on a wire or on nothing).
+    parameter_sets: list[tuple[ParameterSet, int | None, bool, tuple | None]] = field(
+        default_factory=list)
     # The objects touching a wire, bus or other object at their points (a net label or
     # power port that does not is floating); the wires kept (not under a compile mask) by
     # line number with each one's group; the wires whose group holds no object but
@@ -388,7 +425,10 @@ def wire_sheet(sheet: SheetConnectivity) -> _Wiring:
     for vertices in sheet.wires:
         if not (sheet.masks and vertices and all(inside(v) for v in vertices)):
             wires.add(vertices)
-    for vertices in [*sheet.buses, *sheet.harnesses]:
+    for vertices in sheet.buses:
+        buses.add(vertices)
+    bus_lines = len(buses.lines)  # the buses come first, then the signal harnesses
+    for vertices in sheet.harnesses:
         buses.add(vertices)
     offset = len(wires.lines)
     parent = list(range(offset + len(buses.lines)))
@@ -490,6 +530,7 @@ def wire_sheet(sheet: SheetConnectivity) -> _Wiring:
              for item in sheet.no_ercs if item.active and kept((item.x_mil, item.y_mil))]
     result.group = [find(first_object + i) for i in range(len(result.objects))]
     result.wired = {find(node) for node in range(offset)}
+    result.buses = {find(offset + node) for node in range(bus_lines)}
     result.lines = wires.lines
     result.line_group = [find(node) for node in range(offset)]
     electrical = {group for group, (kind, _) in zip(result.group, result.objects)
@@ -503,17 +544,93 @@ def wire_sheet(sheet: SheetConnectivity) -> _Wiring:
         result.no_erc_lines.append(on_line)
         result.no_erc_floating.append(node is None and not buses.at(item.x_mil, item.y_mil))
     for item in sheet.parameter_sets:
-        # A parameter set attaches to a wire, bus, signal harness or sheet symbol; a
-        # compile mask hides it.
+        # A parameter set attaches to a wire, bus, signal harness, blanket edge or sheet
+        # symbol; a compile mask hides it.
         x, y = item.x_mil, item.y_mil
         if not kept((x, y)):
             continue
         lines = sorted(wires.at(x, y)) or sorted(wires.near(x, y, JUNCTION_TOLERANCE_MIL))
-        elsewhere = not lines and (bool(buses.at(x, y)) or any(
-            s.x_mil <= x <= s.x_mil + s.width_mil and s.y_mil - s.height_mil <= y <= s.y_mil
-            for s, _ in sheet.symbols))
-        result.parameter_sets.append((item, find(lines[0]) if lines else None, elsewhere))
+        cover = None if lines else _directive_cover(sheet, result, wires, buses, offset,
+                                                     bus_lines, find, x, y)
+        result.parameter_sets.append((item, find(lines[0]) if lines else None,
+                                      cover is not None, cover))
     return result
+
+
+def _directive_cover(sheet: SheetConnectivity, wiring: _Wiring, wires: LineIndex,
+                     buses: LineIndex, offset: int, bus_lines: int, find, x: float,
+                     y: float) -> tuple | None:
+    """What a parameter set off any wire covers: the bus or signal harness through its
+    point (its line's group), else the blanket whose edge it sits on (the groups of the
+    wires, buses and objects under the blanket, partly covered ones included), else the
+    sheet symbol it sits on; None when it sits on nothing."""
+    on_buses = sorted(buses.at(x, y))
+    if on_buses:
+        line = on_buses[0]
+        return ("bus" if line < bus_lines else "harness", find(offset + line))
+    for outline in sheet.blankets:
+        if not _on_outline(outline, x, y, JUNCTION_TOLERANCE_MIL):
+            continue
+        groups: set = set()
+        for node, vertices in enumerate(wires.lines):
+            if _crosses(outline, vertices):
+                groups.add(find(node))
+        for node, vertices in enumerate(buses.lines):
+            if node < bus_lines and _crosses(outline, vertices):
+                groups.add(("bus", find(offset + node)))
+        for obj, (kind, _) in enumerate(wiring.objects):
+            if kind in ("pin", LABEL, POWER, PORT) and _inside(outline, *wiring.points[obj]):
+                groups.add(wiring.group[obj])
+        return ("blanket", groups)
+    for index, (symbol, _) in enumerate(sheet.symbols):
+        if (symbol.x_mil <= x <= symbol.x_mil + symbol.width_mil
+                and symbol.y_mil - symbol.height_mil <= y <= symbol.y_mil):
+            return ("symbol", index)
+    return None
+
+
+def _inside(outline: list[tuple[float, float]], x: float, y: float) -> bool:
+    """Point in polygon (even-odd), the outline's edge counting as inside."""
+    if _on_outline(outline, x, y, 0.01):
+        return True
+    inside = False
+    for (x0, y0), (x1, y1) in zip(outline, outline[1:] + outline[:1]):
+        if (y0 > y) != (y1 > y) and x < x0 + (y - y0) * (x1 - x0) / (y1 - y0):
+            inside = not inside
+    return inside
+
+
+def _segment_distance(x: float, y: float, a: tuple[float, float],
+                      b: tuple[float, float]) -> float:
+    (x0, y0), (x1, y1) = a, b
+    dx, dy = x1 - x0, y1 - y0
+    length = dx * dx + dy * dy
+    t = 0.0 if length == 0 else max(0.0, min(1.0, ((x - x0) * dx + (y - y0) * dy) / length))
+    return ((x - x0 - t * dx) ** 2 + (y - y0 - t * dy) ** 2) ** 0.5
+
+
+def _on_outline(outline: list[tuple[float, float]], x: float, y: float,
+                tolerance: float) -> bool:
+    return any(_segment_distance(x, y, a, b) <= tolerance
+               for a, b in zip(outline, outline[1:] + outline[:1]))
+
+
+def _crosses(outline: list[tuple[float, float]], vertices: list[tuple[float, float]]) -> bool:
+    """A polyline partly or wholly under the outline: a vertex inside, or a segment
+    crossing one of its edges."""
+    if any(_inside(outline, *vertex) for vertex in vertices):
+        return True
+    edges = list(zip(outline, outline[1:] + outline[:1]))
+    return any(_segments_cross(a, b, c, d) for a, b in zip(vertices, vertices[1:])
+               for c, d in edges)
+
+
+def _segments_cross(a, b, c, d) -> bool:
+    def side(p, q, r) -> float:
+        return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+
+    d1, d2, d3, d4 = side(c, d, a), side(c, d, b), side(a, b, c), side(a, b, d)
+    return ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0)) and 0 not in (d1, d2, d3, d4)
 
 
 def _near_misses(sheet: SheetConnectivity, wiring: _Wiring, wires: LineIndex,
@@ -1112,6 +1229,17 @@ class _Compiler:
                 held = nets[root] = ErcNet(name, generated, self.net_roots.get(root), pins)
             return held
 
+        def name_of(root) -> str:
+            """A net's netlist name (Altium's name when it is not listed), without adding
+            it to the nets: "" for one with no name (no label and no pin)."""
+            held = nets.get(root)
+            if held is not None:
+                return held.netlist_name or held.name
+            listed = self.net_roots.get(root)
+            if listed:
+                return listed
+            return (bases.get(root) or self._name(candidates.get(root, []), [], warn=False))[0]
+
         changed: set[tuple[int, int]] = set()
         documents: dict[int, ErcSheet] = {}
         placed_paths: set[str] = set()  # every placed part's UniqueId path
@@ -1164,13 +1292,49 @@ class _Compiler:
                     (document.floating_no_ercs if floating else document.no_ercs).append(mark)
                 if group is not None and group in groups:
                     net(root_of(group)).no_ercs.append(mark)
-            for item, group, on_bus in wiring.parameter_sets:
-                named = None
-                if group is not None and group in groups:
-                    named = net(root_of(group)).name or None
+            facts.instances.append(ErcInstance(
+                number, stem, instance.parent,
+                "" if instance.parent is None else
+                self.sheets[instances[instance.parent].sheet].symbols[instance.symbol][0]
+                .designator.strip(),
+                instance.level, instance.room, instance.depth))
+            bus_nets: dict = {}
+
+            def bus_nets_of(group, number=number, sheet=sheet, wiring=wiring,
+                            bus_nets=bus_nets):
+                if group not in bus_nets:
+                    bus_nets[group] = self._bus_members(number, sheet, wiring, group, name_of)
+                return bus_nets[group]
+
+            for obj, (kind, payload) in enumerate(wiring.objects):
+                if kind == LABEL and bus_members(payload) and wiring.group[obj] in wiring.buses:
+                    facts.buses.append(ErcBus(payload.strip(), stem, number,
+                                              bus_nets_of(wiring.group[obj])))
+            for item, group, elsewhere, cover in wiring.parameter_sets:
+                named, covered, via = None, [], ""
+                if group is not None:
+                    via = "wire"
+                    if group in groups:
+                        held = net(root_of(group))
+                        named = held.name or None
+                        covered = [held.netlist_name or held.name]
+                elif cover is not None:
+                    via = {"symbol": "sheet_symbol"}.get(cover[0], cover[0])
+                    if cover[0] == "bus":
+                        covered = bus_nets_of(cover[1])
+                    elif cover[0] == "harness":
+                        covered = self._harness_members(root_of(cover[1]), name_of)
+                    elif cover[0] == "blanket":
+                        for under in sorted(cover[1], key=str):
+                            if isinstance(under, tuple):
+                                covered.extend(bus_nets_of(under[1]))
+                            elif under in groups:
+                                covered.append(name_of(root_of(under)))
                 facts.parameter_sets.append(ErcParameterSet(
                     stem, number, instance.room, item.x_mil, item.y_mil,
-                    list(item.parameters), group is not None or on_bus, named))
+                    list(item.parameters), group is not None or elsewhere, named,
+                    nets=list(dict.fromkeys(name for name in covered if name)), via=via,
+                    unique_id=item.unique_id, parameter_ids=list(item.parameter_ids)))
             for index, part in enumerate(sheet.parts):
                 placed_paths.add("\\".join([*instance.path, part.unique_id]).upper())
                 facts.parts.append(ErcPart(
@@ -1198,6 +1362,34 @@ class _Compiler:
         facts.stale_annotation = sum(1 for path in self.annotation_by_path
                                      if path not in placed_paths)
         return facts
+
+    def _bus_members(self, number: int, sheet: SheetConnectivity, wiring: _Wiring,
+                     group: int, name_of) -> list[str]:
+        """The nets of a bus's members on one compiled copy: the members of the ranged
+        names on its wiring (net labels, ports, sheet entries), in drawing order."""
+        names: list[str] = []
+        for obj, (kind, payload) in enumerate(wiring.objects):
+            if wiring.group[obj] != group:
+                continue
+            if kind == LABEL:
+                text = payload
+            elif kind == PORT:
+                text = sheet.ports[payload][0].name
+            elif kind == ENTRY:
+                text = sheet.symbols[payload[0]][0].entries[payload[1]].port_name
+            else:
+                continue
+            names.extend(bus_members(text) or ())
+        found = (name_of(self.uf.find(_member(number, group, name)))
+                 for name in dict.fromkeys(name.strip().lower() for name in names))
+        return list(dict.fromkeys(name for name in found if name))
+
+    def _harness_members(self, root, name_of) -> list[str]:
+        """The nets carried by the signal harness whose wiring has this root: the harness
+        entries of every connector joined to it."""
+        found = (name_of(self.uf.find(entry)) for entry, connector, _ in self.harness
+                 if self.uf.find(connector) == root)
+        return list(dict.fromkeys(name for name in found if name))
 
     def _erc_sheet(self, index: int) -> ErcSheet:
         """One sheet document for the ERC's document checks (see ErcSheet)."""
