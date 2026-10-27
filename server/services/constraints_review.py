@@ -411,6 +411,7 @@ CONSTRAINTS_REVIEW_TOOLS = (
     "check_rule_compliance",
     "check_lengths",
     "check_diff_pairs",
+    "check_diff_pair_geometry",
     "get_drc_report",
     "get_net_neighbors",
     "search_components",
@@ -564,6 +565,9 @@ Do not proceed to Phase 3 until then.
 3. check_diff_pairs(pattern=...) per interface: in-pair skew and AC-coupling symmetry.
    get_signal_length(<pair>) gives the via count per leg (positive.vias / negative.vias) to
    compare with the via targets.
+   check_diff_pair_geometry(pair=...) per interface: the coupled gap and widths per layer
+   against the DiffPairsRouting rule, each leg's uncoupled length against Max Uncoupled
+   Length (pad and via breakouts apart), and layer changes one leg makes without the other.
 4. get_net_neighbors(net, distance=<required spacing>) on critical nets: intruders closer
    than required (the pair partner is expected) and broadside nets on adjacent layers. The
    reference should be ground; flag a power-only or signal-only reference and layer changes

@@ -358,14 +358,17 @@ def _merge(items: list[list], tolerance: float = 1e-9) -> list[list]:
     return out
 
 
-def _length_text(mil: float, units: str) -> str:
-    return f"{mil * 0.0254:.3g} mm" if units == "mm" else f"{mil:.3g} mil"
+def length_text(mil: float, units: str) -> str:
+    """A length for a message in the output unit: three significant figures, whole units
+    from 1000 up (never an exponent)."""
+    value, unit = (mil * 0.0254, "mm") if units == "mm" else (mil, "mil")
+    return f"{value:.3g} {unit}" if abs(value) < 999.5 else f"{value:.0f} {unit}"
 
 
 # ---------- the check ----------
 
 
-class _Segment:
+class ChainSegment:
     __slots__ = ("row", "kind", "layer", "x1", "y1", "x2", "y2", "length")
 
     def __init__(self, row):
@@ -376,10 +379,10 @@ class _Segment:
         self.length = math.hypot(self.x2 - self.x1, self.y2 - self.y1)
 
 
-class _Chain:
+class Chain:
     """Segments of one net on one layer joined end to end, each with its direction."""
 
-    def __init__(self, parts: list[tuple[_Segment, bool]]):
+    def __init__(self, parts: list[tuple[ChainSegment, bool]]):
         self.parts = parts
         self.starts = []
         total = 0.0
@@ -399,7 +402,10 @@ class _Chain:
                 segment.y1 + (segment.y2 - segment.y1) * t)
 
 
-def _chains(segments: list[_Segment]) -> list[_Chain]:
+def chains(segments: list[ChainSegment]) -> list[Chain]:
+    """The segments joined end to end where exactly two ends meet (within SNAP_MIL): a
+    chain breaks at a branch, a dead end or a lone end; every segment is in one chain."""
+
     def key(x: float, y: float) -> tuple[int, int]:
         return round(x / SNAP_MIL), round(y / SNAP_MIL)
 
@@ -409,7 +415,7 @@ def _chains(segments: list[_Segment]) -> list[_Chain]:
         ends[key(segment.x2, segment.y2)].append((number, 1))
     used = [False] * len(segments)
 
-    def walk(number: int, end: int) -> _Chain:
+    def walk(number: int, end: int) -> Chain:
         parts = []
         while True:
             used[number] = True
@@ -419,19 +425,19 @@ def _chains(segments: list[_Segment]) -> list[_Chain]:
             joined = ends[exit_key]
             following = [item for item in joined if not used[item[0]]]
             if len(joined) != 2 or not following:
-                return _Chain(parts)
+                return Chain(parts)
             number, end = following[0]
 
-    chains = []
+    found = []
     for node in sorted(ends):
         if len(ends[node]) != 2:
             for number, end in ends[node]:
                 if not used[number]:
-                    chains.append(walk(number, end))
+                    found.append(walk(number, end))
     for number in range(len(segments)):
         if not used[number]:
-            chains.append(walk(number, 0))
-    return chains
+            found.append(walk(number, 0))
+    return found
 
 
 class _Reference:
@@ -650,7 +656,7 @@ class _Check:
                 return None, False
         return None, True
 
-    def _samples(self, chain: _Chain, s0: float, s1: float) -> list[tuple[float, float]]:
+    def _samples(self, chain: Chain, s0: float, s1: float) -> list[tuple[float, float]]:
         steps = max(1, math.ceil((s1 - s0) / SAMPLE_STEP_MIL))
         return [chain.point(s0 + (s1 - s0) * step / steps) for step in range(steps + 1)]
 
@@ -775,7 +781,7 @@ class _Check:
                 "SELECT id, kind, layer, x1, y1, x2, y2 FROM prims WHERE net_id = ? "
                 "AND kind IN ('track', 'arc') AND pour_id IS NULL AND poured_by IS NULL "
                 "AND layer BETWEEN 1 AND 32 ORDER BY id", (net_id,)).fetchall()
-            segments = [_Segment(row) for row in rows]
+            segments = [ChainSegment(row) for row in rows]
             # A track shorter than the snap (a dot) would break the chain it sits on.
             segments = [segment for segment in segments if segment.length > SNAP_MIL]
             stats = self.net_stats[key]
@@ -786,7 +792,7 @@ class _Check:
             if pair:
                 own.add(pair[1].lower())
             own_holes = [record for net in own for record in self.holes_of(net)]
-            by_layer: dict[int, list[_Segment]] = defaultdict(list)
+            by_layer: dict[int, list[ChainSegment]] = defaultdict(list)
             for segment in segments:
                 by_layer[segment.layer].append(segment)
             for layer, items in sorted(by_layer.items()):
@@ -809,7 +815,7 @@ class _Check:
         self.selected_segments = selected_segments
         self._pair_transitions()
 
-    def _coverage(self, segment: _Segment, reference: _Reference, own_holes, offset=0.0):
+    def _coverage(self, segment: ChainSegment, reference: _Reference, own_holes, offset=0.0):
         """(classified pieces with own zones, the line walked) of a segment's centre line
         (cached) or of the line offset from it by offset (left of its direction)."""
         key = (segment.row, reference.layer)
@@ -832,7 +838,7 @@ class _Check:
 
     def _check_layer(self, key, name, layer, segments, references, own, own_holes) -> None:
         layer_name = self.model.layer_name(layer)
-        for chain in _chains(segments):
+        for chain in chains(segments):
             per_reference = {}
             for reference in references:
                 items = []
@@ -889,7 +895,7 @@ class _Check:
                 out.append(item)
         return out
 
-    def _source_likely(self, reference: _Reference, chain: _Chain, item) -> bool:
+    def _source_likely(self, reference: _Reference, chain: Chain, item) -> bool:
         s = (item[2] + item[3]) / 2.0
         x, y = chain.point(s)
         return self.model.copper_source(reference.layer, x, y) in _APPROXIMATE_SOURCES
@@ -1407,12 +1413,12 @@ class _Check:
             if finding["reference_net_change"]:
                 return (f"{prefix}{who} changes layers at {times} where its reference net "
                         "changes too, with no capacitor between the reference nets "
-                        f"(pairs_without_capacitor) within {_length_text(self.stitch, units)}: "
+                        f"(pairs_without_capacitor) within {length_text(self.stitch, units)}: "
                         "the return current has no short path between them.")
             return (f"{prefix}{who} changes layers at {times} with no via of the reference net "
-                    f"joining both reference layers within {_length_text(self.stitch, units)}.")
+                    f"joining both reference layers within {length_text(self.stitch, units)}.")
         where = (f"{finding['net']} on {finding['layer']} over {finding['reference_layer']}")
-        length = _length_text(finding["length_mil"], units)
+        length = length_text(finding["length_mil"], units)
         if check == "segment_crosses_split":
             nets = " / ".join(finding["nets"])
             return (f"{prefix}{where} crosses from one reference net to another ({nets}) at "
@@ -1420,11 +1426,11 @@ class _Check:
         if check == "segment_over_void":
             return (f"{prefix}{where} runs over a gap in its reference copper at {times} "
                     f"({length} in all).")
-        return (f"{prefix}{where} runs within {_length_text(finding['edge_distance_mil'], units)}"
+        return (f"{prefix}{where} runs within {length_text(finding['edge_distance_mil'], units)}"
                 f" of the reference copper's edge at {times} ({length} in all).")
 
 
-def _boundary(chain: _Chain, inside: float, toward: float, test) -> float:
+def _boundary(chain: Chain, inside: float, toward: float, test) -> float:
     """Where a chain leaves the region test holds, walking from inside (where it holds)
     toward the other end: the first sample out, refined by bisection to 0.01 mil; toward
     itself when the walk never leaves it."""

@@ -6,6 +6,72 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [Unreleased]
 
 ### Added
+- `check_diff_pair_geometry` (roadmap #28): differential-pair routing geometry on the
+  PcbDoc, read-only and offline (`server/services/diff_pair_geometry.py`); a PcbDoc is
+  required.
+  - Pairs: the PCB's differential pairs, and nets named as complementary legs that are not
+    one (the naming check of `check_diff_pairs`, now `diff_pair_checks.inferred_pairs`),
+    marked inferred: no DiffPairsRouting rule applies to them, so their findings are info;
+    an inferred pair routed nowhere is left to the naming check. pair= (pairs or their
+    nets) and net_class= (a differential-pair or net class) select them.
+  - Coupling: each leg's tracks and arcs on a signal layer, chained where they meet, are
+    sampled every 2 mil along the centreline (an arc on its true arc, not its chords). A
+    sample is coupled where a track or arc of the other leg runs parallel beside it (within
+    10 degrees, its perpendicular foot on that track or arc) within the coupling distance:
+    3x the layer's max gap (else its preferred gap), at least 2x the width, 3x the width
+    without a gap limit, or coupling_distance=. Concentric arcs couple along their common
+    angle, an arc and a track where their tangents agree, and at a bend of up to 50 degrees
+    the inner leg's track is extended past its corner so 45 degree bends stay coupled. The
+    gap is the centre distance less both half widths.
+  - Limits per track and arc: the DiffPairsRouting rule that applies to it (scope and
+    priority decided per object as check_rule_compliance does) with its per-layer min,
+    preferred and max width and gap and Max Uncoupled Length; a profile-driven rule's
+    impedance profile fills what the rule leaves out on a layer; without a rule, the
+    board's only differential impedance profile solving the layer, as an assumption
+    (limit_source layer_profile: its gap and width findings are info); else none
+    (measured, not judged: limit_source none).
+  - Findings: gap_below_min / gap_above_max (runs of the coupled gap outside the rule's
+    range, 0.1 mil allowed, with location, length, gap, widths and the excess beyond the
+    limit: a warning when at least min_stretch long, 20 mil by default; info when
+    shorter, a breakout of at most 50 mil starting within 50 mil of the pad's or via's
+    copper edge before the first stretch within the range, marginal: at most 0.25 mil
+    beyond the limit, as 0.125 mm routed against 0.12 mm, still counted as uncoupled),
+    width_out_of_range (tracks and arcs, an arc counted once as check_rule_compliance
+    counts it: warning; also_reported_by check_rule_compliance when judged by the rule's
+    own width, which that tool reports too), gap_varies (info: the 5th to 95th percentile
+    spread of the in-range gap over at least 200 mil of long stretches),
+    uncoupled_length_high (the longer leg's routed length less its length coupled within
+    the gap range over Max
+    Uncoupled Length: warning; without one, over a quarter of its routed length and 200
+    mil: info), unmatched_layer_change (a via joining one leg's tracks on two layers with
+    no via of the other leg joining two of the same layers within via_distance, 2 mm by
+    default, so a stub on a third layer does not break a match: warning), pair_not_routed
+    and partially_routed (info).
+  - Per pair: per layer its routed and coupled length, coupled stretches, gap (min, mean,
+    max), widths, limits and coupling distance; each leg's coupled_in_gap_range and
+    uncoupled length (they add up to its routed length), the uncoupled length's pad and
+    via breakouts (an uncoupled run at a pad or via, inside its copper and up to 50 mil
+    beyond) apart from the rest; layer changes per leg with how many via pairs match and
+    their spacing (the summary counts matched vias). Findings and the pairs rows are paged
+    apart (offset, pairs_offset) and the page shrinks to fit (pairs with findings first).
+  - check_rule_compliance and check_diff_pairs now point to it for the uncoupled length;
+    constraints_review's copper spot checks call it per interface; it is an evidence tool
+    for checklists and custom checks. Reused, made public in place: `return_path.chains`
+    (the chaining of a net's tracks), `return_path.length_text` (lengths in messages, now
+    without an exponent from 1000 up), `reference_planes.Grid` and
+    `pcb_compliance.object_id`.
+  - Checked on Altium's examples (3 boards with pairs, 115 pairs, all under a rule;
+    MiniPC, 96 pairs, about 1 s): 57 coupled stretches on MiniPC (7 of them on arcs)
+    recomputed from the track coordinates (line or radius distance less half widths)
+    agree to 0.0001 mil; an independent recomputation from the raw track, arc and via
+    records gives the same routed length on all 230 nets (0.01 mil) and the same
+    uncoupled length within 2 mil on 219 of them (within 5 mil on 229), the same rule and
+    limits for every pair and the same layer changes (all 274 vias pair up). 24 gap
+    warnings with 29 stretches (a 434 mil one routed 0.5 mil farther apart than its rule
+    takes one pair over its Max Uncoupled Length) and 3 uncoupled-length warnings; three
+    0.2 mil roundings are marginal. On a private set of 63 boards (31 with pairs, 160
+    pairs: no errors, at most 0.22 s each) no pair is over its Max Uncoupled Length, and
+    every breakout of 20 mil or more lies within 25 mil of a pad or via.
 - `check_return_path` (roadmap #29): a return-path and reference-plane review of the
   PcbDoc, read-only and offline (`server/services/return_path.py` on the new reference
   copper model `server/services/reference_planes.py`); a PcbDoc is required. A geometric
