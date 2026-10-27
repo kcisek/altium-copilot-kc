@@ -114,7 +114,8 @@ _UNCOUPLED_NOT_CHECKED = {
         "Only the per-layer min/max widths of pair-member tracks and arcs are "
         "checked. Altium's batch DRC for this kind also measures each pair's "
         "uncoupled length (copper where the pair's gap is outside the rule's gap "
-        "range) against Max Uncoupled Length; that is not checked here."
+        "range) against Max Uncoupled Length; that is not checked here: "
+        "check_diff_pair_geometry measures it, with the coupled gap per layer."
     ),
 }
 _PAIRS_ADDED = (
@@ -938,7 +939,7 @@ class _Checker:
         # An arc (all its chords) is one object, as for Width.
         chords_of: dict[tuple, list] = {}
         for row in rows:
-            chords_of.setdefault(_object_id(row), []).append(row)
+            chords_of.setdefault(object_id(row), []).append(row)
         if len(chords_of) > CLEARANCE_MAX_OBJECTS:
             report.extra["truncated_objects"] = len(chords_of) - CLEARANCE_MAX_OBJECTS
             chords_of = dict(list(chords_of.items())[:CLEARANCE_MAX_OBJECTS])
@@ -975,7 +976,7 @@ class _Checker:
                     if distance >= reach:
                         continue
                     shared = frozenset(at)
-                    ids = (_object_id(row), _object_id(candidate))
+                    ids = (object_id(row), object_id(candidate))
                     pair_key = tuple(sorted(ids))
                     best = closest.get(pair_key)
                     if best is None:
@@ -997,7 +998,7 @@ class _Checker:
 
         def facts_of(row):
             # Scope facts of an arc come from its middle chord, as for Width.
-            key = _object_id(row)
+            key = object_id(row)
             if key not in facts_cache:
                 chords = chords_of.get(key) or self._arc_chords(row)
                 facts_cache[key] = index.object_facts(chords[len(chords) // 2])
@@ -1021,7 +1022,7 @@ class _Checker:
                         )["matches"]
                     if net_level[net_key] in ("yes", "no"):
                         return net_level[net_key]
-                object_key = (position, which, _object_id(ends[endpoint]))
+                object_key = (position, which, object_id(ends[endpoint]))
                 if object_key not in verdicts:
                     verdicts[object_key] = evaluate_scope(
                         scope,
@@ -1148,7 +1149,7 @@ class _Checker:
         return index.db.execute(sql, (row["net_id"], *box)).fetchall()
 
 
-def _object_id(row) -> tuple:
+def object_id(row) -> tuple:
     """Identity of the copper object a prims row belongs to: an arc's chords
     share their source_id (tagged so it cannot clash with a primitive id)."""
     if row["kind"] == "arc" and row["source_id"] is not None:

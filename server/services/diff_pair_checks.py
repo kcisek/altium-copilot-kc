@@ -547,20 +547,95 @@ def _finding(check: str, issue: str, severity: str, pair: str | None,
 # ---------- naming ----------
 
 
-def _check_naming(board: _Board, pairs: list, all_pairs: list, regex) -> tuple[dict, list]:
-    findings: list[dict] = []
-    summary = Counter()
-    summary["pairs"] = len(pairs)
-
-    declared = {
-        frozenset((pair.positive_net.lower(), pair.negative_net.lower())): pair
-        for pair in all_pairs
-    }
+def _pairs_of_net(all_pairs: list) -> dict[str, list[str]]:
+    """Lower-case net -> the names of the PCB pairs it is a leg of."""
     pairs_of_net: dict[str, list[str]] = defaultdict(list)
     for pair in all_pairs:
         for net in (pair.positive_net, pair.negative_net):
             if pair.name not in pairs_of_net[net.lower()]:
                 pairs_of_net[net.lower()].append(pair.name)
+    return pairs_of_net
+
+
+def pair_name_candidates(board: _Board, all_pairs: list, regex=None):
+    """Each two board nets named as complementary legs (X_P / X_N, D+ / D-, CK_T / CK_C),
+    once, with its outcome under "status": "declared" or "declared_inverted" (a PCB pair
+    already), "conflict" (a leg belongs to another pair: "owners"), "suppressed_<reason>"
+    (auto-named, supply or sense, or a rail by its pad count), or "undeclared" with the
+    severity the naming check gives it and its "details". regex keeps candidates with a
+    leg it matches."""
+    declared = {
+        frozenset((pair.positive_net.lower(), pair.negative_net.lower())): pair
+        for pair in all_pairs
+    }
+    pairs_of_net = _pairs_of_net(all_pairs)
+    by_key = board.polarity_index()
+    seen: set[frozenset] = set()
+    for key in sorted(by_key):
+        members = by_key[key]
+        for positive, positive_token in members["+"]:
+            for negative, negative_token in members["-"]:
+                style = _STYLES.get((positive_token, negative_token))
+                legs = frozenset((positive.lower(), negative.lower()))
+                if not style or len(legs) < 2 or legs in seen:
+                    continue
+                seen.add(legs)
+                if regex and not (regex.search(positive) or regex.search(negative)):
+                    continue
+                candidate = {"positive": positive, "negative": negative, "style": style}
+                pair = declared.get(legs)
+                if pair is not None:
+                    inverted = pair.positive_net.lower() != positive.lower()
+                    yield {**candidate,
+                           "status": "declared_inverted" if inverted else "declared"}
+                    continue
+                owners = pairs_of_net.get(positive.lower(), []) + pairs_of_net.get(
+                    negative.lower(), []
+                )
+                if owners:
+                    yield {**candidate, "status": "conflict",
+                           "owners": list(dict.fromkeys(owners))}
+                    continue
+                reason = _suppressed_candidate(positive) or _suppressed_candidate(negative)
+                if reason:
+                    yield {**candidate, "status": f"suppressed_{reason}"}
+                    continue
+                pads = [board.fanout(positive), board.fanout(negative)]
+                if max(pads) > RAIL_FANOUT:
+                    # A rail or DC bus (VP / VN, DC_P / DC_N), whatever its name.
+                    yield {**candidate, "status": "suppressed_rail"}
+                    continue
+                details = {"positive_net": positive, "negative_net": negative,
+                           "style": style, "pads": pads}
+                severity = "warning" if style in _WARNING_STYLES else "info"
+                if severity == "warning" and (
+                    _LOAD_RE.search(_normalise_name(positive))
+                    or _LOAD_RE.search(_normalise_name(negative))
+                ):
+                    # Motor, speaker, LED, heater... outputs: not a routing defect.
+                    severity = "info"
+                    details["load_or_actuator"] = True
+                yield {**candidate, "status": "undeclared", "severity": severity,
+                       "details": details}
+
+
+def inferred_pairs(index) -> list[dict]:
+    """The undeclared pairs the naming check reports (nets named as complementary legs
+    that are not a PCB differential pair, without auto-named, supply, sense and rail
+    nets): {"positive", "negative", "style", "severity", "details"} each."""
+    board = _Board(index, None, None)
+    return [
+        candidate
+        for candidate in pair_name_candidates(board, list(index.pcb.diff_pairs))
+        if candidate["status"] == "undeclared"
+    ]
+
+
+def _check_naming(board: _Board, pairs: list, all_pairs: list, regex) -> tuple[dict, list]:
+    findings: list[dict] = []
+    summary = Counter()
+    summary["pairs"] = len(pairs)
+    pairs_of_net = _pairs_of_net(all_pairs)
 
     # PCB pairs: conventions.
     reported_shared: set[str] = set()
@@ -615,65 +690,32 @@ def _check_naming(board: _Board, pairs: list, all_pairs: list, regex) -> tuple[d
             summary["conventional"] += 1
 
     # Nets named like a pair.
-    by_key = board.polarity_index()
-    seen: set[frozenset] = set()
-    for key in sorted(by_key):
-        members = by_key[key]
-        for positive, positive_token in members["+"]:
-            for negative, negative_token in members["-"]:
-                style = _STYLES.get((positive_token, negative_token))
-                legs = frozenset((positive.lower(), negative.lower()))
-                if not style or len(legs) < 2 or legs in seen:
-                    continue
-                seen.add(legs)
-                if regex and not (regex.search(positive) or regex.search(negative)):
-                    continue
-                summary["candidates"] += 1
-                pair = declared.get(legs)
-                if pair is not None:
-                    inverted = pair.positive_net.lower() != positive.lower()
-                    summary["declared_inverted" if inverted else "declared"] += 1
-                    continue
-                owners = pairs_of_net.get(positive.lower(), []) + pairs_of_net.get(
-                    negative.lower(), []
-                )
-                if owners:
-                    summary["conflict"] += 1
-                    findings.append(_finding(
-                        "naming", "candidate_conflicts_with_pair", "info", None,
-                        f"{positive} / {negative} are named as a {style} pair, but "
-                        f"a leg already belongs to {', '.join(dict.fromkeys(owners))}.",
-                        {"positive_net": positive, "negative_net": negative,
-                         "style": style, "pairs": list(dict.fromkeys(owners))},
-                    ))
-                    continue
-                reason = _suppressed_candidate(positive) or _suppressed_candidate(negative)
-                if reason:
-                    summary[f"suppressed_{reason}"] += 1
-                    continue
-                pads = [board.fanout(positive), board.fanout(negative)]
-                if max(pads) > RAIL_FANOUT:
-                    # A rail or DC bus (VP / VN, DC_P / DC_N), whatever its name.
-                    summary["suppressed_rail"] += 1
-                    continue
-                details = {"positive_net": positive, "negative_net": negative,
-                           "style": style, "pads": pads}
-                severity = "warning" if style in _WARNING_STYLES else "info"
-                if severity == "warning" and (
-                    _LOAD_RE.search(_normalise_name(positive))
-                    or _LOAD_RE.search(_normalise_name(negative))
-                ):
-                    # Motor, speaker, LED, heater... outputs: not a routing defect.
-                    severity = "info"
-                    details["load_or_actuator"] = True
-                summary[f"undeclared_{severity}"] += 1
-                findings.append(_finding(
-                    "naming", "undeclared_pair", severity, None,
-                    f"Nets {positive} / {negative} are named as a {style} pair but "
-                    "are not a PCB differential pair, so no pair rule (gap, "
-                    "uncoupled length, in-pair skew) applies to them.",
-                    details,
-                ))
+    for candidate in pair_name_candidates(board, all_pairs, regex):
+        summary["candidates"] += 1
+        status = candidate["status"]
+        positive, negative, style = (
+            candidate["positive"], candidate["negative"], candidate["style"])
+        if status == "conflict":
+            summary["conflict"] += 1
+            findings.append(_finding(
+                "naming", "candidate_conflicts_with_pair", "info", None,
+                f"{positive} / {negative} are named as a {style} pair, but "
+                f"a leg already belongs to {', '.join(candidate['owners'])}.",
+                {"positive_net": positive, "negative_net": negative,
+                 "style": style, "pairs": candidate["owners"]},
+            ))
+        elif status == "undeclared":
+            severity = candidate["severity"]
+            summary[f"undeclared_{severity}"] += 1
+            findings.append(_finding(
+                "naming", "undeclared_pair", severity, None,
+                f"Nets {positive} / {negative} are named as a {style} pair but "
+                "are not a PCB differential pair, so no pair rule (gap, "
+                "uncoupled length, in-pair skew) applies to them.",
+                candidate["details"],
+            ))
+        else:
+            summary[status] += 1
     keys = (
         "pairs", "conventional", "inverted", "unconventional", "missing_legs",
         "same_net", "nets_in_multiple_pairs", "candidates", "declared",
@@ -1912,7 +1954,7 @@ def check_diff_pairs(
         not_checked.append({
             "check": "skew",
             "reason": "Uncoupled length against DiffPairsRouting max uncoupled length "
-            "is not estimated.",
+            "is not estimated here: check_diff_pair_geometry measures it.",
         })
     for check, reason in DEFERRED_CHECKS.items():
         if check in requested or checks is None or not checks:

@@ -295,7 +295,7 @@ def _cells_along(x1, y1, x2, y2, cell: float):
     return found
 
 
-class _Grid:
+class Grid:
     """Uniform grid of numbered shapes by their boxes."""
 
     def __init__(self, cell: float):
@@ -323,7 +323,7 @@ class _Edges:
     meets only the edges near it."""
 
     def __init__(self):
-        self.grid = _Grid(_CELL_MIL)
+        self.grid = Grid(_CELL_MIL)
         self.edges: list[tuple[float, float, float, float]] = []
 
     def add_ring(self, ring) -> None:
@@ -369,7 +369,7 @@ class _Plane:
         self.pullback, self.pullback_basis = saved if saved else (DEFAULT_PULLBACK_MIL, "default")
         self.edge = owner.edge
         self.on_outline = self.edge.has_outline
-        self.grid = _Grid(_CELL_MIL)
+        self.grid = Grid(_CELL_MIL)
         # (kind, box, shape, data): edge (piece geometry grown by the pullback), line
         # (geometry), void ((bands, rings)), hole (anti-pad geometry, hole record).
         self.shapes: list[tuple] = []
@@ -632,7 +632,7 @@ class _Hatch:
             else "hatched_pour"
         self.geometries: list = []
         self.grown: list[tuple] = []  # (grown geometry, its box)
-        self.grid = _Grid(_CELL_MIL)
+        self.grid = Grid(_CELL_MIL)
         for item in items:
             grown = _grown(item[6], reach)
             box = PcbIndex._geometry_bounds(grown)
@@ -677,7 +677,7 @@ class _Signal:
             item for item in model.items.get(layer, ())
             if not (item[8] == "pour" and item[10] in outline_pours)
         ]
-        self.item_grid = _Grid(_CELL_MIL)
+        self.item_grid = Grid(_CELL_MIL)
         for number, item in enumerate(self.items):
             self.item_grid.add(item[:4], number)
         self.areas = list(model.area_layers.get(layer, ()))
@@ -689,7 +689,7 @@ class _Signal:
                 ring = list(pour.vertices)
                 self.outlines.append((owner.label(pour.net), Bands([ring]), ring,
                                       _ring_box(ring), kind))
-        self.area_grid = _Grid(_AREA_GRID_MIL)
+        self.area_grid = Grid(_AREA_GRID_MIL)
         for number, area in enumerate(self.areas):
             self.area_grid.add(area.bbox, ("area", number))
         self.outline_edges = _Edges()
@@ -863,7 +863,7 @@ class ReferencePlanes:
         self._layers: dict[int, _Plane | _Signal] = {}
         self._names: dict[int, str] = {}
         self._holes: list[dict] | None = None
-        self._hole_grid: _Grid | None = None
+        self._hole_grid: Grid | None = None
         self._resolvers: dict[tuple, ObjectResolver] = {}
         self._rules = {
             kind: sorted((rule for rule in pcb.rules if rule.kind == kind and rule.enabled),
@@ -1120,7 +1120,7 @@ class ReferencePlanes:
         """holes() records whose centre lies within reach plus their largest copper extent
         of (x, y): a superset for a distance test to their copper."""
         if self._hole_grid is None:
-            grid = _Grid(_HOLE_CELL_MIL)
+            grid = Grid(_HOLE_CELL_MIL)
             for number, record in enumerate(self.holes()):
                 extent = hole_extent(record, self.order)
                 record["extent"] = extent

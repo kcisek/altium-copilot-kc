@@ -38,6 +38,9 @@ try:
     )
     from services.pcb_compliance import check_compliance
     from services.diff_pair_checks import check_diff_pairs as run_diff_pair_checks
+    from services.diff_pair_geometry import (
+        prepare_diff_pair_geometry_cached, render_diff_pair_geometry,
+    )
     from services.constraints_review import build_constraints_review
     from services.impedance import (
         PROPAGATION_UNIT_NOTE, impedance_profiles, profile_refs,
@@ -182,6 +185,9 @@ except ImportError:
     )
     from server.services.pcb_compliance import check_compliance
     from server.services.diff_pair_checks import check_diff_pairs as run_diff_pair_checks
+    from server.services.diff_pair_geometry import (
+        prepare_diff_pair_geometry_cached, render_diff_pair_geometry,
+    )
     from server.services.constraints_review import build_constraints_review
     from server.services.impedance import (
         PROPAGATION_UNIT_NOTE, impedance_profiles, profile_refs,
@@ -930,6 +936,18 @@ component locations, distances):
     no capacitor) within stitch_radius. Places marked likely rest on approximated copper
     (anti-pads, bridged hatch openings): say so. A geometric screen of the saved copper,
     not a field solver: ask the user to repour and save first.
+27. check_diff_pair_geometry — "is my USB / PCIe pair routed at the right gap?", "how much
+    of this pair is uncoupled?", "do both legs change layers together?", or the pair
+    routing part of a high-speed layout review: per pair and layer the coupled gap
+    (min / mean / max) and widths against the DiffPairsRouting rule (or the impedance
+    profile), stretches closer or farther apart than the rule's gap (breakouts at pads and
+    vias, stretches shorter than min_stretch, marginal ones and limits assumed from a
+    profile no rule links are info), widths out of range, gap variation, each leg's
+    uncoupled length against Max Uncoupled Length (its part inside a pad or via and up to
+    50 mil beyond counted as breakout) and layer changes one leg makes without the other.
+    Pairs marked inferred are only named as pairs (no rule applies). Page the pairs rows
+    with pairs_offset. Altium's DRC checks widths and uncoupled length; the gap stretches
+    are this tool's own screen.
 
 get_board_info lists the stack manager's impedance profiles: target, solved width/gap and
 calculated impedance per layer, reference layers, the rules using each, and issues. Quote
@@ -5225,6 +5243,120 @@ def check_return_path(
         result = _convert_units({**context, **render_return_path(
             prepared, offset=offset, limit=limit, occurrences=occurrences, nets=nets)}, to_mm)
         if limit != RETURN_PATH_STEPS[0][0]:
+            result["page_limited_to"] = limit
+        rendered = json.dumps(result, indent=2)
+        if len(rendered) <= QUERY_NET_MAX_RESULT_SIZE_CHARS:
+            break
+    return rendered
+
+
+# (findings, stretches or vias per finding, pairs listed) per page, tried in turn until the
+# result fits.
+DIFF_PAIR_GEOMETRY_STEPS = ((100, 10, 50), (60, 5, 30), (40, 3, 20), (25, 2, 10), (15, 1, 5),
+                            (10, 1, 3), (5, 1, 2), (2, 1, 1), (1, 1, 1))
+
+
+@mcp.tool(
+    title="Check Differential Pair Geometry",
+    annotations=ToolAnnotations(readOnlyHint=True),
+    meta={"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS},
+)
+def check_diff_pair_geometry(
+    pair: str | None = None,
+    net_class: str | None = None,
+    layer: str | None = None,
+    checks: list[str] | None = None,
+    coupling_distance: float | None = None,
+    min_stretch: float | None = None,
+    via_distance: float | None = None,
+    units: PcbUnits | None = None,
+    offset: int = 0,
+    pairs_offset: int = 0,
+) -> str:
+    """Differential-pair routing geometry of the saved PcbDoc, offline: "is my USB / PCIe
+    pair routed at the right gap?", "how much of this pair is uncoupled?", "do both legs
+    change layers together?", or the pair-routing part of a high-speed layout review.
+
+    Pairs: the PCB's differential pairs, plus nets named as complementary legs (X_P / X_N,
+    D+ / D-) that are not one, marked inferred (no DiffPairsRouting rule applies to them, so
+    their findings are info). Each leg's tracks and arcs are sampled along their centreline
+    (arcs on the true arc); where the other leg runs parallel beside it on the same layer
+    within the coupling distance (default 3x the layer's max gap, at least 2x the width;
+    3x the width without a gap limit) it is coupled, and the edge-to-edge gap is measured.
+    Limits per track: the DiffPairsRouting rule that applies to it (scope and priority,
+    per-layer min / preferred / max width and gap, Max Uncoupled Length), a profile-driven
+    rule's impedance profile for what the rule leaves out, else the board's only
+    differential impedance profile on that layer, else none (limit_source none: measured,
+    not judged).
+
+    pairs lists each pair (those with findings first) with per layer its routed and
+    coupled length, coupled gap and widths, limits and coupling distance; each leg's
+    coupled_in_gap_range and uncoupled length (routed length less the length coupled
+    within the rule's gap range), the uncoupled length split into at_pads and at_vias (an
+    uncoupled run at a pad or via, inside it and up to 50 mil beyond its edge: its
+    breakout) and elsewhere; and its
+    layer changes (vias joining its tracks on two layers) with how many via pairs match
+    (matched). Findings: gap_below_min / gap_above_max (stretches with location, length,
+    gap and excess beyond the limit: a warning when at least min_stretch long, default 20
+    mil; info when shorter, a breakout of at most 50 mil starting within 50 mil of a pad or
+    via, marginal: at most 0.25 mil beyond the limit, or judged against an impedance
+    profile no rule links to the pair), width_out_of_range (tracks and arcs, an arc
+    counted once: warning; info against an unlinked profile; also_reported_by
+    check_rule_compliance when judged by the rule's own width), gap_varies (info: the 5th to
+    95th percentile spread of the in-range gap on a layer), uncoupled_length_high (the
+    longer leg over Max Uncoupled Length: warning; without one over a quarter of its routed
+    length: info), unmatched_layer_change (a via of one leg with no via of the other
+    joining two of the same layers within via_distance, default 2 mm: warning),
+    pair_not_routed and partially_routed (info). Altium's batch DRC checks pair widths and
+    uncoupled length; gap stretches, gap variation and layer changes are this tool's own
+    screen.
+
+    pair names pairs or their nets (comma-separated); net_class a differential-pair or net
+    class. layer narrows the findings and layer rows to one signal layer; checks to names
+    in checks_run (aliases gap, width, uncoupled, vias, routing). coupling_distance,
+    min_stretch and via_distance use units (default: board display unit). Findings are
+    paginated (offset from next_offset), and the pairs rows apart (pairs_offset from
+    next_pairs_offset; pairs_total says when fewer pairs are listed; an offset past the
+    findings leaves room for more pairs), or name the pairs with pair=."""
+    index, error = _pcb_index_or_error()
+    if error:
+        return json.dumps(error)
+    to_mm, resolved, units_error = _pcb_units_or_error(index, units)
+    if units_error:
+        return json.dumps(units_error)
+    limits = {}
+    for name, value, zero_ok in (("coupling_distance", coupling_distance, False),
+                                 ("min_stretch", min_stretch, True),
+                                 ("via_distance", via_distance, False)):
+        if value is None:
+            continue
+        if not _finite_nonnegative(value) or (value == 0 and not zero_ok) or \
+                _input_to_mil(value, resolved) > 10000.0:
+            return json.dumps({
+                "error": f"invalid_{name}",
+                "message": f"{name} must be a {'non-negative' if zero_ok else 'positive'} "
+                           f"length in {resolved} (at most 10000 mil).",
+            })
+        limits[name] = _input_to_mil(float(value), resolved)
+    prepared = prepare_diff_pair_geometry_cached(
+        index, pairs=_split_names(pair), net_classes=_split_names(net_class), layer=layer,
+        checks=checks, coupling_distance_mil=limits.get("coupling_distance"),
+        min_stretch_mil=limits.get("min_stretch"), via_distance_mil=limits.get("via_distance"),
+        units=resolved)
+    if "error" in prepared:
+        return json.dumps(prepared)
+    project, _, _ = _require_project(netlist=False)
+    paths = project.get("pcb_doc_paths") or []
+    context: dict = {"units": resolved}
+    if paths:
+        context["pcb_doc"] = Path(paths[0]).name
+        if len(paths) > 1:
+            context["note"] = f"Project lists {len(paths)} PcbDocs; checked '{Path(paths[0]).name}'."
+    for limit, stretches, pairs_listed in DIFF_PAIR_GEOMETRY_STEPS:
+        result = _convert_units({**context, **render_diff_pair_geometry(
+            prepared, offset=offset, limit=limit, stretches=stretches, pairs=pairs_listed,
+            pairs_offset=pairs_offset)}, to_mm)
+        if limit != DIFF_PAIR_GEOMETRY_STEPS[0][0]:
             result["page_limited_to"] = limit
         rendered = json.dumps(result, indent=2)
         if len(rendered) <= QUERY_NET_MAX_RESULT_SIZE_CHARS:
