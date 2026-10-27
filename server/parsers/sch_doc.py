@@ -52,6 +52,13 @@ class ComponentMeta:
     library_path: str = ""
     workspace_part: bool = False
     database_table: str = ""
+    # A database part's library (DatabaseLibraryName, when the sheet stores it) and
+    # whether its record is looked up in DatabaseTableName only (UseDBTableName=T).
+    database_library: str = ""
+    use_db_table_name: bool = False
+    # Parameters on the sheet whose value is empty (lower-case names; params leaves them
+    # out): the database check counts them as present.
+    blank_params: list[str] = field(default_factory=list)
     # The current footprint model's library as its PCB model link names it
     # (ModelDataFile0: a library file name or path; empty for "Any"), and whether the
     # link takes it from the component's own library (UseComponentLibrary=T).
@@ -218,9 +225,13 @@ def _merge_part_lists(target: ComponentMeta, other: ComponentMeta) -> None:
     for name, text in other.params.items():
         target.params.setdefault(name, text)
     for name in ("lib_reference", "design_item_id", "library", "library_path",
-                 "database_table"):
+                 "database_table", "database_library"):
         setattr(target, name, getattr(target, name) or getattr(other, name))
     target.workspace_part = target.workspace_part or other.workspace_part
+    target.use_db_table_name = target.use_db_table_name or other.use_db_table_name
+    for name in other.blank_params:
+        if name not in target.blank_params:
+            target.blank_params.append(name)
 
 
 def _merge_parts(
@@ -399,6 +410,8 @@ def _handle_component(
             library_path=props.get("librarypath", ""),
             workspace_part=bool(props.get("vaultguid") or props.get("itemguid")),
             database_table=props.get("databasetablename", ""),
+            database_library=props.get("databaselibraryname", ""),
+            use_db_table_name=props.get("usedbtablename", "").strip().upper()[:1] == "T",
         )
         components_by_owner[owner_key] = comp
         canonical_owner[owner_key] = owner_key
@@ -496,6 +509,11 @@ def _handle_parameter(
     # Parameter names are case-insensitive in Altium ("Value" and "VALUE" both occur).
     name = props.get("name", "").lower()
     text = props.get("text", "")
+    if key is not None and not text and name and key in components_by_owner:
+        # On the sheet with no value (params keeps only valued ones, for the BOM).
+        blank = components_by_owner[key].blank_params
+        if name not in blank:
+            blank.append(name)
     if key is None or not text or text.startswith('"'):
         return
     if key not in components_by_owner:

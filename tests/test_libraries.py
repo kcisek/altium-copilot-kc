@@ -851,8 +851,8 @@ def test_the_tools_are_registered():
     readme = (Path(__file__).parents[1] / "README.md").read_text("utf-8")
     assert "`check_libraries`" in readme and "`get_library_part`" in readme
     description = " ".join(main_mod.mcp._tool_manager.get_tool("check_libraries").description.split())
-    for phrase in ("Footprint Comparison Report", "Workspace (Altium 365)", "roadmap #53",
-                   "where_used", "library="):
+    for phrase in ("Footprint Comparison Report", "Workspace (Altium 365)",
+                   "check_db_parameters", "where_used", "library="):
         assert phrase in description, phrase
 
 

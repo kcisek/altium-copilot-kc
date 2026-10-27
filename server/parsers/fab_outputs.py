@@ -38,6 +38,7 @@ import io
 import re
 import zipfile
 from collections import Counter
+from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from xml.etree.ElementTree import ParseError, XMLPullParser, fromstring
 
@@ -649,24 +650,66 @@ _XLSX_PACKAGE_REL = "{http://schemas.openxmlformats.org/package/2006/relationshi
 XLSX_PART_LIMIT = 64 << 20  # bytes of one unpacked workbook part
 
 
-def xlsx_sheets(data: bytes) -> list[tuple[str, list[list[str]]]]:
+def xlsx_sheets(data: bytes, driver_like: bool = False) -> list[tuple[str, list[list[str]]]]:
     """(name, rows) of each worksheet of an .xlsx workbook (what Altium's BOM templates
     write), in workbook order; a row is its cells as text ('' for empty ones), rows keep
     their numbers (a missing row is []). Numbers are written as Excel stores them (an
-    integral value without '.0'). Raises ValueError for a file that is no workbook."""
+    integral value without '.0'). driver_like: numbers and dates as the Excel OLE DB
+    provider returns them through .NET instead (a date-formatted cell as an ISO date and
+    time, 2024-01-02T00:00:00; other numbers in round-trip form, 1E-07). Raises
+    ValueError for a file that is no workbook."""
     try:
         archive = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile as error:
         raise ValueError(f"not an .xlsx workbook: {error}") from error
     try:
-        return _xlsx_read(archive)
+        return _xlsx_read(archive, driver_like)
     except (ParseError, KeyError, zipfile.BadZipFile) as error:
         raise ValueError(f"unreadable workbook: {type(error).__name__}: {error}") from error
     finally:
         archive.close()
 
 
-def _xlsx_read(archive: zipfile.ZipFile) -> list[tuple[str, list[list[str]]]]:
+# Excel's built-in date and time number formats.
+_XLSX_DATE_FORMATS = set(range(14, 23)) | set(range(27, 37)) | set(range(45, 48)) \
+    | set(range(50, 59))
+
+
+def _xlsx_date_styles(styles) -> set[int]:
+    """The cell style indices (cellXfs) whose number format is a date or a time."""
+    if styles is None:
+        return set()
+    custom = {}
+    for item in styles.iter(f"{_XLSX_MAIN}numFmt"):
+        code = re.sub(r'"[^"]*"|\[[^\]]*\]|\\.', "", item.get("formatCode") or "")
+        custom[int(item.get("numFmtId") or -1)] = bool(re.search(r"[dmyhs]", code, re.I))
+    found = set()
+    xfs = next(styles.iter(f"{_XLSX_MAIN}cellXfs"), None)
+    for index, xf in enumerate(xfs if xfs is not None else []):
+        number = int(xf.get("numFmtId") or 0)
+        if number in _XLSX_DATE_FORMATS or custom.get(number):
+            found.add(index)
+    return found
+
+
+def _driver_number(value: float) -> str:
+    """A number as .NET's round-trip format writes it ('R': 15 digits, else 17)."""
+    text = f"{value:.15g}"
+    if float(text) != value:
+        text = f"{value:.17g}"
+    return text.replace("e", "E")
+
+
+def _driver_date(value: float, date1904: bool) -> str:
+    """An Excel serial date as an ISO date and time (OLE Automation days from
+    1899-12-30, rounded to the millisecond, shown to the second)."""
+    days = value + (1462 if date1904 else 0)
+    moment = datetime(1899, 12, 30) + timedelta(milliseconds=round(days * 86400000))
+    return moment.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _xlsx_read(archive: zipfile.ZipFile, driver_like: bool = False
+               ) -> list[tuple[str, list[list[str]]]]:
     def part(name: str):
         try:
             info = archive.getinfo(name)
@@ -690,12 +733,18 @@ def _xlsx_read(archive: zipfile.ZipFile) -> list[tuple[str, list[list[str]]]]:
     book = part("xl/workbook.xml")
     if book is None:
         raise ValueError("not an .xlsx workbook: no xl/workbook.xml")
+    driver = None
+    if driver_like:
+        properties = next(book.iter(f"{_XLSX_MAIN}workbookPr"), None)
+        date1904 = properties is not None and (properties.get("date1904") or "").lower() in (
+            "1", "true")
+        driver = (_xlsx_date_styles(part("xl/styles.xml")), date1904)
     sheets = []
     for sheet in book.iter(f"{_XLSX_MAIN}sheet"):
         target = targets.get(sheet.get(f"{_XLSX_REL}id"))
         root = part(target) if target else None
         if root is not None:
-            sheets.append((sheet.get("name") or "", _xlsx_rows(root, shared)))
+            sheets.append((sheet.get("name") or "", _xlsx_rows(root, shared, driver)))
     return sheets
 
 
@@ -712,7 +761,8 @@ def _xlsx_text(item) -> str:
     return "".join(parts)
 
 
-def _xlsx_rows(root, shared: list[str]) -> list[list[str]]:
+def _xlsx_rows(root, shared: list[str], driver=None) -> list[list[str]]:
+    """driver: (date style indices, 1904 date system) for driver-like numbers."""
     rows: list[list[str]] = []
     for row in root.iter(f"{_XLSX_MAIN}row"):
         number = int(row.get("r") or len(rows) + 1)
@@ -737,7 +787,13 @@ def _xlsx_rows(root, shared: list[str]) -> list[list[str]]:
                 text = _xlsx_text(inline) if inline is not None else ""
             elif kind in (None, "n") and text:
                 number_value = _float(text)
-                if number_value is not None:
+                if number_value is not None and driver is not None:
+                    dates, date1904 = driver
+                    style = cell.get("s")
+                    text = (_driver_date(number_value, date1904)
+                            if style and style.isdigit() and int(style) in dates
+                            and 0 <= number_value < 2958466 else _driver_number(number_value))
+                elif number_value is not None:
                     text = (str(int(number_value)) if number_value.is_integer()
                             and abs(number_value) < 1e15 else f"{number_value:.15g}")
             cells[column] = text
