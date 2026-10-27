@@ -54,6 +54,11 @@ try:
     from services.directive_sync import (
         build_directive_sync_cached, detect_project_type, page_directive_sync,
     )
+    from services.constraints_brief import (
+        FORMATS as RULE_FILE_FORMATS, SECTIONS as CONSTRAINTS_SECTIONS,
+        Assumptions as BriefAssumptions, build_brief_cached, build_rule_files, inline_texts,
+        parse_sections as parse_brief_sections, render_brief, write_rule_files,
+    )
     from services.drc_results import (
         load_report, assess, summarize, other_sections, DrcLinker, count_problem,
     )
@@ -209,6 +214,11 @@ except ImportError:
     from server.services.sch_pcb_sync import net_matching_options, run_sync_check
     from server.services.directive_sync import (
         build_directive_sync_cached, detect_project_type, page_directive_sync,
+    )
+    from server.services.constraints_brief import (
+        FORMATS as RULE_FILE_FORMATS, SECTIONS as CONSTRAINTS_SECTIONS,
+        Assumptions as BriefAssumptions, build_brief_cached, build_rule_files, inline_texts,
+        parse_sections as parse_brief_sections, render_brief, write_rule_files,
     )
     from server.services.drc_results import (
         load_report, assess, summarize, other_sections, DrcLinker, count_problem,
@@ -991,6 +1001,27 @@ component locations, distances):
     (ConstraintManagerFlow) directives are ignored unless imported, so its findings are
     info. Rule text is decoded leniently: confirm rule_values_differ in Altium. Show
     Differences / Update PCB in Altium is the final word.
+31. get_constraints_brief — "write a layout handoff", "what should the layout engineer
+    know?", "which net classes / pairs / length matching does this design need?", "where
+    do the decoupling caps, TVS diodes and crystals go?": a schematic-to-layout brief with
+    each item's evidence and whether the PCB or the directives already cover it: pair
+    classes by interface with typical impedance and skew (INTERFACE_TARGETS: say typical,
+    never the requirement), power classes by rail current with an IPC-2221 width (state
+    copper_oz and temp_rise; currents unknown means no width), HV classes with the
+    IPC-2221B clearance, RF nets only with evidence, length-matching groups (pairs, DDR byte
+    lanes) with their tolerance's source, decoupling / TVS / crystal / SMPS keep-tight
+    placements (measured when the PcbDoc loads), zones per sheet and the designers'
+    placement notes quoted; plus a constraint plan to agree with the user. A board rule
+    that takes an item but asks less is "weaker", not coverage: say so. Quote needs_input:
+    ask, never invent a requirement.
+32. generate_rule_file — after the user agrees a plan (pass it as plan=; without plan= it
+    rebuilds the brief's, so pass the same current= / hv= / copper_oz= / temp_rise=): a
+    .RUL file (Import Rules; its import is untested: say so, suggest a copy of the board,
+    selecting only the file's rule kinds and answering No to 'Clear existing rules prior
+    to import?'; check the priorities against the board's), CSV class lists and a Markdown
+    step list (classic: directives, Design > Classes, Import Rules; Constraint Manager
+    projects: its own entries). Files only into the absolute output_dir the user names,
+    never over a file; without it the text comes inline. It never edits a design file.
 
 get_board_info lists the stack manager's impedance profiles: target, solved width/gap and
 calculated impedance per layer, reference layers, the rules using each, and issues. Quote
@@ -1112,8 +1143,8 @@ NETLIST_TOOLS = (
     "check_bom", "check_decoupling", "check_pull_resistors", "check_interfaces",
     "get_power_tree", "check_derating", "check_logic_levels", "get_circuit_calculations",
     "check_thermal", "check_hv_clearance", "check_power_paths", "get_firmware_pin_map",
-    "run_erc", "check_sch_pcb_sync", "check_directive_sync", "schematic_review",
-    "package_for_xfn",
+    "run_erc", "check_sch_pcb_sync", "check_directive_sync", "get_constraints_brief",
+    "generate_rule_file", "schematic_review", "package_for_xfn",
 )
 
 
@@ -4608,6 +4639,376 @@ def check_directive_sync(
         if limit != DIRECTIVE_SYNC_STEPS[0][0]:
             result["page_limited_to"] = limit
         rendered = json.dumps(result, indent=2)
+        if len(rendered) <= QUERY_NET_MAX_RESULT_SIZE_CHARS:
+            break
+    return rendered
+
+
+# ---------- get_constraints_brief / generate_rule_file ----------
+
+ConstraintsSection = Literal["net_classes", "length_matching", "placement", "zones",
+                             "designer_notes", "plan"]
+RuleFileFormat = Literal["rul", "csv", "steps"]
+# (items per list, members per item) per page, shrunk until the page fits.
+CONSTRAINTS_BRIEF_STEPS = ((100, 30), (60, 20), (40, 12), (25, 8), (15, 5), (10, 3), (5, 2),
+                           (2, 1), (1, 1))
+CONSTRAINTS_PLAN_PAGES = (40, 20, 10, 5, 2, 1)  # plan classes per page when it is too long
+CONSTRAINTS_PLAN_WHOLE_MIN = 15  # below this many items per list the plan becomes a pointer
+RULE_FILE_INLINE_STEPS = (40_000, 20_000, 10_000, 4_000, 1_500)
+
+
+def _constraints_inputs(project: dict, netlist: dict | None, variant_state) -> dict:
+    """What build_brief reads besides the netlist: the PcbDoc (when it loads), the offline
+    compile (directives, schematic positions), the project options and type, the notes,
+    check_directive_sync's summary, the variant's plan; and the context notes."""
+    out: dict = {"index": None, "compiled": None, "options": None, "project_type": None,
+                 "notes": [], "directive_summary": None, "context": {}}
+    prj_path = project.get("prj_pcb_path")
+    pcb_paths = project.get("pcb_doc_paths") or []
+    if pcb_paths:
+        index, error = _pcb_session.get(project, netlist)
+        if error:
+            out["context"]["pcb_unavailable"] = (
+                f"{error['error']}: {error.get('message', '')}".strip(": "))
+        else:
+            out["index"] = index
+            out["context"]["pcb_doc"] = Path(pcb_paths[0]).name
+            if len(pcb_paths) > 1:
+                out["context"]["note"] = (f"Project lists {len(pcb_paths)} PcbDocs; read "
+                                          f"'{Path(pcb_paths[0]).name}'.")
+    else:
+        out["context"]["pcb_unavailable"] = "the project lists no PcbDoc"
+    if prj_path:
+        try:
+            out["options"] = parse_prj_options(prj_path)
+        except (OSError, UnicodeDecodeError) as error:
+            out["context"]["options_unreadable"] = type(error).__name__
+        out["project_type"] = detect_project_type(prj_path, pcb_paths[0] if pcb_paths else None)
+        if netlist is not None:
+            sheet_paths = [s["path"] for s in project.get("sheets") or []] or None
+            try:
+                out["compiled"] = _altium.compiled_netlist(prj_path, sheet_paths)
+            except Exception as error:  # the compile adds directives and positions only
+                out["context"]["compile_failed"] = f"{type(error).__name__}: {error}"
+    try:
+        out["notes"], _ = note_rows(_design_notes, project)
+    except Exception as error:  # notes are an extra source
+        out["context"]["notes_unreadable"] = type(error).__name__
+    if out["index"] is not None and out["compiled"] is not None and netlist is not None:
+        try:
+            model = build_directive_sync_cached(
+                out["compiled"], out["index"], out["options"], netlist,
+                net_matching_options(prj_path), out["project_type"])
+            if "error" not in model:
+                out["directive_summary"] = model["summary"]
+        except Exception as error:  # the directive comparison is an extra source
+            out["context"]["directive_sync_failed"] = type(error).__name__
+    return out
+
+
+@mcp.tool(
+    title="Get Constraints Brief",
+    annotations=ToolAnnotations(readOnlyHint=True),
+    meta={"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS},
+)
+def get_constraints_brief(
+    sections: list[ConstraintsSection] | None = None,
+    sheet: str | None = None,
+    units: PcbUnits | None = None,
+    copper_oz: str | None = None,
+    temp_rise: float | None = None,
+    current: str | None = None,
+    hv: str | None = None,
+    offset: int = 0,
+) -> str:
+    """Schematic-to-layout constraints brief, offline and read-only: what the layout
+    engineer needs from the schematic, each item with its evidence and whether the PCB or
+    the schematic directives already cover it (a PCB rule covers an item only when its
+    values and matching mode ask at least as much; one that takes the members but asks
+    less is listed under "weaker", and the plan names it in board_rules). Call it for
+    "write a layout handoff",
+    "which net classes, differential pairs and length matching does this need?", "which
+    decoupling caps go where?", "what should I tell the PCB designer?", or before a
+    constraints review on a new layout.
+
+    net_classes: differential pairs (PCB pairs, Differential Pair directives, pair naming)
+    grouped by interface (USB 2 / 3, PCIe, SATA, HDMI, DisplayPort, Ethernet MDI, SerDes,
+    DDR strobes and clocks, LVDS, MIPI, CAN, RS-485, clocks) from their names, the parts on
+    their legs and the processor pin roles, with typical impedance and in-pair skew from
+    constraints_review's INTERFACE_TARGETS (typical, cited: never the requirement); power
+    classes by rail current (check_power_paths' estimate; current= as it takes it, e.g.
+    'VIN=3,3V3=0.5,U5=0.3') with the IPC-2221 minimum width outside and inside at
+    temp_rise (C, default 10) and copper_oz (default the stack's, else 1 oz; '2' or
+    'outer=2,inner=1'); rails with no known current form one class with no width;
+    high-voltage classes (above 30 V peak, from rail names, the power tree, switch nodes or
+    hv= as check_hv_clearance takes it) with the IPC-2221B B2 clearance (B1 inside); RF
+    nets only when an RF part's RF pin, an RF net name or an antenna corroborates them.
+    length_matching: pair classes' in-pair tolerance, DDR byte lanes (DQ, DM and their DQS,
+    one lane per side of series resistors: DDR4 2 ps, about 10 mil, typical) and
+    address/command groups with their channel's clocks, RGMII groups with their clocks and
+    schematic buses; a group without a sourced tolerance gets none; MatchedLengths rules
+    through xSignals count as coverage. placement: decoupling capacitors per IC and rail
+    (check_decoupling's pairing; at a pin only when the schematic draws them at it, else
+    one per supply pin), TVS/ESD parts at their connectors
+    (check_interfaces), crystal keep-tight groups (load capacitors, resistors, oscillator
+    pins) and switching-converter groups (input capacitors, switch-node inductor and
+    diode, bootstrap capacitor, output capacitors, feedback divider), each measured on the
+    PcbDoc when it loads (placement_guidance: what each kind asks, with the screening
+    distance its within_limit uses). zones: each sheet's functional zones (digital, power, analog, io,
+    filtering, rf) with the parts or name behind each; designer_notes: sheet notes that
+    state placement intent, quoted. plan: the proposed constraint plan (classes, and rules
+    with values in units) to agree with the user and pass to generate_rule_file; rules the
+    PCB already covers are left out (existing.rules_already_covered). needs_input says
+    what to ask for (currents, voltages, impedance profiles).
+
+    Heuristic, from names and the other checks: say so, quote typical values as typical,
+    and ask rather than invent a requirement. sections narrows the output, sheet narrows
+    the items to one sheet; lists page together with offset (next_offset) and shrink to
+    fit. The plan is never cut: whole on the first page, or a pointer to
+    sections=['plan'] when the page cannot hold it (a plan too long alone pages by class,
+    each rule beside its class). Lengths in units, default mm."""
+    try:
+        project, netlist, variant_state = _require_project()
+    except ProjectNotReady as error:
+        return json.dumps(error.payload)
+    no_components = _no_components_error(netlist)
+    if no_components:
+        return json.dumps(no_components)
+    if units not in (None, "mm", "mil"):
+        return json.dumps({"error": "invalid_units", "message": "units must be 'mil' or 'mm'."})
+    resolved = units or "mm"
+    chosen, error = parse_brief_sections(sections)
+    if error:
+        return json.dumps(error)
+    if temp_rise is not None and not _in_range(temp_rise, 1.0, 100.0):
+        return json.dumps({"error": "invalid_temp_rise",
+                           "message": "temp_rise is the allowed temperature rise in C, 1 to "
+                                      "100 (default 10)."})
+    ounces, error = parse_copper_oz(copper_oz)
+    if error:
+        return json.dumps(error)
+    currents, error = parse_power_currents(current)
+    if error:
+        return json.dumps(error)
+    levels, error = parse_hv(hv)
+    if error:
+        return json.dumps(error)
+    if sheet is not None:
+        names = {s["name"].lower() for s in project.get("sheets") or []}
+        wanted = sheet.strip().lower()
+        if wanted.endswith(".schdoc"):
+            wanted = wanted[:-len(".schdoc")]
+        if wanted not in names:
+            return json.dumps({"error": "sheet_not_found",
+                               "message": f"No sheet '{sheet}'. Sheets: "
+                                          f"{[s['name'] for s in project.get('sheets') or []]}"})
+    inputs = _constraints_inputs(project, netlist, variant_state)
+    plan, _, _ = _bom_plan(netlist, variant_state, None)
+    assumptions = BriefAssumptions(copper_oz=ounces,
+                                   temp_rise_c=10.0 if temp_rise is None else float(temp_rise),
+                                   current=currents, hv=levels, units=resolved)
+    try:
+        model = build_brief_cached(
+            netlist, plan, project.get("parameters") or {}, index=inputs["index"],
+            compiled=inputs["compiled"], options=inputs["options"],
+            project_type=inputs["project_type"], notes=inputs["notes"],
+            directive_summary=inputs["directive_summary"], assumptions=assumptions)
+    except Exception as error:
+        return json.dumps({"error": "brief_failed", "message": f"{type(error).__name__}: {error}"})
+    context = {"netlist_updated_utc": _netlist_last_updated, "units": resolved,
+               **inputs["context"]}
+    to_mm = resolved == "mm"
+    wanted = chosen or list(CONSTRAINTS_SECTIONS)
+    # (items per list, members per item, the plan whole / as a pointer / classes per page):
+    # the plan is never cut inside; a page that cannot hold it whole points to it, and a
+    # plan alone too long pages by class with each rule beside its class.
+    attempts = [(limit, members, None) for limit, members in CONSTRAINTS_BRIEF_STEPS]
+    if "plan" in wanted and len(wanted) > 1:
+        # Rather a pointer to the plan than lists cut to a few items.
+        attempts = [(limit, members, None) for limit, members in CONSTRAINTS_BRIEF_STEPS
+                    if limit >= CONSTRAINTS_PLAN_WHOLE_MIN] + [
+            (limit, members, "pointer") for limit, members in CONSTRAINTS_BRIEF_STEPS]
+    elif wanted == ["plan"]:
+        attempts += [(count, 1, count) for count in CONSTRAINTS_PLAN_PAGES]
+    for limit, members, plan_limit in attempts:
+        result = _convert_units({**context, **render_brief(
+            model, chosen, sheet=sheet, offset=offset, limit=limit, member_limit=members,
+            plan_limit=plan_limit)}, to_mm)
+        if limit != CONSTRAINTS_BRIEF_STEPS[0][0] or plan_limit is not None:
+            result["page_limited_to"] = limit
+        rendered = json.dumps(result, indent=2)
+        if len(rendered) <= QUERY_NET_MAX_RESULT_SIZE_CHARS:
+            break
+    return rendered
+
+
+@mcp.tool(
+    title="Generate Rule File",
+    # It writes files only into the folder the user names, never over a file, and never
+    # touches a design file.
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
+    meta={"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS},
+)
+def generate_rule_file(
+    plan: dict | str | None = None,
+    output_dir: str | None = None,
+    formats: list[RuleFileFormat] | None = None,
+    units: PcbUnits | None = None,
+    copper_oz: str | None = None,
+    temp_rise: float | None = None,
+    current: str | None = None,
+    hv: str | None = None,
+) -> str:
+    """Turn an agreed constraint plan into files the engineer applies in Altium; it never
+    edits a design file. Call it after the user agrees get_constraints_brief's plan: pass
+    plan= the agreed JSON (units, classes {name, kind net|diff_pair, members}, rules {name,
+    kind Width|Clearance|DiffPairsRouting|MatchedLengths|Length, scope {net_class|
+    diff_pair_class|net|diff_pair: name} or 'All' or {query}, scope2 for Clearance only,
+    values, optional inner and priority}), or nothing to rebuild the brief's plan as
+    proposed; then pass the same current=, hv=, copper_oz= and temp_rise= the brief was
+    asked with (plan_assumptions says which were used).
+
+    rul: a .RUL file, one rule record per line in the PcbDoc's own Rules6 format (Import
+    Rules in the PCB Rules and Constraints Editor), unique names (renamed when the board
+    already has one), priorities numbered per kind around the plan's own, scopes
+    InNetClass('X') / InDifferentialPairClass('X') / InNet('X'), values in mil to the 4
+    decimals Altium stores; parsed back with the PcbDoc's rule reader (every key and value)
+    before it is given, and withheld with the mismatches when it does not read back as
+    written. Its import into Altium is untested: say so, suggest importing on a copy of the
+    board first, selecting only the file's rule kinds and answering No to 'Clear existing
+    rules prior to import?' (import_steps). priorities and board_priorities say where the
+    new rules sit against the board's rules of their kind. csv: class, kind, member (pairs
+    with their nets). steps: a Markdown list: classic projects get Parameter Set
+    (ClassName) and Differential Pair directives, Design > Classes and Import Rules;
+    Constraint Manager projects get the Constraint Manager's entries.
+
+    output_dir (an absolute folder the user names, '~' allowed; created when missing)
+    receives <PcbDoc>-constraints.rul, -net-classes.csv and -constraints-steps.md, an
+    existing file kept and the new one numbered (-2); nothing is written without it: the
+    texts come inline (cut at a line when long). formats picks rul, csv, steps (default
+    all); units is the plan's units when it gives none (default mm)."""
+    if isinstance(plan, str):
+        try:
+            plan = json.loads(plan)
+        except ValueError as error:
+            return json.dumps({"error": "invalid_plan",
+                               "message": f"plan is not JSON: {error}"})
+    try:
+        project, netlist, variant_state = _require_project(netlist=plan is None)
+    except ProjectNotReady as error:
+        return json.dumps(error.payload)
+    if units not in (None, "mm", "mil"):
+        return json.dumps({"error": "invalid_units", "message": "units must be 'mil' or 'mm'."})
+    chosen = list(dict.fromkeys(formats or RULE_FILE_FORMATS))
+    if unknown := [kind for kind in chosen if kind not in RULE_FILE_FORMATS]:
+        return json.dumps({"error": "invalid_formats",
+                           "message": f"Unknown formats {unknown}; use {list(RULE_FILE_FORMATS)}."})
+    if output_dir is not None:
+        folder = Path(str(output_dir).strip()).expanduser()
+        if not str(output_dir).strip() or not folder.is_absolute() or (
+                folder.exists() and not folder.is_dir()):
+            return json.dumps({"error": "output_dir_invalid",
+                               "message": f"output_dir '{output_dir}' is not an absolute folder "
+                                          "path (e.g. C:\\Users\\me\\handoff or ~/handoff)."})
+        output_dir = str(folder)
+    given = {"copper_oz": copper_oz, "temp_rise": temp_rise, "current": current, "hv": hv}
+    if plan is not None and any(value is not None for value in given.values()):
+        return json.dumps({"error": "assumptions_need_no_plan",
+                           "message": "current, hv, copper_oz and temp_rise rebuild the "
+                                      "brief's plan: pass them without plan= (a given plan "
+                                      "already holds its values)."})
+    if temp_rise is not None and not _in_range(temp_rise, 1.0, 100.0):
+        return json.dumps({"error": "invalid_temp_rise",
+                           "message": "temp_rise is the allowed temperature rise in C, 1 to "
+                                      "100 (default 10)."})
+    ounces, error = parse_copper_oz(copper_oz)
+    if error:
+        return json.dumps(error)
+    currents, error = parse_power_currents(current)
+    if error:
+        return json.dumps(error)
+    levels, error = parse_hv(hv)
+    if error:
+        return json.dumps(error)
+    inputs = _constraints_inputs(project, netlist, variant_state) if plan is None else None
+    if plan is None:
+        no_components = _no_components_error(netlist)
+        if no_components:
+            return json.dumps(no_components)
+        variant_plan, _, _ = _bom_plan(netlist, variant_state, None)
+        assumptions = BriefAssumptions(
+            copper_oz=ounces, temp_rise_c=10.0 if temp_rise is None else float(temp_rise),
+            current=currents, hv=levels, units=units or "mm")
+        try:
+            model = build_brief_cached(
+                netlist, variant_plan, project.get("parameters") or {}, index=inputs["index"],
+                compiled=inputs["compiled"], options=inputs["options"],
+                project_type=inputs["project_type"], notes=inputs["notes"],
+                directive_summary=inputs["directive_summary"], assumptions=assumptions)
+        except Exception as error:
+            return json.dumps({"error": "brief_failed",
+                               "message": f"{type(error).__name__}: {error}"})
+        plan = model["plan"]
+        if not plan["classes"] and not plan["rules"]:
+            return json.dumps({"error": "empty_plan",
+                               "message": "The brief proposes no class and no rule for this "
+                                          "design: pass plan= with the constraints agreed."})
+        index, project_type, context = (inputs["index"], inputs["project_type"],
+                                        dict(inputs["context"]))
+        context["plan_source"] = "get_constraints_brief's proposed plan"
+        context["plan_assumptions"] = {
+            key: value for key, value in model["assumptions"].items()
+            if key in ("units", "temp_rise_c", "current_given", "hv_given")}
+        context["plan_assumptions"]["copper_oz"] = {
+            kind: f"{info['oz']:g} oz ({info['source']})"
+            for kind, info in model["assumptions"]["copper"].items()}
+        if not currents and not levels:
+            context["plan_assumptions_note"] = (
+                "No current= or hv= was given: power width and high-voltage clearance "
+                "rules appear only for currents and voltages the files give. Pass the "
+                "values the brief was asked with.")
+    else:
+        index, context = None, {"plan_source": "given"}
+        pcb_paths = project.get("pcb_doc_paths") or []
+        if pcb_paths:
+            index, error = _pcb_session.get(project, netlist)
+            if error:
+                index = None
+                context["pcb_unavailable"] = (
+                    f"{error['error']}: {error.get('message', '')}".strip(": "))
+            else:
+                context["pcb_doc"] = Path(pcb_paths[0]).name
+        project_type = detect_project_type(project.get("prj_pcb_path"),
+                                           pcb_paths[0] if pcb_paths else None)
+    pcb_paths = project.get("pcb_doc_paths") or []
+    stem = Path(pcb_paths[0]).stem if pcb_paths else project.get("name") or "board"
+    kind = (project_type or {}).get("type", "classic")
+    result = build_rule_files(plan, index=index, project_type=kind, stem=stem,
+                              project=project.get("name"), default_units=units or "mm",
+                              formats=tuple(chosen))
+    if "error" in result:
+        return json.dumps(result)
+    context["project_type"] = kind
+    if output_dir is not None:
+        try:
+            files = write_rule_files(result, output_dir)
+        except (OSError, ValueError) as error:
+            return json.dumps({"error": "write_failed",
+                               "message": f"The files could not be written: {error}"})
+        body = {key: value for key, value in result.items() if key not in ("texts",)}
+        body["files"] = files
+        return json.dumps({**context, **body}, indent=2)
+    for limit in RULE_FILE_INLINE_STEPS:
+        shown, cut = inline_texts(result, limit)
+        body = {key: value for key, value in result.items() if key not in ("texts",)}
+        body["inline"] = shown
+        if cut:
+            body["inline_truncated"] = cut
+            body["inline_note"] = ("Cut at a line to fit (whole records only; a text with no "
+                                   "line that fits is left out): name an output_dir to get "
+                                   "the whole files.")
+        body["written"] = "nothing: no output_dir was given"
+        rendered = json.dumps({**context, **body}, indent=2)
         if len(rendered) <= QUERY_NET_MAX_RESULT_SIZE_CHARS:
             break
     return rendered

@@ -57,6 +57,8 @@ NETLIST_TOOL_CALLS = {
     "run_erc": lambda: main.run_erc(),
     "check_sch_pcb_sync": lambda: main.check_sch_pcb_sync(),
     "check_directive_sync": lambda: main.check_directive_sync(),
+    "get_constraints_brief": lambda: main.get_constraints_brief(),
+    "generate_rule_file": lambda: main.generate_rule_file(),
     "schematic_review": lambda: main.schematic_review(),
     "package_for_xfn": lambda: main.package_for_xfn(),
 }

@@ -243,7 +243,7 @@
           {"path": "summary.rule.from_directives", "op": ">", "value": 0}
         ], "label": "pairs, net classes or rules marked by schematic directives reached the board"}]
       },
-      "hint": "Which nets need a pair or a class is the designer's call; check_directive_sync says whether those marked reached the board (list_diff_pairs and get_classes list them)."
+      "hint": "Which nets need a pair or a class is the designer's call; check_directive_sync says whether those marked reached the board (list_diff_pairs and get_classes list them), and get_constraints_brief proposes the pairs, classes and layout notes the schematic implies."
     },
     {
       "id": "SCH-CMP-01", "section": "components", "kind": "auto",

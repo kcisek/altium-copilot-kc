@@ -469,7 +469,7 @@ def _sheet_option(generation: dict, sheet: str, name: str):
     return row[name]
 
 
-def _suffixes(options) -> list[tuple[str, str]]:
+def pair_suffixes(options) -> list[tuple[str, str]]:
     """Polarity suffix pairs: Altium's _P / _N, then the project's own [DiffPairSuffixN]
     pairs (their keys are not documented: a key naming pos(itive) or neg(ative))."""
     pairs = [("_P", "_N")]
@@ -717,7 +717,7 @@ class _Builder:
         self.netlist = netlist or {}
         self.names = _Names(compiled, netlist, index, net_matching)
         self.generation = class_generation(options)
-        self.suffixes = _suffixes(options)
+        self.suffixes = pair_suffixes(options)
         self.project_type = project_type or {"type": "classic", "evidence": []}
         self.cm = self.project_type.get("type") == "constraint_manager"
         self.report = _Report(self.cm)

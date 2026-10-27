@@ -618,6 +618,36 @@ def pair_name_candidates(board: _Board, all_pairs: list, regex=None):
                        "details": details}
 
 
+class _NetlistNames:
+    """The two board reads pair_name_candidates needs, from a netlist instead of a PcbDoc:
+    nets by polarity key and each net's pin count."""
+
+    def __init__(self, netlist: dict):
+        self.nets: dict[str, list] = netlist.get("nets") or {}
+        self._by_key: dict | None = None
+        self._pins = {name.lower(): len(pins) for name, pins in self.nets.items()}
+
+    def polarity_index(self) -> dict[str, dict[str, list[tuple[str, str]]]]:
+        if self._by_key is None:
+            by_key: dict = defaultdict(lambda: {"+": [], "-": []})
+            for net in sorted(self.nets):
+                for key, polarity, token in polarity_tokens(net):
+                    by_key[key][polarity].append((net, token))
+            self._by_key = by_key
+        return self._by_key
+
+    def fanout(self, net: str) -> int:
+        return self._pins.get(net.lower(), 0)
+
+
+def netlist_pair_candidates(netlist: dict, declared: list | None = None) -> list[dict]:
+    """pair_name_candidates on a netlist (no PcbDoc needed): every two nets named as
+    complementary legs, with its status against the declared pairs given (PcbDoc
+    DiffPair-like objects; none by default, so every real candidate is "undeclared"). A
+    net's fanout is its pin count."""
+    return list(pair_name_candidates(_NetlistNames(netlist), list(declared or [])))
+
+
 def inferred_pairs(index) -> list[dict]:
     """The undeclared pairs the naming check reports (nets named as complementary legs
     that are not a PCB differential pair, without auto-named, supply, sense and rail

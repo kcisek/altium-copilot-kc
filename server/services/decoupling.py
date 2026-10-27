@@ -323,7 +323,10 @@ def classify_nets(netlist: dict) -> NetClasses:
     return NetClasses(refs, dict(nets), kinds, roles, all_ics, grounds, rails)
 
 
-def _design(netlist: dict, plan, project_params: dict | None) -> _Design:
+def decoupling_design(netlist: dict, plan, project_params: dict | None) -> _Design:
+    """The check's reading of the design: grounds, rails with their evidence, fitted ICs,
+    the (IC, rail) pairs with the IC's pins on the rail, and per rail the capacitors to
+    ground, filters and links (get_constraints_brief places capacitors from it)."""
     components = netlist.get("components") or {}
     compiled = netlist.get("parts") or {}
     pin_to_net = netlist.get("pin_to_net") or {}
@@ -803,7 +806,7 @@ def run_decoupling_check(
     if invalid:
         return {"error": "invalid_checks",
                 "message": f"Unknown checks {invalid}; use {list(CHECKS)}."}
-    design = _design(netlist, plan, project_params)
+    design = decoupling_design(netlist, plan, project_params)
     pairs = design.pairs
     notes: list[str] = []
     variant = getattr(plan, "name", None) or "[No Variations]"

@@ -825,10 +825,16 @@ def _reach(fmap: PinMap, ref: str, pin: str, net: str, limit: int = HOP_LIMIT) -
 
 # ---------- one MCU's pins ----------
 
-def _crystal(fmap: PinMap, ref: str) -> bool:
+def is_crystal(ref: str, text: str) -> bool:
+    """A crystal, resonator or oscillator by its designator prefix (Y, XTAL, XT, OSC), or an
+    X part whose text names one."""
     prefix = designator_prefix(ref)
     return prefix in ("Y", "XTAL", "XT", "OSC") or (
-        prefix == "X" and bool(CRYSTAL_TEXT.search(fmap.text(ref))))
+        prefix == "X" and bool(CRYSTAL_TEXT.search(text)))
+
+
+def _crystal(fmap: PinMap, ref: str) -> bool:
+    return is_crystal(ref, fmap.text(ref))
 
 
 def _peer_function(fmap: PinMap, peer: _Peer) -> tuple[str, str | None, str, bool] | None:

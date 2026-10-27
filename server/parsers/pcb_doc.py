@@ -36,7 +36,7 @@ def parse_dim_mil(raw: str | None) -> float | None:
     return value
 
 
-def _parse_text_properties(body: bytes) -> dict[str, str]:
+def parse_text_properties(body: bytes) -> dict[str, str]:
     text = body.rstrip(b"\x00").decode("latin-1", "replace")
     properties: dict[str, str] = {}
     for part in text.split("|"):
@@ -55,7 +55,7 @@ def read_text_records(data: bytes) -> list[dict[str, str]]:
         if record_length == 0 or offset + 4 + record_length > len(data):
             break
         records.append(
-            _parse_text_properties(
+            parse_text_properties(
                 data[offset + 4 : offset + 4 + record_length]
             )
         )
@@ -80,7 +80,7 @@ def read_kind_prefixed_text_records(
         records.append(
             (
                 kind_id,
-                _parse_text_properties(
+                parse_text_properties(
                     data[offset + 6 : offset + 6 + record_length]
                 ),
             )
@@ -1749,7 +1749,7 @@ def _region_heads(data: bytes):
             polygon=_optional_index(polygon, 0xFFFF),
             component=_optional_index(component, NO_COMPONENT),
             hole_count=hole_count,
-            properties=_parse_text_properties(
+            properties=parse_text_properties(
                 payload[_REGION_HEAD : _REGION_HEAD + text_length]
             ),
             shape_at=_REGION_HEAD + text_length,
@@ -1955,7 +1955,7 @@ def decode_component_bodies(data: bytes) -> tuple[list[ComponentBody], int]:
         (component,) = struct.unpack_from("<H", payload, 7)
         (hole_count,) = struct.unpack_from("<H", payload, 14)
         (text_length,) = struct.unpack_from("<I", payload, 18)
-        properties = _parse_text_properties(payload[_REGION_HEAD : _REGION_HEAD + text_length])
+        properties = parse_text_properties(payload[_REGION_HEAD : _REGION_HEAD + text_length])
         try:
             outline, at = _read_vertices(payload, _REGION_HEAD + text_length)
             for _ in range(hole_count):
