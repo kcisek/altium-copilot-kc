@@ -47,6 +47,59 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
     first release that carries a resource's `_meta` on `resources/list` and
     `resources/read`. The extension manifest has no field for views: its tool list is
     unchanged.
+- ERC and DRC results views (roadmap #60): Claude Desktop opens `run_erc`'s and
+  `get_drc_report`'s results as interactive tables; the tools' text results are
+  unchanged, byte for byte (only their `_meta` links a view), and Claude Code shows the
+  text as before.
+  - Two pages, `server/ui/erc_results.html` and `drc_results.html` (one view per tool, so
+    the registry is unchanged), sharing new shell pieces: a table with collapsible group
+    headers and counts (a grid, a treegrid when grouped, in a tab panel), a text filter
+    beside an outside filter, keyboard focus that stays on the same header, group or row
+    when the table is redrawn and goes back to the row when the details close (and to the
+    same control after a reload or a dismissed notice), one live region instead of a live
+    details pane, level badges, filter chips, a one-of switch, fact lists, a paging helper
+    that follows a tool's next offsets within a page budget and says why it stopped
+    (teardown, a host without `serverTools`, the budget, a failed page), a details cache
+    that asks once and never keeps a failure, and a full-screen button. Message cells keep
+    a readable width and the details pane stacks under the table below 980 px; long names
+    wrap rather than scroll the page; the panes shrink to 64 px before the page outgrows a
+    short host; tertiary text meets WCAG AA in both themes; the host's style variables
+    may hold colours and arithmetic only (no other CSS function, escape or at-rule); no
+    request is sent after teardown. The power tree page is unchanged and gets these shell
+    fixes too.
+  - ERC view: every page of `run_erc` read (a later page as the result: from offset 0,
+    else the summary's counts shown as not known), grouped by violation type, level, group or
+    sheet with counts and worst level, sortable, filterable by text and by level, group
+    and state chips, with a column chooser; suppressed rows marked when the result lists
+    them (`min_level="all"`), otherwise the suppressed counts with a button that asks
+    `run_erc` for them (the Level chips keeping the call's floor); a call narrowed by
+    checks, sheet or min_level counts its own rows in the header, `run_erc`'s summary
+    marked as the whole project's; advisories, report levels and notes in their own tabs;
+    a details pane per violation (message, object, sheet, net, location in mil, suggested
+    fix, the level and why) with buttons that ask `get_sheet_context`, `get_component` and
+    `query_net` (none for a single-pin net, which the netlist leaves out); the
+    single-pin-net report as a table by sheet; an empty state with the summary.
+  - DRC view: the assessment first, as a banner by its worst severity (whether to trust
+    the report, with each reason), then every rule violation read through `rule=` (once
+    per description, the rows given back by exact title), grouped by rule, rule kind,
+    component or net with counts; the view groups the rows itself once it has them all,
+    and otherwise shows the rows read before a stop or each group's examples with the
+    report's counts, asking `get_drc_report` with `group_by` for a component or net
+    grouping it does not hold; a later page as the result is read again from offset 0;
+    follow-up calls use the result's own units and grouping; a rule the report counts but
+    lists no row of is named. Health issues, waived violations and report warnings in
+    their own tabs, read in full (in a `rule=` listing too; tables sharing a title once);
+    a details pane per violation (rule, message, components, nets, location in the
+    result's units, absolute and from the board origin) with buttons that ask
+    `query_pcb_region` around the location, `get_component` and `query_net`; the tools'
+    error payloads (no project, no board, no report) as an error state with their text.
+  - Tests (`tests/test_ui_violations.py`): the resources and links, the pages' calls and
+    capability checks, both data contracts against `run_erc` on three of Altium's public
+    examples and `get_drc_report` on a copy of one with the repo's report fixture and
+    synthetic reports (stopped at the limit, stale, paged and trimmed, rules sharing a
+    description, waived tables sharing a title, a rule counted but not listed), paging
+    the way the views page gives every row once, a later page, narrowed calls, single-pin
+    nets, and the shell's contrast, style-value, teardown, grid and focus rules.
 - `trace_net_across_boards`, `check_multiboard` and `get_system_connections` (roadmap
   #54): multi-board systems (`.PrjMbd`) read offline; the loaded project is never
   changed and none of the three needs its netlist.

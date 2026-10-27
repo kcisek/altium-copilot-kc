@@ -18,7 +18,8 @@ text is the same whether a view is drawn or not: the tools are unchanged, and th
 reads the same JSON text (FastMCP's structuredContent {"result": text} for a str result,
 as before). No structuredContent is added for the views, since text-only hosts may show
 it in place of the text, and no app-only tool is registered: a view pages through and
-drills into the existing tools (get_power_tree, query_net, get_component).
+drills into the existing tools (its own tool, and query_net, get_component,
+get_sheet_context or query_pcb_region for a selection's details).
 
 Two choices the spec leaves open, made on purpose:
 - The tool's _meta link is static, not sent only to clients that advertise the extension
@@ -32,8 +33,16 @@ Two choices the spec leaves open, made on purpose:
 Adding a view takes one View entry in VIEWS, one HTML page in server/ui and
 link_meta(tool, meta) in the tool's decorator. The page is a whole HTML document with
 three markers: <!--@csp--> for the page's own policy, /*@shell.css*/ and /*@shell.js*/
-for the shared shell (theme, host bridge, table, filter, states, auto-resize), which
-render() inlines so that each resource is one self-contained page.
+for the shared shell (theme, host bridge, grouped table, filter chips, badges, paging,
+detail calls, states, auto-resize), which render() inlines so that each resource is one
+self-contained page.
+
+One view per tool: run_erc and get_drc_report (roadmap #60) have a page each, sharing the
+shell's grouped table, level badges, chips, details pane and paging, rather than one page
+for both. Their results share the table and its details but little else (ERC's summary,
+report levels, suppressed counts and advisories; DRC's assessment, board units and
+origin, per-rule paging, health, waived and warning sections), so each page carries one
+tool's data contract and the registry keeps one tool per view.
 """
 
 from __future__ import annotations
@@ -102,6 +111,36 @@ VIEWS = (
             "with voltages, feedback dividers and findings, collapse and expand, the path "
             "of a rail or part highlighted, details from query_net and get_component, and "
             "sortable tables as the fallback."
+        ),
+    ),
+    View(
+        name="erc-results",
+        tool="run_erc",
+        file="erc_results.html",
+        title="ERC results",
+        description=(
+            "HTML page (MCP Apps view) that hosts showing MCP Apps draw next to run_erc's "
+            "result; not for reading as text. The violations as a sortable, filterable "
+            "table grouped by violation type, level, group or sheet with counts, level and "
+            "group filters, the suppressed counts (or rows, with min_level all), the "
+            "advisories and report levels, and a details pane per violation with its "
+            "sheet, parts and net from get_sheet_context, get_component and query_net; or "
+            "the single-pin-net report."
+        ),
+    ),
+    View(
+        name="drc-results",
+        tool="get_drc_report",
+        file="drc_results.html",
+        title="DRC report",
+        description=(
+            "HTML page (MCP Apps view) that hosts showing MCP Apps draw next to "
+            "get_drc_report's result; not for reading as text. The assessment first "
+            "(whether to trust the report, and why), then every violation as a sortable, "
+            "filterable table grouped by rule, rule kind, component or net with counts, "
+            "PCB health issues, waived violations and report warnings, and a details pane "
+            "per violation with the board around its location, its parts and nets from "
+            "query_pcb_region, get_component and query_net."
         ),
     ),
 )

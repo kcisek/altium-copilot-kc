@@ -1,0 +1,1097 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!--@csp-->
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DRC report</title>
+<style>/*@shell.css*/</style>
+<style>
+/* DRC report view (roadmap #60): get_drc_report's assessment first, then every rule
+   violation as a grouped, sortable and filterable table with a details pane, and the
+   health, waived and warning sections. */
+.head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 0 0 6px; }
+.head h1 { font-size: var(--fs-lg); margin: 0; font-weight: var(--fw-bold); }
+.head > .muted { min-width: 0; overflow-wrap: anywhere; }
+.summary { display: flex; flex-wrap: wrap; gap: 4px; }
+.msg { overflow-wrap: anywhere; }
+.issue-code { font-family: var(--mono); font-size: var(--fs-xs); color: var(--c-text2); margin-right: 6px; }
+.status { font-size: var(--fs-xs); color: var(--c-text3); }
+.section-gap { margin-top: 14px; }
+.pins { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 2px 8px; }
+.list-inline { display: flex; flex-wrap: wrap; gap: 4px 8px; }
+.banner details summary { cursor: pointer; color: var(--c-text2); }
+</style>
+</head>
+<body>
+<main id="app"></main>
+<script type="application/json" id="data-contract">
+{
+  "tool": "get_drc_report",
+  "paged": {"report": "groups", "listing": "violations"},
+  "sections": {"health_issues": "health", "waived": "waived", "warnings": "warning"},
+  "shapes": {
+    "result": {
+      "required": ["report", "pcb_doc", "pcb_saved_utc", "totals", "assessment", "rules_checked",
+                   "rules_with_violations", "total", "offset", "has_more", "not_read"],
+      "optional": ["origin_mil", "origin_mm", "drc_settings", "note", "grouping_note", "groups",
+                   "rules", "violations", "next_offset", "health_issues", "waived", "warnings",
+                   "other_reports", "trimmed_to"]
+    },
+    "report": {
+      "required": ["file", "format", "made_for", "generated", "saved_utc", "elapsed"],
+      "optional": []
+    },
+    "drc_settings": {
+      "required": ["stop_after_violations", "create_report_file", "report_health_issues"],
+      "optional": []
+    },
+    "assessment[]": {
+      "required": ["issue", "severity", "detail"],
+      "optional": ["violations", "limit", "reference", "rule_kind", "report_saved_utc",
+                   "pcb_saved_utc"]
+    },
+    "groups[]": {
+      "required": ["count", "examples"],
+      "optional": ["rule", "component", "net", "rule_kind", "reported_count", "by_rule_kind",
+                   "components", "nets"]
+    },
+    "groups[].examples[]": {
+      "required": ["message"],
+      "optional": ["components", "nets", "diff_pairs", "location_mil", "location_mm", "waiver"]
+    },
+    "rules[]": {"required": ["rule", "rule_kind", "count"], "optional": ["section"]},
+    "violations[]": {
+      "required": ["rule", "message"],
+      "optional": ["section", "components", "nets", "diff_pairs", "location_mil", "location_mm",
+                   "waiver"]
+    },
+    "health_issues[]": {"required": ["title", "count", "examples"], "optional": ["omitted"]},
+    "waived[]": {"required": ["title", "count", "examples"], "optional": ["omitted"]},
+    "warnings[]": {"required": ["title", "count", "examples"], "optional": ["omitted"]}
+  }
+}
+</script>
+<script>/*@shell.js*/</script>
+<script>
+(() => {
+  "use strict";
+  const { el, clear } = Shell;
+  const CONTRACT = JSON.parse(document.getElementById("data-contract").textContent);
+  const app = document.getElementById("app");
+
+  const MAX_PAGES = 100;
+  const SEVERITY_RANK = { error: 2, warning: 1, info: 0 };
+  const SECTION_LABEL = { health: "PCB health issue", waived: "waived violation", warning: "report warning" };
+  const TAB_OF_SECTION = { health: "health_issues", waived: "waived", warning: "warnings" };
+  const GROUPINGS = [
+    { id: "rule", label: "Rule" },
+    { id: "kind", label: "Rule kind", title: "Clearance, Width, Short-Circuit ..." },
+    { id: "component", label: "Component", title: "A violation counts under each component it names (part)" },
+    { id: "net", label: "Net", title: "A violation counts under each net it names" },
+    { id: "none", label: "None", title: "No groups: one sortable table" },
+  ];
+  const NO_KEY = { component: "(no component)", net: "(no net)" };
+  // The assessment's own fields beside its detail text.
+  const ISSUE_FIELDS = {
+    "violations": "violations", "limit": "limit", "rule_kind": "rule kind",
+    "report_saved_utc": "report saved (UTC)", "pcb_saved_utc": "board saved (UTC)",
+  };
+
+  const view = {
+    args: {}, argsKnown: false, data: null, mode: "report", units: "mil", origin: null, rules: [],
+    serverGroups: new Map(), exampleRows: new Map(), sections: {}, complete: false, pages: 0, stopReason: "",
+    warnings: [], query: "", groupBy: "rule", tab: "violations", selected: null, asked: [], busy: false,
+    closed: false, regrouping: "", loaded: false, filtersOpen: null, reasonsOpen: null,
+  };
+  const ui = {};
+  const details = Shell.toolCache((tool, args, entry) => {
+    renderPane();
+    if (entry && !entry.loading) Shell.announce(`${tool} ${entry.error ? "failed" : "answered"}`);
+  });
+  let nextRow = 0;
+
+  // ---------- helpers ----------
+
+  const canCall = () => Shell.canCallTools();
+  const naturally = Shell.naturally;
+  const plural = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
+  const sum = (values) => values.reduce((total, value) => total + (Number(value) || 0), 0);
+  const round = (value) => (typeof value === "number" ? +value.toFixed(4) : value);
+  const nextOffset = (page) => (page && page.has_more && page.next_offset !== undefined ? page.next_offset : null);
+  const valueText = (value) => {
+    if (value === null || value === undefined) return "";
+    if (Array.isArray(value)) return value.map(valueText).join(", ");
+    if (typeof value === "object") return Object.entries(value).map(([key, item]) => `${key} ${valueText(item)}`).join(", ");
+    return String(value);
+  };
+
+  /** The units of a result: get_drc_report names its location and origin keys _mil or _mm. */
+  function unitsOf(data) {
+    if (data.origin_mm) return "mm";
+    if (data.origin_mil) return "mil";
+    const text = JSON.stringify([data.groups || [], data.violations || []]);
+    return text.includes('"location_mm"') ? "mm" : "mil";
+  }
+
+  function point(value) {
+    if (!value || typeof value !== "object") return null;
+    const x = value.x_mil === undefined ? value.x_mm : value.x_mil;
+    const y = value.y_mil === undefined ? value.y_mm : value.y_mil;
+    return typeof x === "number" && typeof y === "number" ? { x, y } : null;
+  }
+
+  /** One violation row of the table, from a rule listing or a group's example. */
+  function toRow(raw, extra = {}) {
+    return {
+      _id: nextRow++, rule: raw.rule || extra.rule || null, kind: extra.kind || null,
+      section: raw.section || extra.section || null, message: raw.message || "",
+      components: raw.components || [], nets: raw.nets || [], diff_pairs: raw.diff_pairs || [],
+      location: point(raw.location_mil || raw.location_mm), waiver: raw.waiver || null,
+      example: Boolean(extra.example), only: extra.only || null,
+    };
+  }
+
+  const where = (row) => (row.location ? `${row.location.x}, ${row.location.y}` : "");
+
+  // ---------- data contract ----------
+
+  function rowsAt(data, path) {
+    if (path === "result") return [data];
+    let rows = [data];
+    for (const part of path.split(".")) {
+      const key = part.replace(/\[\]$/, "");
+      rows = rows.flatMap((row) => {
+        const value = row && typeof row === "object" ? row[key] : undefined;
+        if (part.endsWith("[]")) return Array.isArray(value) ? value : [];
+        return value === undefined || value === null ? [] : [value];
+      });
+    }
+    return rows;
+  }
+
+  function checkContract(data) {
+    const problems = [];
+    for (const [path, shape] of Object.entries(CONTRACT.shapes)) {
+      for (const key of shape.required) {
+        const missing = rowsAt(data, path).filter((row) => !(key in row)).length;
+        if (missing) problems.push(`${path}: ${key} missing in ${missing} row(s)`);
+      }
+    }
+    return problems;
+  }
+
+  // ---------- loading ----------
+
+  /** The arguments of the view's own follow-up calls: the units the result is in (its
+   *  keys say), so every call answers in the same units whatever the host sent. */
+  function unitArgs() {
+    return { units: view.units };
+  }
+
+  async function getPage(args, total = null) {
+    const page = Shell.resultJson(await Shell.callTool("get_drc_report", args));
+    if (page && page.error) throw new Error(page.message || page.error);
+    // A page of another listing is not merged (the call's arguments not known, say).
+    if (total !== null && page.total !== total) {
+      throw new Error(`its total (${page.total}) is not the result's (${total})${view.argsKnown ? "" : ": the host did not send the call's arguments"}`);
+    }
+    return page;
+  }
+
+  /** Every page of one get_drc_report call (its key's rows), within the page budget; the
+   *  rows read before a stop are kept (items) beside the reason (stopped). */
+  async function readAll(args, key, budget, progress) {
+    const items = [];
+    if (view.closed) return { items, stopped: "the view was closed" };
+    if (!canCall()) return { items, stopped: "this host does not let the view call get_drc_report" };
+    if (budget.left <= 0) return { items, stopped: `the view reads at most ${budget.total} pages` };
+    budget.left -= 1;
+    if (progress) progress(1, 0);
+    let first;
+    try {
+      first = await getPage({ ...args, offset: 0 });
+    } catch (error) {
+      return { items, stopped: `get_drc_report could not be read: ${error.message}` };
+    }
+    items.push(...(first[key] || []));
+    const read = await Shell.readPages({
+      first, tool: "get_drc_report", budget, closed: () => view.closed, pageOffset: nextOffset, progress,
+      getPage: (offset) => getPage({ ...args, offset }, first.total),
+      onPage: (page) => items.push(...(page[key] || [])),
+    });
+    return { items, stopped: read.stopped, first };
+  }
+
+  function groupingOf(data) {
+    const first = (data.groups || [])[0];
+    if (first) return ["rule", "component", "net"].find((key) => key in first) || "rule";
+    const asked = view.args.group_by === "part" ? "component" : view.args.group_by;
+    return data.note ? "rule" : asked || "rule";
+  }
+
+  /** The arguments that page this result: its units and grouping (from its keys), or the
+   *  call's rule for a listing; null when the rule asked for is not known. */
+  function pagingArgs(first) {
+    if (view.mode === "listing") return view.args.rule ? { ...unitArgs(), rule: view.args.rule } : null;
+    return { ...unitArgs(), group_by: groupingOf(first) };
+  }
+
+  function showState(kind, title, detail) {
+    clear(app).appendChild(Shell.state(kind, title, detail));
+  }
+
+  /** While the violations are read: the header and the assessment, then the progress. */
+  function showProgress(text) {
+    if (!view.data) {
+      showState("loading", "Reading the DRC report", text);
+      return;
+    }
+    clear(app).append(headBlock(), assessmentBlock(), Shell.state("loading", "Reading every violation", text));
+  }
+
+  const ERROR_TITLES = {
+    no_project: "No project is loaded",
+    no_pcb_document: "The project has no PCB document",
+    no_drc_report: "No DRC report was found",
+    invalid_group_by: "get_drc_report did not accept group_by",
+    invalid_units: "get_drc_report did not accept units",
+    rule_not_in_report: "No rule of the report matches",
+  };
+
+  function showError(payload) {
+    clear(app).appendChild(Shell.state("error", ERROR_TITLES[payload.error] || "get_drc_report answered with an error",
+                                       payload.message || payload.error));
+    const more = [];
+    if ((payload.searched || []).length) more.push(el("li", { text: `Searched: ${payload.searched.join("; ")}` }));
+    if ((payload.rules || []).length) more.push(el("li", { text: `Rules with violations: ${payload.rules.join("; ")}` }));
+    if (more.length) app.appendChild(el("details", { class: "more section-gap", open: true }, el("summary", { text: "Details" }), el("ul", { class: "small" }, more)));
+  }
+
+  async function loadResult(result) {
+    let first;
+    try {
+      first = Shell.resultJson(result);
+    } catch (error) {
+      view.busy = false;
+      showState("error", "The DRC report could not be read", error.message);
+      return;
+    }
+    await loadFrom(first);
+  }
+
+  /** The health, waived and warning tables, one entry per title: two tables of one title
+   *  (two rules sharing a description) are one entry with their counts summed, since a
+   *  rule= of the title lists the rows of both. */
+  function sectionEntries(first) {
+    const sections = {};
+    for (const [key, section] of Object.entries(CONTRACT.sections)) {
+      const byTitle = new Map();
+      for (const table of first[key] || []) {
+        if (!byTitle.has(table.title)) {
+          byTitle.set(table.title, { title: table.title, count: 0, tables: 0, complete: true, rows: [] });
+        }
+        const entry = byTitle.get(table.title);
+        entry.count += Number(table.count) || 0;
+        entry.tables += 1;
+        entry.complete = entry.complete && !table.omitted;
+        entry.rows.push(...(table.examples || []).map((raw) => toRow(raw, { rule: table.title, section, example: Boolean(table.omitted) })));
+      }
+      sections[section] = [...byTitle.values()];
+    }
+    return sections;
+  }
+
+  /** Each section entry not shown in full, read through rule=<title> (rows given back by
+   *  section and exact title); listed: rows a rule= listing already holds, complete. */
+  async function readSections(budget, stop, progress, listed = null) {
+    for (const [section, entries] of Object.entries(view.sections)) {
+      for (const entry of entries) {
+        const own = (rows) => rows.filter((raw) => raw.section === section && raw.rule === entry.title);
+        if (listed && own(listed).length >= entry.rows.length && own(listed).length) {
+          entry.rows = own(listed).map((raw) => toRow(raw, { rule: entry.title, section }));
+          entry.complete = true;
+          continue;
+        }
+        // Without tools/call the notice for such a host names these rows.
+        if (entry.complete || !canCall()) continue;
+        const read = await readAll({ ...unitArgs(), rule: entry.title }, "violations", budget,
+                                   progress(`Reading the ${SECTION_LABEL[section]}s of "${entry.title}"`));
+        const rows = own(read.items);
+        if (rows.length > entry.rows.length) entry.rows = rows.map((raw) => toRow(raw, { rule: entry.title, section }));
+        if (!read.stopped && rows.length) entry.complete = true;
+        else stop(`the ${SECTION_LABEL[section]}s of "${entry.title}"`, read.stopped || "no rows came back");
+      }
+    }
+  }
+
+  async function loadFrom(first) {
+    view.busy = true;
+    try {
+      if (!first || typeof first !== "object") throw new Error("The result is not a DRC report.");
+      if (first.error) {
+        showError(first);
+        return;
+      }
+      const budget = Shell.pageBudget(MAX_PAGES);
+      const stops = [];
+      const stop = (what, stopped) => {
+        if (stopped) stops.push(`${what}: ${stopped}`);
+      };
+      nextRow = 0;
+      view.data = first;
+      view.units = unitsOf(first);
+      view.origin = point(first.origin_mil || first.origin_mm);
+      view.serverGroups = new Map();
+      view.exampleRows = new Map();
+      view.rules = [];
+      view.selected = null;
+      view.asked = [];
+      view.mode = Array.isArray(first.violations) ? "listing" : "report";
+      const own = pagingArgs(first);
+      const progress = (label) => (page, offset) => showProgress(`${label}${offset ? ` (page ${page}, offset ${offset})` : ""}.`);
+
+      // A later page as the result: the groups or rows before it come from offset 0.
+      let start = first;
+      if (first.offset > 0) {
+        const what = view.mode === "listing" ? "violations" : "groups";
+        if (own && canCall() && !view.closed && budget.left > 0) {
+          budget.left -= 1;
+          showProgress("Asking get_drc_report for the result's first page.");
+          try {
+            start = await getPage({ ...own, offset: 0 }, first.total);
+          } catch (error) {
+            stop("the result's first page", `get_drc_report could not be read: ${error.message}`);
+          }
+        }
+        if (start === first) {
+          stop("the result", `it starts at offset ${first.offset}, so the first ${first.offset === 1 ? what.slice(0, -1) : `${first.offset} ${what}`} of the report ${first.offset === 1 ? "is" : "are"} not in it` +
+            (own ? "" : " (the rule asked for is not known: the host sent no tool input)"));
+        } else {
+          view.data = start;
+        }
+      }
+      view.sections = sectionEntries(start);
+
+      if (view.mode === "listing") {
+        // A rule= call: the matching rules' violations, every page of them.
+        const rows = [...(start.violations || [])];
+        const read = own ? await Shell.readPages({
+          first: start, tool: "get_drc_report", budget, closed: () => view.closed, pageOffset: nextOffset,
+          getPage: (offset) => getPage({ ...own, offset }, start.total), onPage: (page) => rows.push(...(page.violations || [])),
+          progress: progress(`Reading the violations of "${own.rule}"`),
+        }) : { stopped: nextOffset(start) === null ? "" : "the rule asked for is not known (the host sent no tool input), so the next pages cannot be asked for" };
+        stop("the rule's violations", read.stopped);
+        const ruleInfo = new Map();
+        for (const rule of start.rules || []) {
+          if (rule.section) continue;
+          const info = ruleInfo.get(rule.rule) || { kind: rule.rule_kind, count: 0 };
+          info.count += Number(rule.count) || 0;
+          ruleInfo.set(rule.rule, info);
+        }
+        const titles = new Map();
+        for (const raw of rows) {
+          if (raw.section) continue;
+          const row = toRow(raw, { kind: (ruleInfo.get(raw.rule) || {}).kind });
+          if (!titles.has(row.rule)) titles.set(row.rule, []);
+          titles.get(row.rule).push(row);
+        }
+        const complete = !read.stopped && !stops.length;
+        view.rules = [...titles].map(([rule, ruleRows]) => ({
+          rule, kind: (ruleInfo.get(rule) || {}).kind, rows: ruleRows, examples: [],
+          // The report's own count when the view did not read every row.
+          count: complete ? ruleRows.length : Math.max(ruleRows.length, (ruleInfo.get(rule) || {}).count || 0),
+        }));
+        await readSections(budget, stop, progress, complete ? rows : null);
+        view.complete = complete;
+        if (!view.rules.length) {
+          // rule= named a health, waived or warning table: open its tab.
+          const matched = (start.rules || []).find((rule) => rule.section);
+          if (matched && TAB_OF_SECTION[matched.section]) view.tab = TAB_OF_SECTION[matched.section];
+        }
+      } else {
+        const grouping = groupingOf(start);
+        const groups = [...(start.groups || [])];
+        const read = await Shell.readPages({
+          first: start, tool: "get_drc_report", budget, closed: () => view.closed, pageOffset: nextOffset,
+          getPage: (offset) => getPage({ ...own, offset }, start.total), onPage: (page) => groups.push(...(page.groups || [])),
+          progress: progress(`Reading the groups by ${grouping}`),
+        });
+        stop(`the groups by ${grouping}`, read.stopped);
+        const groupsComplete = !read.stopped && start.offset === 0;
+        view.serverGroups.set(grouping, groups);
+        let ruleGroups = grouping === "rule" ? groups : null;
+        if (!ruleGroups && canCall()) {
+          // Every violation is read rule by rule: the rules come from the rule grouping.
+          const byRule = await readAll({ ...unitArgs(), group_by: "rule" }, "groups", budget, progress("Reading the rules"));
+          stop("the rules", byRule.stopped);
+          if (!byRule.stopped) {
+            ruleGroups = byRule.items;
+            view.serverGroups.set("rule", ruleGroups);
+          }
+        }
+        view.rules = (ruleGroups || []).map((group) => ({
+          rule: group.rule, kind: group.rule_kind, count: group.count, reported: group.reported_count, rows: null,
+          examples: (group.examples || []).map((raw) => toRow(raw, { rule: group.rule, kind: group.rule_kind, example: true })),
+        }));
+        // Each rule's violations through rule=: once per title (a rule= of a title lists
+        // every rule of that description, in any case), rows given back by exact title. A
+        // rule the report counts but lists no row of needs no call.
+        const titles = [...new Set(view.rules.filter((rule) => rule.count > 0).map((rule) => rule.rule.trim().toLowerCase()))];
+        for (const rule of view.rules) if (!rule.count) rule.rows = [];
+        // Without tools/call each group keeps the report summary's examples (the notice for
+        // a host without serverTools says so).
+        // The rules are all known: the rule groups read in full (from offset 0).
+        const rulesComplete = grouping === "rule" ? groupsComplete : Boolean(ruleGroups);
+        const complete = rulesComplete && (canCall() || !titles.length);
+        let allRead = true;
+        for (const [index, title] of (canCall() ? titles : []).entries()) {
+          const entries = view.rules.filter((rule) => rule.rule.trim().toLowerCase() === title);
+          const listed = await readAll({ ...unitArgs(), rule: entries[0].rule }, "violations", budget,
+                                       progress(`Reading the violations: rule ${index + 1} of ${titles.length}`));
+          const read = new Map(entries.map((entry) => [entry, []]));
+          for (const raw of listed.items) {
+            if (raw.section) continue;  // a health, waived or warning table of the same title
+            const entry = entries.find((rule) => rule.rule === raw.rule) || entries[0];
+            read.get(entry).push(toRow(raw, { kind: entry.kind }));
+          }
+          if (!listed.stopped) {
+            for (const entry of entries) entry.rows = read.get(entry);
+            continue;
+          }
+          // Stopped: the rows read so far are kept where they are more than the examples.
+          allRead = false;
+          for (const entry of entries) {
+            if (read.get(entry).length > entry.examples.length) {
+              entry.rows = read.get(entry);
+              entry.partial = true;
+            }
+          }
+          const left = titles.length - index - 1;
+          stop(`the violations of "${entries[0].rule}"${left && (view.closed || budget.left <= 0) ? ` and ${plural(left, "more rule")}` : ""}`, listed.stopped);
+          if (view.closed || budget.left <= 0) break;
+        }
+        await readSections(budget, stop, progress);
+        view.complete = complete && allRead && view.rules.every((rule) => rule.rows && !rule.partial);
+      }
+      view.pages = budget.total - budget.left + 1;
+      view.stopReason = stops.join("; ");
+      view.warnings = checkContract(view.data);
+      // The table opens grouped as the call asked (group_by); a later reload keeps the
+      // user's choice when the view can still group that way.
+      const asked = view.mode === "report" ? groupingOf(view.data) : "rule";
+      if (!view.loaded || (view.groupBy !== "none" && !groupingReady(view.groupBy))) view.groupBy = asked;
+      view.loaded = true;
+      renderAll();
+    } catch (error) {
+      showState("error", "The DRC report could not be read", error.message);
+    } finally {
+      view.busy = false;
+    }
+  }
+
+  async function reload(args, why) {
+    if (view.busy || !canCall() || view.closed) return;
+    const previous = view.args;
+    // The control that had keyboard focus gets it back after the page is drawn again.
+    const mark = Shell.focusMark(app);
+    view.busy = true;
+    view.args = args;
+    showProgress(`${why}: calling get_drc_report.`);
+    try {
+      await loadFrom(await getPage({ ...args, offset: 0 }));
+    } catch (error) {
+      view.busy = false;
+      view.args = previous;
+      if (!view.data) {
+        showState("error", "The DRC report could not be read", error.message);
+        return;
+      }
+      renderAll();
+      app.prepend(Shell.notice("error", `${why} failed: ${error.message}`));
+    }
+    if (mark) Shell.refocus(app, mark, () => (ui.table && ui.table.focus(null) ? document.activeElement : ui.tabBar && ui.tabBar.selected()));
+  }
+
+  function refresh() {
+    const args = { ...view.args };
+    delete args.offset;
+    reload(args, "Reading the report again");
+  }
+
+  // ---------- the rows and their groups ----------
+
+  /** Whether the table can be grouped this way with what the view holds: by rule once it
+   *  has the rules (none at all in a clean report), by component or net once it has every
+   *  row, get_drc_report's groups, or the tools to ask for them (a listing groups its own
+   *  rows). */
+  function groupingReady(id) {
+    if (id === "none" || view.mode === "listing") return true;
+    if (id === "rule" || id === "kind") return view.serverGroups.has("rule") || view.rules.length > 0;
+    if (view.complete) return true;
+    return view.serverGroups.has(id) || canCall();
+  }
+
+  /** Why a grouping is off (the switch's title). */
+  function groupingWhyNot(id) {
+    if (!canCall()) return "Needs get_drc_report, which this host does not let the view call";
+    return id === "rule" || id === "kind" ? "The view could not read the report's rules: see the notice above"
+      : "The view could not read these groups: see the notice above";
+  }
+
+  /** The table's rows: every violation once the view read them all; otherwise the rules
+   *  read in full and the examples of the others, or (grouped by component or net) the
+   *  examples of each group get_drc_report gives for that grouping. */
+  function tableRows() {
+    if (view.complete || view.mode === "listing") return view.rules.flatMap((rule) => rule.rows || []);
+    const by = view.groupBy;
+    if ((by === "component" || by === "net") && view.serverGroups.has(by)) return examplesOf(by);
+    if (view.rules.length) return view.rules.flatMap((rule) => rule.rows || rule.examples);
+    const [grouping] = [...view.serverGroups.keys()];
+    return grouping ? examplesOf(grouping) : [];
+  }
+
+  /** The examples of get_drc_report's groups by component or net, as rows (made once, so
+   *  a selection keeps its row). */
+  function examplesOf(grouping) {
+    if (!view.exampleRows.has(grouping)) {
+      view.exampleRows.set(grouping, (view.serverGroups.get(grouping) || []).flatMap((group) => (group.examples || []).map((raw) =>
+        toRow(raw, { example: true, only: grouping === "rule" ? null : group[grouping], rule: group.rule, kind: group.rule_kind }))));
+    }
+    return view.exampleRows.get(grouping);
+  }
+
+  function keysOf(row, by) {
+    if (row.only !== null && row.only !== undefined && (by === "component" || by === "net")) return [row.only];
+    if (by === "rule") return [row.rule || "(no rule)"];
+    if (by === "kind") return [row.kind || "(other)"];
+    const list = by === "component" ? row.components : row.nets;
+    return list.length ? list : [NO_KEY[by]];
+  }
+
+  /** The count of a group as the report gives it, when the view has it (a listing counts
+   *  its own rows by component and net). */
+  function reportCount(key, by) {
+    if (view.mode === "listing" && by !== "rule" && by !== "kind") return null;
+    if (by === "rule") {
+      const entries = view.rules.filter((rule) => rule.rule === key);
+      return entries.length ? sum(entries.map((rule) => rule.count)) : null;
+    }
+    if (by === "kind") {
+      const entries = view.rules.filter((rule) => (rule.kind || "(other)") === key);
+      return entries.length ? sum(entries.map((rule) => rule.count)) : null;
+    }
+    const groups = view.serverGroups.get(by);
+    const group = groups && groups.find((item) => item[by] === key);
+    return group ? group.count : null;
+  }
+
+  function groupSpec() {
+    const by = view.groupBy;
+    if (by === "none") return null;
+    const total = (key, rows) => {
+      const counted = reportCount(key, by);
+      return counted === null || view.complete ? rows.length : counted;
+    };
+    return {
+      key: (row) => keysOf(row, by),
+      label: (key, rows) => {
+        if (by === "component" || by === "net") {
+          // The rule kinds under a part or net: get_drc_report's by_rule_kind for a group the
+          // view did not read in full, else counted from the rows.
+          const group = !view.complete && (view.serverGroups.get(by) || []).find((item) => item[by] === key);
+          const kinds = group && group.by_rule_kind ? group.by_rule_kind : rows.reduce((counts, row) => {
+            counts[row.kind || "other"] = (counts[row.kind || "other"] || 0) + 1;
+            return counts;
+          }, {});
+          return [key, " ", el("span", { class: "muted small", text: Object.entries(kinds).map(([kind, count]) => `${kind} ${count}`).join(", ") })];
+        }
+        if (by !== "rule") return key;
+        const kind = rows[0] && rows[0].kind;
+        const reported = view.rules.filter((rule) => rule.rule === key && rule.reported !== undefined && rule.reported !== null);
+        return [key, kind ? [" ", el("span", { class: "badge", text: kind })] : null,
+          reported.length ? [" ", el("span", { class: "badge warning", title: "The report's own count for this rule differs from the rows it lists",
+                                               text: `report counts ${sum(reported.map((rule) => rule.reported))}` })] : null];
+      },
+      count: (key, rows) => {
+        const count = total(key, rows);
+        return [el("span", { class: "badge", text: plural(count, "violation") }),
+          rows.length < count ? el("span", { class: "badge muted", text: `${rows.length} shown` }) : null];
+      },
+      order: (a, b, buckets) => {
+        const none = (key) => key.startsWith("(");
+        if (none(a) !== none(b)) return none(a) ? 1 : -1;
+        if (by === "rule") return orderOfRule(a) - orderOfRule(b);
+        return total(b, buckets.get(b)) - total(a, buckets.get(a)) || naturally(a, b);
+      },
+      open: (key, rows, groups) => groups === 1 || tableRows().length <= 60,
+    };
+  }
+
+  function orderOfRule(title) {
+    const at = view.rules.findIndex((rule) => rule.rule === title);
+    return at < 0 ? view.rules.length : at;
+  }
+
+  function violationColumns(section) {
+    const units = view.units;
+    return [
+      // Grouped by rule (or by section title), the group header names it already.
+      { key: "rule", label: section ? "Title" : "Rule", hidden: Boolean(section) || view.groupBy === "rule" },
+      { key: "kind", label: "Kind", hidden: true },
+      { key: "message", label: "Message", cls: "c-msg", render: (row) => el("span", { class: "msg", text: row.message }) },
+      { key: "components", label: "Components", cls: "c-name", value: (row) => row.components },
+      { key: "nets", label: "Nets", cls: "c-name", value: (row) => row.nets },
+      { key: "location", label: `Location (${units})`, text: where, render: where,
+        value: (row) => (row.location ? row.location.x * 1e6 + row.location.y : null) },
+      { key: "waiver", label: "Waiver", hidden: section !== "waived", value: (row) => row.waiver || "" },
+    ];
+  }
+
+  function violationTable() {
+    return Shell.table({
+      label: "DRC violations", ownFilter: false, rows: tableRows(), group: groupSpec(),
+      rowKey: (row) => row._id, onActivate: select, columns: violationColumns(null),
+      empty: view.mode === "listing" ? "No rule violation in this listing." : "No rule violation in this report.",
+    });
+  }
+
+  function sectionTable(section) {
+    const entries = view.sections[section] || [];
+    return Shell.table({
+      label: `${SECTION_LABEL[section]}s`, ownFilter: false, rows: entries.flatMap((entry) => entry.rows),
+      rowKey: (row) => row._id, onActivate: select, columns: violationColumns(section),
+      empty: `No ${SECTION_LABEL[section]} in this report.`,
+      group: {
+        key: (row) => row.rule,
+        count: (key, rows) => {
+          const entry = entries.find((item) => item.title === key) || { count: rows.length };
+          return [el("span", { class: "badge", text: String(entry.count) }),
+            rows.length < entry.count ? el("span", { class: "badge muted", text: `${rows.length} shown` }) : null];
+        },
+        order: (a, b) => entries.findIndex((item) => item.title === a) - entries.findIndex((item) => item.title === b),
+      },
+    });
+  }
+
+  async function regroup(id) {
+    view.groupBy = id;
+    if ((id === "component" || id === "net") && view.mode === "report" && !view.complete && !view.serverGroups.has(id) && canCall()) {
+      // The view does not hold every violation: ask get_drc_report for that grouping.
+      view.regrouping = id;
+      renderTab();
+      const read = await readAll({ ...unitArgs(), group_by: id }, "groups", Shell.pageBudget(20));
+      view.regrouping = "";
+      if (read.stopped) {
+        app.prepend(Shell.notice("error", `Grouping by ${id} failed: ${read.stopped}. The table groups the rows it has.`));
+      } else {
+        view.serverGroups.set(id, read.items);
+      }
+      if (view.groupBy !== id) return;
+    }
+    renderTab();
+  }
+
+  // ---------- selection and details pane ----------
+
+  function select(row) {
+    view.selected = row;
+    view.asked = [];
+    if (ui.table) ui.table.select((other) => other === row);
+    renderPane();
+    if (row) Shell.announce(`Details: ${row.rule || "violation"}`);
+  }
+
+  /** Close the details (Close, or Esc): keyboard focus that was in the pane, or that the
+   *  rebuild would drop, goes back to the row that was selected. */
+  function closeDetails() {
+    const row = view.selected;
+    const inPane = ui.pane && ui.pane.contains(document.activeElement);
+    select(null);
+    if (!inPane && document.activeElement && document.activeElement !== document.body) return;
+    if (ui.table && ui.table.focus((other) => other === row)) return;
+    if (ui.tabBar) ui.tabBar.focus();
+  }
+
+  function ask(tool, args, label) {
+    const key = JSON.stringify([tool, args]);
+    view.asked = [[tool, args, label], ...view.asked.filter(([other, otherArgs]) => JSON.stringify([other, otherArgs]) !== key)];
+    renderPane();
+    details.load(tool, args);
+  }
+
+  function serverCalls(row) {
+    const calls = [];
+    if (row.location) {
+      const near = (value) => +value.toFixed(view.units === "mm" ? 2 : 0);
+      calls.push(["query_pcb_region", { x: row.location.x, y: row.location.y, units: view.units },
+        `Board around ${near(row.location.x)}, ${near(row.location.y)} ${view.units}`,
+        "Ask query_pcb_region for the copper, parts and pours around the location"]);
+    }
+    for (const name of row.components.slice(0, 8)) calls.push(["get_component", { refdes: name }, `Part ${name}`, `Ask get_component for ${name}`]);
+    for (const name of row.nets.slice(0, 8)) calls.push(["query_net", { pattern: Shell.exactPattern(name) }, `Net ${name}`, `Ask query_net for ${name}`]);
+    return calls;
+  }
+
+  function componentLink(name) {
+    if (!canCall() || !name) return name || "";
+    return el("button", { type: "button", class: "btn-link", text: name, title: `Ask get_component for ${name}`,
+                          on: { click: () => ask("get_component", { refdes: name }, `Part ${name}`) } });
+  }
+
+  function netLink(name) {
+    if (!canCall() || !name) return name || "";
+    return el("button", { type: "button", class: "btn-link", text: name, title: `Ask query_net for ${name}`,
+                          on: { click: () => ask("query_net", { pattern: Shell.exactPattern(name) }, `Net ${name}`) } });
+  }
+
+  function joined(items) {
+    const out = [];
+    items.forEach((item, index) => {
+      if (index) out.push(", ");
+      out.push(item);
+    });
+    return out;
+  }
+
+  const distance = (item) => {
+    const key = Object.keys(item).find((name) => /distance_(mil|mm)$/.test(name));
+    return key ? ` ${round(item[key])} ${key.endsWith("mm") ? "mm" : "mil"}` : "";
+  };
+
+  function answer(tool, args, title) {
+    const entry = details.get(tool, args);
+    const head = el("h3", { text: title });
+    if (!entry || entry.loading) return [head, el("p", { class: "muted", text: `Asking ${tool}…` })];
+    if (entry.error) {
+      return [head, el("div", { class: "notice error" }, el("span", { class: "grow", text: entry.error }),
+        el("button", { type: "button", class: "btn-link", text: "Retry", on: { click: () => ask(tool, args, title) } }))];
+    }
+    let json;
+    try {
+      json = Shell.resultJson(entry.data);
+    } catch (error) {
+      return [head, el("div", { class: "notice warning", text: error.message })];
+    }
+    if (json.error) return [head, el("div", { class: "notice warning", text: json.message || json.error })];
+    if (tool === "query_pcb_region") {
+      const nets = json.nets || [];
+      const parts = json.components || [];
+      const pours = json.pours || [];
+      return [head,
+        Shell.facts([
+          ["Copper nets", nets.length ? joined(nets.map((item) => [netLink(item.net), distance(item), (item.layers || []).length ? ` on ${item.layers.join(", ")}` : ""])) : "none"],
+          ["Parts", parts.length ? joined(parts.map((item) => [componentLink(item.sch_refdes || item.refdes), item.side ? ` ${item.side}` : "", distance(item)])) : "none"],
+          ["Pours", pours.length ? pours.map((item) => `${item.net || "no net"} on ${item.layer}${item.inside_pour ? " (inside)" : distance(item)}`).join(", ") : "none"],
+          ["More", [json.nets_has_more ? "more nets" : "", json.components_has_more ? "more parts" : ""].filter(Boolean).join(", ")],
+        ]),
+        el("p", { class: "muted small", text: "Within 50 mil of the location (query_pcb_region's default radius)." })];
+    }
+    if (tool === "query_net") {
+      const all = json.nets || [json];
+      const exact = all.filter((net) => Shell.exactPattern(net.net) === args.pattern);
+      return [head, ...(exact.length ? exact : all).map((net) => {
+        const pins = net.pins || net.pins_sample || [];
+        return el("div", {},
+          Shell.facts([["Net", net.net], ["Pins", net.pin_count === undefined ? null : String(net.pin_count)]]),
+          net.message ? el("p", { class: "muted", text: net.message }) : null,
+          el("div", { class: "pins" }, pins.map((pin) => el("span", {}, componentLink(pin.refdes), `.${pin.pin}`))));
+      })];
+    }
+    const pins = Object.entries(json.pins || {}).sort((a, b) => naturally(a[0], b[0]));
+    return [head,
+      Shell.facts([["Description", json.description], ["MPN", json.mpn], ["Value", json.value],
+                   ["Fitted", json.dnp ? "no (DNP in this variant)" : "yes"], ["Sheet", json.sheet]]),
+      pins.length ? Shell.table({
+        label: `Pins of ${json.refdes}`, ownFilter: pins.length > 12,
+        rows: pins.map(([pin, info]) => ({ pin, name: info.name, net: info.net })),
+        columns: [{ key: "pin", label: "Pin" }, { key: "name", label: "Name" },
+                  { key: "net", label: "Net", render: (row) => (row.net ? netLink(row.net) : "") }],
+      }).el : null];
+  }
+
+  function locationText(row) {
+    if (!row.location) {
+      return view.data.note ? "not known: the PcbDoc could not be read" : "not given (the report row has none the board can place)";
+    }
+    const units = view.units;
+    const origin = view.origin;
+    const text = `${row.location.x}, ${row.location.y} ${units} (absolute)`;
+    if (!origin) return text;
+    return `${text}; ${round(row.location.x - origin.x)}, ${round(row.location.y - origin.y)} ${units} from the board origin at ${origin.x}, ${origin.y} ${units}`;
+  }
+
+  function renderPane() {
+    if (ui.pane) Shell.keepFocus(ui.pane, drawPane);
+  }
+
+  function drawPane() {
+    clear(ui.pane);
+    const row = view.selected;
+    ui.pane.classList.toggle("idle", !row);
+    if (!row) {
+      Shell.append(ui.pane, [
+        el("h2", { text: "Select a violation" }),
+        el("p", { class: "help", text: "Click a row (or move to it and press Enter) for its rule, message, components, nets and board location." }),
+        el("p", { class: "help", text: canCall()
+          ? "Its buttons ask query_pcb_region for the board around the location, get_component for a part and query_net for a net."
+          : "This host does not let the view call tools: ask Claude in the conversation for the board, a part or a net." }),
+        el("p", { class: "help", text: "Keys: Up and Down move between rows and group headers, Enter selects or opens and closes a group, Left and Right close and open a group, Esc clears." }),
+      ]);
+      return;
+    }
+    const calls = serverCalls(row);
+    const kind = row.section ? SECTION_LABEL[row.section] : "rule violation";
+    Shell.append(ui.pane, [
+      el("div", { class: "row" }, el("h2", { text: row.rule || kind }),
+        el("button", { type: "button", class: "btn", text: "Close", on: { click: closeDetails } })),
+      el("div", { class: "summary" }, el("span", { class: `badge ${row.section === "waived" ? "ok" : row.section ? "warning" : "error"}`, text: kind }),
+        row.kind ? el("span", { class: "badge", text: row.kind }) : null,
+        row.example ? el("span", { class: "badge muted", text: "example from the report's summary" }) : null),
+      Shell.facts([
+        ["Message", el("span", { class: "msg", text: row.message })],
+        [row.section ? "Title" : "Rule", row.rule],
+        ["Components", joined(row.components.map(componentLink))],
+        ["Nets", joined(row.nets.map(netLink))],
+        ["Diff pairs", row.diff_pairs.join(", ")],
+        ["Location", locationText(row)],
+        ["Waiver", row.waiver],
+      ], "facts section-gap"),
+      calls.length || view.asked.length ? [el("h3", { text: "From the server" }),
+        canCall() ? [
+          el("div", { class: "btn-row" }, calls.map(([tool, args, label, title]) => el("button", {
+            type: "button", class: "btn", text: label, title, on: { click: () => ask(tool, args, label) } }))),
+          ...view.asked.map(([tool, args, label]) => answer(tool, args, label))]
+          : el("p", { class: "muted", text: "This host does not let the view call the server's tools: ask Claude in the conversation for the board, part or net." })] : null,
+    ]);
+  }
+
+  // ---------- assessment, header and other tabs ----------
+
+  function assessmentBlock() {
+    const issues = view.data.assessment || [];
+    const worst = Math.max(-1, ...issues.map((issue) => SEVERITY_RANK[issue.severity] || 0));
+    const kind = worst >= 2 ? "error" : worst === 1 ? "warning" : "ok";
+    const title = kind === "error" ? "Do not take this report as the board's state"
+      : kind === "warning" ? "Check these before relying on this report"
+        : "Nothing in the files limits trust in this report";
+    const line = (issue) => {
+      const extra = Object.entries(ISSUE_FIELDS).filter(([key]) => issue[key] !== undefined && issue[key] !== null)
+        .map(([key, label]) => `${label} ${issue[key]}`);
+      return el("li", {},
+        Shell.levelBadge(issue.severity), el("span", { class: "issue-code", text: issue.issue }), issue.detail,
+        extra.length ? el("div", { class: "muted small", text: extra.join(" · ") }) : null,
+        // Shown as text: the view opens no link (and sends nothing anywhere).
+        issue.reference ? el("div", { class: "muted small", text: `Reference: ${issue.reference}` }) : null);
+    };
+    const serious = issues.filter((issue) => issue.severity !== "info");
+    const info = issues.filter((issue) => issue.severity === "info");
+    // Where the host gives little room the reasons fold under one line naming them; open
+    // where there is room. The user's choice is kept across redraws.
+    if (view.reasonsOpen === null) view.reasonsOpen = Shell.roomy();
+    let reasons = null;
+    if (serious.length) {
+      reasons = el("details", { open: view.reasonsOpen },
+        el("summary", { text: `${plural(serious.length, "reason")}: ${serious.map((issue) => issue.issue.replace(/_/g, " ")).join(", ")}` }),
+        el("ul", {}, serious.map(line)));
+      reasons.addEventListener("toggle", () => { view.reasonsOpen = reasons.open; });
+    }
+    return el("section", { class: `banner ${kind}`, "aria-label": "Assessment" },
+      el("h2", { text: title }),
+      reasons,
+      info.length ? (serious.length
+        ? el("details", {}, el("summary", { text: plural(info.length, "note") }), el("ul", {}, info.map(line)))
+        : el("ul", {}, info.map(line))) : null,
+      !issues.length ? el("p", { class: "small", text: "The report is complete, every rule kind was checked, and it is not older than the board." }) : null);
+  }
+
+  function headBlock() {
+    const data = view.data;
+    const totals = data.totals || {};
+    const count = (key) => sum((data[key] || []).map((entry) => entry.count));
+    return el("div", { class: "head" },
+      el("h1", { text: "DRC report" }),
+      el("span", { class: "muted small", text: [data.pcb_doc, data.report && data.report.generated].filter(Boolean).join(", ") }),
+      el("span", { class: "summary" },
+        Shell.levelBadge(totals.rule_violations ? "error" : "ok", plural(totals.rule_violations || 0, "rule violation")),
+        el("span", { class: "badge", text: `${data.rules_with_violations} of ${data.rules_checked} rules` }),
+        count("health_issues") ? Shell.levelBadge("warning", plural(count("health_issues"), "health issue")) : null,
+        count("waived") ? Shell.levelBadge("ok", `${count("waived")} waived`) : null,
+        count("warnings") ? Shell.levelBadge("warning", plural(count("warnings"), "report warning")) : null));
+  }
+
+  function reportBlock() {
+    const data = view.data;
+    const report = data.report || {};
+    const settings = data.drc_settings || {};
+    const yesNo = (value) => (value === null || value === undefined ? "not stored" : value ? "on" : "off");
+    return el("div", { class: "pane" },
+      el("h2", { text: "The report" }),
+      Shell.facts([
+        ["File", report.file], ["Format", report.format], ["Made for", report.made_for],
+        ["Generated", report.generated], ["Saved (UTC)", report.saved_utc], ["DRC took", report.elapsed],
+        ["Board", data.pcb_doc], ["Board saved (UTC)", data.pcb_saved_utc],
+        ["Totals", valueText(data.totals)],
+        ["Stop after", settings.stop_after_violations === undefined ? null : `${settings.stop_after_violations} violations`],
+        ["Report file", data.drc_settings ? yesNo(settings.create_report_file) : null],
+        ["Health issues", data.drc_settings ? yesNo(settings.report_health_issues) : null],
+        ["Origin", view.origin ? `${view.origin.x}, ${view.origin.y} ${view.units} (locations are absolute)` : null],
+        ["Other reports", (data.other_reports || []).join(", ")],
+        ["Note", data.note], ["Grouping", data.grouping_note],
+        ["Trimmed", data.trimmed_to ? `get_drc_report gave ${data.trimmed_to} rows a page to fit its size limit` : null],
+      ], "facts section-gap"),
+      el("p", { class: "muted small", text: data.not_read }),
+      el("p", { class: "status", text: `Read in ${plural(view.pages, "call")} of get_drc_report${view.stopReason ? `; stopped: ${view.stopReason}` : ""}.` }));
+  }
+
+  function emptyBlock() {
+    const data = view.data;
+    const health = sum((data.health_issues || []).map((entry) => entry.count));
+    return Shell.state("empty", "No rule violations in this report",
+      `The report checked ${plural(data.rules_checked || 0, "rule")} and lists no violation` +
+      (health ? `; ${plural(health, "PCB health issue")} in their own tab.` : ".") +
+      " The assessment above says whether the report can be trusted.");
+  }
+
+  function renderTab() {
+    if (!ui.content) return;
+    clear(ui.content);
+    ui.table = null;
+    if (view.tab === "violations") {
+      if (view.regrouping) {
+        ui.content.appendChild(Shell.state("loading", `Grouping by ${view.regrouping}`, `Asking get_drc_report for its groups by ${view.regrouping}.`));
+        return;
+      }
+      const rows = tableRows();
+      if (!rows.length && !(view.data.totals || {}).rule_violations && !(view.data.groups || []).length) {
+        ui.content.appendChild(emptyBlock());
+        return;
+      }
+      // A rule the report counts but lists no row of has no row to group: named here.
+      const unlisted = view.rules.filter((rule) => !rule.count && rule.reported);
+      if (unlisted.length) {
+        ui.content.appendChild(Shell.notice("info", `The report counts violations it lists no row of: ${unlisted.slice(0, 5)
+          .map((rule) => `"${rule.rule}" ${rule.reported}`).join("; ")}${unlisted.length > 5 ? `; ${unlisted.length - 5} more` : ""}.`));
+      }
+      if (!view.complete && view.mode === "report") {
+        ui.content.appendChild(Shell.notice("warning", (view.groupBy === "component" || view.groupBy === "net") && view.serverGroups.has(view.groupBy)
+          ? `Up to 3 examples per ${view.groupBy}, with get_drc_report's counts: the view did not read every violation.`
+          : "Rules not read in full show the rows read before the stop, or the report summary's examples (up to 3), with the report's counts."));
+      }
+      ui.table = violationTable();
+    } else if (view.tab === "report") {
+      ui.content.appendChild(reportBlock());
+      return;
+    } else {
+      ui.table = sectionTable(Object.keys(TAB_OF_SECTION).find((section) => TAB_OF_SECTION[section] === view.tab));
+    }
+    ui.table.setQuery(view.query);
+    if (view.selected) ui.table.select((other) => other === view.selected);
+    ui.content.appendChild(ui.table.el);
+  }
+
+  function renderAll() {
+    const data = view.data;
+    ui.content = el("div", { class: "content" });
+    // Not a live region: the pane is rebuilt on each answer; Shell.announce says what changed.
+    ui.pane = el("aside", { class: "pane", "aria-label": "Details" });
+    const split = el("div", { class: "split" }, ui.content, ui.pane);
+    const filter = Shell.filterBox({
+      placeholder: "Filter rules, messages, components, nets", label: "Filter the DRC report", value: view.query,
+      onInput: (text) => {
+        view.query = text;
+        if (ui.table) ui.table.setQuery(text);
+      },
+    });
+    const switcher = Shell.segmented({
+      label: "Group by", current: view.groupBy, onChange: regroup,
+      items: GROUPINGS.map((item) => ({ ...item, disabled: !groupingReady(item.id),
+        title: groupingReady(item.id) ? item.title : groupingWhyNot(item.id) })),
+    });
+    const groupTools = el("span", { class: "toolbar" },
+      el("button", { type: "button", class: "btn", text: "Expand all", on: { click: () => ui.table && ui.table.expandAll() } }),
+      el("button", { type: "button", class: "btn", text: "Collapse all", on: { click: () => ui.table && ui.table.collapseAll() } }));
+    // The grouping: open where there is room, else behind a one-line disclosure.
+    if (view.filtersOpen === null) view.filtersOpen = Shell.roomy();
+    const tableTools = el("details", { class: "filters-box", open: view.filtersOpen },
+      el("summary", { text: "Group" }), el("div", { class: "toolbar" }, switcher.el, groupTools));
+    tableTools.addEventListener("toggle", () => { view.filtersOpen = tableTools.open; });
+    tableTools.hidden = view.tab !== "violations";
+    const sectionCount = (section) => sum((view.sections[section] || []).map((entry) => entry.count));
+    const tabBar = Shell.tabs([
+      { id: "violations", label: view.mode === "listing"
+        ? `Violations (${tableRows().length} listed)` : `Violations (${(data.totals || {}).rule_violations || 0})` },
+      { id: "health_issues", label: `Health (${sectionCount("health")})` },
+      { id: "waived", label: `Waived (${sectionCount("waived")})` },
+      { id: "warnings", label: `Report warnings (${sectionCount("warning")})` },
+      { id: "report", label: "Report" },
+    ], (id) => {
+      view.tab = id;
+      tableTools.hidden = id !== "violations";
+      if (view.selected) {
+        view.selected = null;
+        view.asked = [];
+      }
+      renderTab();
+      renderPane();
+    }, view.tab, split);
+    ui.tabBar = tabBar;
+    ui.displayButton = ui.displayButton || Shell.displayModeButton((error) => app.prepend(Shell.notice("error", error.message)));
+    const actions = el("span", { class: "toolbar" }, ui.displayButton,
+      canCall() ? el("button", { type: "button", class: "btn", text: "Refresh", title: "Call get_drc_report again", on: { click: refresh } }) : null);
+    const notices = [];
+    if (view.mode === "listing") {
+      notices.push(el("div", { class: "notice info" }, el("span", { class: "grow", text: `This result lists the violations of the rules matching "${view.args.rule || "the rule asked for"}".` }),
+        canCall() ? el("button", { type: "button", class: "btn-link", text: "Show the whole report", on: { click: () => reload({ ...unitArgs() }, "Reading the whole report") } }) : null));
+    }
+    if (view.stopReason) notices.push(Shell.notice("warning", `Not every violation was read: ${view.stopReason}.`));
+    if (!canCall()) {
+      notices.push(Shell.notice("info", "This host does not let the view call tools: the rows past each group's examples (and past a section table's first 20), other groupings, the board, part and net details and Refresh are off."));
+    }
+    if (view.warnings.length) notices.push(Shell.notice("warning", `The result is not quite the shape this view reads: ${view.warnings.slice(0, 3).join("; ")}.`));
+    clear(app).append(
+      headBlock(),
+      assessmentBlock(),
+      ...notices,
+      el("div", { class: "toolbar" }, filter, el("span", { class: "grow" }), actions),
+      tableTools,
+      tabBar.el,
+      split);
+    renderTab();
+    renderPane();
+  }
+
+  // ---------- host ----------
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && view.selected && !event.defaultPrevented) closeDetails();
+  });
+  Shell.on("toolInput", (args) => {
+    view.args = args || {};
+    view.argsKnown = true;
+    if (!view.data && !view.busy) showState("loading", "Reading the DRC report", "get_drc_report is reading Altium's last Batch DRC report.");
+  });
+  Shell.on("toolInputPartial", () => {
+    if (!view.data && !view.busy) showState("loading", "Reading the DRC report", "Waiting for the tool's arguments.");
+  });
+  Shell.on("toolResult", (result) => {
+    view.busy = true;
+    return loadResult(result);
+  });
+  Shell.on("toolCancelled", (reason) => {
+    if (!view.data) showState("info", "The get_drc_report call was cancelled", reason || "No result to show.");
+  });
+  Shell.on("teardown", () => {
+    view.closed = true;
+  });
+
+  showState("loading", "Connecting to the host", "");
+  Shell.connect({ name: "altium-copilot-kc DRC report", version: "1.0.0" })
+    .then(() => {
+      if (!view.data && !view.busy) showState("loading", "Waiting for get_drc_report", "The report appears when the tool's result arrives.");
+    })
+    .catch((error) => showState("error", "This view needs a host that shows MCP Apps", error.message));
+})();
+</script>
+</body>
+</html>

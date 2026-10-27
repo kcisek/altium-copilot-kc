@@ -7075,7 +7075,8 @@ def _offline_erc_summary(project: dict) -> dict | None:
 @mcp.tool(
     title="Run ERC",
     annotations=ToolAnnotations(readOnlyHint=True),
-    meta={"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS},
+    meta=ui_views.link_meta("run_erc",
+                            {"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS}),
 )
 def run_erc(
     checks: list[str] | None = None,
@@ -8301,7 +8302,8 @@ DRC_NOT_READ = (
 @mcp.tool(
     title="Get DRC Report",
     annotations=ToolAnnotations(readOnlyHint=True),
-    meta={"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS},
+    meta=ui_views.link_meta("get_drc_report",
+                            {"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS}),
 )
 def get_drc_report(
     group_by: Literal["rule", "component", "net", "part"] = "rule",
