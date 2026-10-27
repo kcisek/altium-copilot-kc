@@ -465,13 +465,13 @@ def test_spacing_leaves_out_the_parts_asked_and_parts_off_the_board():
 
 def test_overlap_of_outlines():
     square = _rect(0, 0, 10, 10)
-    assert assembly._overlap(square, _rect(5, 0, 15, 10))  # half over it, corners on edges
-    assert assembly._overlap(square, list(square))  # the same outline
-    assert not assembly._overlap(square, _rect(10, 0, 20, 10))  # sharing an edge
-    assert assembly._overlap(_rect(0, 4, 20, 6), _rect(9, -5, 11, 15))  # a cross
+    assert assembly.outlines_overlap(square, _rect(5, 0, 15, 10))  # half over it, corners on edges
+    assert assembly.outlines_overlap(square, list(square))  # the same outline
+    assert not assembly.outlines_overlap(square, _rect(10, 0, 20, 10))  # sharing an edge
+    assert assembly.outlines_overlap(_rect(0, 4, 20, 6), _rect(9, -5, 11, 15))  # a cross
     concave = [(0, 0), (30, 0), (30, 30), (20, 30), (20, 10), (10, 10), (10, 30), (0, 30)]
-    assert assembly._overlap(concave, _rect(2, 2, 8, 8))
-    assert not assembly._overlap(concave, _rect(12, 12, 18, 28))  # in the notch
+    assert assembly.outlines_overlap(concave, _rect(2, 2, 8, 8))
+    assert not assembly.outlines_overlap(concave, _rect(12, 12, 18, 28))  # in the notch
 
 
 # ---------- part to edge ----------

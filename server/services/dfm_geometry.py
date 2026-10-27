@@ -222,7 +222,7 @@ class GapRecord:
         chord), past each one's copper; one point twice when they touch (where first's
         copper meets second's). Their midpoint is where the gap is."""
         first, second = self._geometries
-        distance, on_first, on_second = _nearest_true_cores(first, second)
+        distance, on_first, on_second = nearest_true_cores(first, second)
         if distance == 0.0:
             return on_first, on_first
         if self.gap_mil <= 0.0:
@@ -638,7 +638,7 @@ def _true_core(geometry) -> list[tuple]:
     return [arc] if arc is not None and geometry[2] is None else _core(geometry)
 
 
-def _nearest_true_cores(first, second) -> tuple[float, tuple, tuple]:
+def nearest_true_cores(first, second) -> tuple[float, tuple, tuple]:
     """_nearest_cores on the true arcs."""
     return min(
         (_closest_pieces(a, b) for a in _true_core(first) for b in _true_core(second)),

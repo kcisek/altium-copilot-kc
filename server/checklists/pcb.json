@@ -90,8 +90,16 @@
       }
     },
     {
-      "id": "PCB-PLC-07", "section": "placement", "kind": "judgment",
-      "text": "Connectors, switches, LEDs and mounting holes line up with the enclosure, and tall parts clear it."
+      "id": "PCB-PLC-07", "section": "placement", "kind": "assisted",
+      "text": "Connectors, switches, LEDs and mounting holes line up with the enclosure, and tall parts clear it.",
+      "evidence": {
+        "tool": "check_mechanical_fit", "args": {},
+        "na": [{"path": "pcb_doc", "op": "missing", "label": "no PcbDoc"}],
+        "no": [{"list": "findings", "where": {"check": ["height_over_limit", "height_under_min", "part_in_keepout"], "severity": "warning"}, "label": "parts over a height limit or in a keepout"}],
+        "judge": [{"list": "findings", "where": {"check": ["missing_3d_body", "mounting_hole_clearance", "hole_near_edge", "tall_part_on_probe_side"]}, "label": "parts without 3D bodies, crowded mounting holes or tall parts on the probe side"}],
+        "yes": [{"path": "summary.parts_with_height_limit", "op": ">", "value": 0, "label": "parts under a real height limit (yours, a region, a drawing note, a non-default Height rule)"}]
+      },
+      "hint": "Give the enclosure's limits (check_mechanical_fit height_limit_top / height_limit_bottom, regions=) and send the outline, holes and connectors to the mechanical engineer (get_mechanical_handoff)."
     },
     {
       "id": "PCB-PLC-08", "section": "placement", "kind": "judgment",

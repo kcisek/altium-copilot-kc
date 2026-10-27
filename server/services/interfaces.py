@@ -846,6 +846,20 @@ def _config_targets(ctx: _Context, connector: _Connector) -> list[str]:
     return list(dict.fromkeys(targets))
 
 
+def text_exposure(text: str) -> tuple[str | None, list[str]]:
+    """(exposure, labels) a connector's text alone gives: external (USB, RJ45, D-Sub,
+    terminal block, jack, coax ...) or internal (board-to-board, FPC, debug header, card
+    edge ...) with the labels found; (None, labels of both) when it names both, (None,
+    []) when it names neither."""
+    external = [label for label, pattern in _EXTERNAL_RE if pattern.search(text)]
+    internal = [label for label, pattern in _INTERNAL_RE if pattern.search(text)]
+    if external and not internal:
+        return "external", external
+    if internal and not external:
+        return "internal", internal
+    return None, external + internal
+
+
 def _exposure(ctx: _Context, connector: _Connector, override: str | None) -> None:
     text = ctx.text.get(connector.ref, "")
     signals = connector.signal_pins()
@@ -859,18 +873,13 @@ def _exposure(ctx: _Context, connector: _Connector, override: str | None) -> Non
     if override:
         connector.exposure, connector.basis = override, ["given by the caller"]
         return
-    external = [label for label, pattern in _EXTERNAL_RE if pattern.search(text)]
-    internal = [label for label, pattern in _INTERNAL_RE if pattern.search(text)]
-    if external and not internal:
-        connector.exposure, connector.basis = "external", [f"text: {label}" for label in external]
-        return
-    if internal and not external:
-        connector.exposure, connector.basis = "internal", [f"text: {label}" for label in internal]
-        return
-    if external and internal:
-        connector.basis = [*(f"text: {label}" for label in external),
-                           *(f"text: {label}" for label in internal)]
-        connector.basis.append("both user-facing and board-level words")
+    exposure, labels = text_exposure(text)
+    if labels:
+        connector.basis = [f"text: {label}" for label in labels]
+        if exposure is None:
+            connector.basis.append("both user-facing and board-level words")
+        else:
+            connector.exposure = exposure
         return
     if connector.module_port:
         connector.exposure, connector.basis = "external", [

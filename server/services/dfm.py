@@ -247,6 +247,27 @@ class AssemblyContext:
         return (self.variant, self.dnp_key, self.unique_parts, self.netlist_free)
 
 
+def stack_total_thickness(layers, substack: str | None = None) -> float | None:
+    """The board's thickness from its layer stack (mil): every stack layer's copper or
+    dielectric height, solder mask and coverlay layers included; None when a stack layer
+    has no height (or there is none). substack (a layer stack id, upper case) counts only
+    the layers that stack holds (PcbLayer.substacks; None when a layer does not say)."""
+    total = 0.0
+    for layer in layers:
+        if layer.stack_order is None or layer.kind == "non-stack":
+            continue
+        if substack is not None:
+            if layer.substacks is None:
+                return None
+            if substack not in layer.substacks:
+                continue
+        height = layer.copper_thick_mil if layer.kind == "copper" else layer.diel_height_mil
+        if height is None:
+            return None
+        total += height
+    return total or None
+
+
 def _round(value, digits: int = 4):
     return None if value is None else round(value, digits)
 
@@ -2991,15 +3012,7 @@ class _Review:
             "copper_layers": len(stack.order),
             "stack_thickness_mil": _round(stack.thickness_mil, 2),
         }
-        total = 0.0
-        for layer in self.pcb.board.layers:
-            if layer.stack_order is None or layer.kind == "non-stack":
-                continue
-            height = layer.copper_thick_mil if layer.kind == "copper" else layer.diel_height_mil
-            if height is None:
-                total = None
-                break
-            total += height
+        total = stack_total_thickness(self.pcb.board.layers)
         board["total_thickness_mil"] = _round(total, 2) if total else None
         box = self.outline_box()
         board["size_mil"] = [_round(box[2] - box[0]), _round(box[3] - box[1])] if box else None

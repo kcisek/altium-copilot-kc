@@ -446,9 +446,50 @@ def _pour_copper_call(node, names) -> tuple:
     return _FALSE
 
 
+_UNDECIDED_COMPONENT = {"isbga", "islcc", "issoic"}
+
+
+def _component_call(node, obj: ObjectFacts, ctx: RuleContext) -> tuple | None:
+    """A predicate on a component object (kind "component": layer 1 or 32 for its side,
+    points the corners of its extent, hole its largest pad hole), for the placement
+    rules (Height, ComponentClearance) that select components. None: decided as for
+    other objects (InComponent, HasFootprint, OnTopLayer ...)."""
+    name, args = node[1], node[2]
+    if name == "iscomponent":
+        return _TRUE
+    if name in ("isthrucomponent", "issmtcomponent"):
+        # A part with any hole in its pads is a through-hole component here.
+        through = obj.hole > 0
+        return _TRUE if through == (name == "isthrucomponent") else _FALSE
+    if name in _UNDECIDED_COMPONENT:
+        return _unknown(node)
+    if name in _COMPONENT_ONLY or name in _OBJECT_TYPES or name in _POLYGON_ONLY \
+            or name == "isfree":
+        return _FALSE
+    if name in ("withinroom", "inroom", "touchesroom"):
+        shapes = [vertices for room, vertices in ctx.room_shapes.items()
+                  if _any_matches(args, {room})]
+        if not shapes:
+            return _FALSE if args and not _any_matches(args, ctx.rooms) else _unknown(node)
+        if not obj.points:
+            return _unknown(node)
+        if name == "touchesroom":
+            hit = any(point_in_polygon(x, y, vertices)
+                      for vertices in shapes for x, y in obj.points)
+        else:  # the whole extent inside the room
+            hit = any(all(point_in_polygon(x, y, vertices) for x, y in obj.points)
+                      for vertices in shapes)
+        return _TRUE if hit else _FALSE
+    return None
+
+
 def _eval_object_call(node, obj: ObjectFacts, ctx: RuleContext) -> tuple | None:
     """Decide an object predicate for one object; None if not an object term."""
     name, args = node[1], node[2]
+    if obj.kind == "component":
+        decided = _component_call(node, obj, ctx)
+        if decided is not None:
+            return decided
     if name in _OBJECT_TYPES:
         if name in ("isvia", "ispad", "istrack", "isarc"):
             return _TRUE if obj.kind == name[2:] else _FALSE
@@ -725,6 +766,15 @@ def _eval_cmp(node, target: RuleTarget) -> tuple:
         if operator == "<>":
             return _FALSE if matched else _TRUE
         return _TRUE if matched else _FALSE
+    if obj is not None and obj.kind == "component" and prop in ("name", "designator") \
+            and node[2] in ("=", "like", "<>"):
+        # A component's Name is its designator.
+        matched = bool(obj.component) and _wildcard_matches(str(node[3]), obj.component)
+        if node[2] == "<>":
+            return _FALSE if matched else _TRUE
+        return _TRUE if matched else _FALSE
+    if obj is not None and obj.kind == "component" and prop == "comppincount":
+        return _unknown(node)
     if obj is not None and prop == "name" and node[2] in ("=", "like", "<>"):
         # A pad's Name is "<designator>-<pad>"; other routed objects have none.
         matched = bool(obj.pad) and _wildcard_matches(str(node[3]), obj.pad)

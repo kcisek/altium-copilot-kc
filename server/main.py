@@ -41,6 +41,11 @@ try:
     from services.diff_pair_geometry import (
         prepare_diff_pair_geometry_cached, render_diff_pair_geometry,
     )
+    from services.mechanical_fit import (
+        export_rows as mechanical_export_rows,
+        parse_sections as parse_mechanical_sections, prepare_handoff,
+        prepare_mechanical_fit_cached, render_handoff, render_mechanical_fit, write_drawings,
+    )
     from services.constraints_review import build_constraints_review
     from services.impedance import (
         PROPAGATION_UNIT_NOTE, impedance_profiles, profile_refs,
@@ -129,7 +134,7 @@ try:
         unvalidated as unvalidated_variant_rows, view_of as variant_view,
     )
     from services.fab_drawing import (
-        board_facts as fab_board_facts, build_fab_drawing, page_fab_drawing,
+        board_facts as fab_board_facts, build_fab_drawing, note_lines, page_fab_drawing,
     )
     from services.design_diff import (
         DiffError, diff_folders, diff_revisions, page_design_diff,
@@ -140,7 +145,8 @@ try:
         page_verify_outputs, run_verify_outputs,
     )
     from services.libraries import (
-        ItemLoader, LibraryCheckInputs, LibraryResolver, installed_libraries, library_part,
+        ItemLoader, LibraryCheckInputs, LibraryResolver, footprint_body_heights,
+        installed_libraries, library_part,
         page_library_checks, page_library_part, project_files, project_libraries,
         registry_projects, run_library_checks,
     )
@@ -187,6 +193,11 @@ except ImportError:
     from server.services.diff_pair_checks import check_diff_pairs as run_diff_pair_checks
     from server.services.diff_pair_geometry import (
         prepare_diff_pair_geometry_cached, render_diff_pair_geometry,
+    )
+    from server.services.mechanical_fit import (
+        export_rows as mechanical_export_rows,
+        parse_sections as parse_mechanical_sections, prepare_handoff,
+        prepare_mechanical_fit_cached, render_handoff, render_mechanical_fit, write_drawings,
     )
     from server.services.constraints_review import build_constraints_review
     from server.services.impedance import (
@@ -278,7 +289,7 @@ except ImportError:
         unvalidated as unvalidated_variant_rows, view_of as variant_view,
     )
     from server.services.fab_drawing import (
-        board_facts as fab_board_facts, build_fab_drawing, page_fab_drawing,
+        board_facts as fab_board_facts, build_fab_drawing, note_lines, page_fab_drawing,
     )
     from server.services.design_diff import (
         DiffError, diff_folders, diff_revisions, page_design_diff,
@@ -289,7 +300,8 @@ except ImportError:
         page_verify_outputs, run_verify_outputs,
     )
     from server.services.libraries import (
-        ItemLoader, LibraryCheckInputs, LibraryResolver, installed_libraries, library_part,
+        ItemLoader, LibraryCheckInputs, LibraryResolver, footprint_body_heights,
+        installed_libraries, library_part,
         page_library_checks, page_library_part, project_files, project_libraries,
         registry_projects, run_library_checks,
     )
@@ -948,6 +960,21 @@ component locations, distances):
     Pairs marked inferred are only named as pairs (no rule applies). Page the pairs rows
     with pairs_offset. Altium's DRC checks widths and uncoupled length; the gap stretches
     are this tool's own screen.
+28. check_mechanical_fit — "will this board fit the enclosure?", "how tall is the tallest
+    part on the bottom?", "is anything over 3 mm under the lid?", "is there room for an M3
+    washer at the mounting holes?", "are tall parts on the ICT side?": each part's height
+    (3D body, else footprint Height, else library body; parts with no body are
+    missing_3d_body), Height rules, the user's limits (height_limit_top / _bottom, regions)
+    and a Draftsman note's limit, keepout overlaps, mounting holes with the free radius
+    around each (against the screw's ISO head and washer: info by default, a warning with
+    screw_head_diameter / washer_diameter), holes near the edge, tall parts on the probe
+    side, and connectors with their board edge, offset, overhang and facing. Ask for the
+    enclosure's limits when the user has them; quote limit sources.
+29. get_mechanical_handoff — "export the outline for the mechanical engineer", "where are
+    the mounting holes and connectors?", "give me a DXF of the board": outline with
+    cutouts, thickness, mounting holes, connectors, keepout and room regions, rigid-flex
+    regions, per-side summaries and part heights; DXF (R12) and SVG only when the user
+    names an output_dir. Plan view only: not a STEP or IDX replacement.
 
 get_board_info lists the stack manager's impedance profiles: target, solved width/gap and
 calculated impedance per layer, reference layers, the rules using each, and issues. Quote
@@ -5364,6 +5391,282 @@ def check_diff_pair_geometry(
     return rendered
 
 
+# ---------- mechanical fit and handoff ----------
+
+MECH_REGIONS_SCHEMA = {
+    "anyOf": [
+        {"type": "array", "items": {"type": "object", "properties": {
+            "name": {"type": "string"},
+            "polygon": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
+            "rect": {"type": "array", "items": {"type": "number"}},
+            "side": {"type": "string", "enum": ["top", "bottom", "both"]},
+            "max_height": {"type": "number"},
+            "keepout": {"type": "boolean"},
+        }}},
+        {"type": "null"},
+    ],
+}
+# (findings, part rows, connectors, regions, holes) per page, tried in turn until it fits.
+MECHANICAL_FIT_STEPS = ((100, 100, 60, 40, 40), (60, 50, 30, 20, 20), (40, 25, 20, 10, 10),
+                        (20, 10, 10, 5, 5), (10, 5, 5, 3, 3), (5, 2, 3, 2, 2), (2, 1, 1, 1, 1),
+                        (1, 0, 0, 0, 0))
+# (part rows, connectors, regions, holes, polygons) of a handoff page.
+MECHANICAL_HANDOFF_STEPS = ((100, 60, 40, 40, True), (50, 30, 20, 20, True),
+                            (25, 20, 10, 10, True), (10, 10, 5, 5, False),
+                            (5, 5, 3, 3, False), (0, 0, 0, 0, False))
+MECH_MAX_LENGTH_MIL = 1000.0 / 0.0254  # 1 m
+_MECH_LIBRARY_PARTS = 300  # parts without any height looked up in the libraries at most
+
+
+def _mechanical_lengths(resolved: str, **values) -> tuple[dict, dict | None]:
+    """{name: mil} of the lengths given (non-negative, at most 1 m), or an error."""
+    lengths = {}
+    for name, value in values.items():
+        if value is None:
+            continue
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or \
+                not _finite_nonnegative(float(value)) or \
+                _input_to_mil(float(value), resolved) > MECH_MAX_LENGTH_MIL:
+            return {}, {"error": f"invalid_{name}",
+                        "message": f"{name} must be a length of 0 or more in {resolved} "
+                                   "(at most 1 m)."}
+        lengths[name] = _input_to_mil(float(value), resolved)
+    return lengths, None
+
+
+def _mechanical_inputs(project: dict, netlist: dict | None, variant_state, index,
+                       notes: bool = True) -> dict:
+    """What the mechanical services read beyond the PcbDoc: the variant's Not Fitted
+    test, the netlist's part texts (connector kinds), the library footprints' bodies of
+    parts with no height on the board, and the Draftsman documents' note lines."""
+    is_dnp = variant_state.is_dnp if variant_state is not None else None
+    texts: dict[int, str] = {}
+    components = (netlist or {}).get("components") or {}
+    if components:
+        for row in index.db.execute("SELECT id, sch_refdes FROM components"):
+            meta = components.get(row["sch_refdes"]) if row["sch_refdes"] else None
+            if not meta:
+                continue
+            board = index.pcb.components[row["id"]]
+            texts[row["id"]] = " ".join(str(part) for part in (
+                meta.get("description"), meta.get("value"), meta.get("lib_reference"),
+                meta.get("mpn"), board.comment, board.footprint) if part)
+    library_heights = index.__dict__.get("_mechanical_library_heights")
+    if library_heights is None:
+        library_heights = {}
+        bodies = {body.component for body in index.pcb.bodies or ()
+                  if body.component is not None and (body.overall_height_mil or 0.0) > 0}
+        wanted = [component for component in index.pcb.components
+                  if component.index not in bodies and not (component.height_mil or 0.0) > 0
+                  and component.kind not in (2, 3, 4) and component.footprint]
+        if wanted and project.get("prj_pcb_path"):
+            try:
+                libraries = project_libraries(project["prj_pcb_path"],
+                                              installed=_installed_libraries())
+                library_heights = footprint_body_heights(wanted[:_MECH_LIBRARY_PARTS], libraries)
+            except Exception as error:  # the libraries are an extra source, never a failure
+                logging.warning("library bodies not read for the mechanical check: %s", error)
+        index.__dict__["_mechanical_library_heights"] = library_heights
+    documents = []
+    for path in (project.get("pcb_dwf_paths") or []) if notes else []:
+        try:
+            if Path(path).is_file():
+                documents.append((Path(path).name, note_lines(_design_notes.draftsman(path))))
+        except Exception as error:  # an unreadable drawing gives no limit
+            logging.warning("Draftsman document not read for the mechanical check: %s", error)
+    return {"is_dnp": is_dnp, "texts": texts, "library_heights": library_heights,
+            "note_documents": documents}
+
+
+def _mechanical_context(project: dict, resolved: str) -> dict:
+    paths = project.get("pcb_doc_paths") or []
+    context: dict = {"units": resolved}
+    if paths:
+        context["pcb_doc"] = Path(paths[0]).name
+        if len(paths) > 1:
+            context["note"] = f"Project lists {len(paths)} PcbDocs; checked '{Path(paths[0]).name}'."
+    return context
+
+
+@mcp.tool(
+    title="Check Mechanical Fit",
+    annotations=ToolAnnotations(readOnlyHint=True),
+    meta={"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS},
+)
+def check_mechanical_fit(
+    height_limit_top: float | None = None,
+    height_limit_bottom: float | None = None,
+    regions: Annotated[Any, WithJsonSchema(MECH_REGIONS_SCHEMA)] = None,
+    probe_side: Literal["top", "bottom", "both"] | None = None,
+    tall_part_height: float | None = None,
+    screw_head_diameter: float | None = None,
+    washer_diameter: float | None = None,
+    clearance_margin: float | None = None,
+    checks: list[str] | None = None,
+    side: Literal["top", "bottom"] | None = None,
+    units: PcbUnits | None = None,
+    offset: int = 0,
+    parts_offset: int = 0,
+) -> str:
+    """Mechanical fit of the saved PcbDoc, offline: "will it fit the enclosure?", "what is
+    the tallest part on each side?", "is anything over 3 mm under the lid?", "which parts
+    have no 3D model?", "is there room for the screw heads at the mounting holes?", "are
+    tall parts on the ICT probe side?", "how far do the connectors stick out?".
+
+    Heights: each part's tallest 3D body on its side (overall height, standoff, model),
+    else the footprint's Height, else its library footprint's body (height_source body,
+    footprint_height, library_body, none); parts with no body are missing_3d_body (info;
+    a warning when nothing gives a height and a limit applies; card-edge fingers and
+    fiducials need none). Not Fitted parts of the active variant are listed apart (their
+    mounting holes stay, fitted false). Limits, the tightest applying: height_limit_top /
+    height_limit_bottom; regions ([{name, polygon: [[x, y], ...] or rect: [x1, y1, x2,
+    y2], side: top|bottom|both, max_height, keepout}] in units relative to the board
+    origin; max_height 0 or keepout true: no parts); free 3D bodies (an enclosure part
+    placed on the board: its standoff is the limit); Altium's Height rules (the rule that
+    applies to each part, as Altium decides it); a maximum component height stated in the
+    project's Draftsman notes (only when they agree; quoted; a note for one place is quoted
+    in limits.draftsman_local_notes, not applied). Findings: height_over_limit and
+    height_under_min (warning, with the limit's source and the margin), part_in_keepout
+    (a body or courtyard over a no-parts region, warning); summary.parts_with_height_limit
+    counts the parts a real limit applies to (0: nothing says the board fits).
+
+    Mounting holes (free pads and bare holes of 1.5 mm or more, mounting-hole parts):
+    drill, plated, net, pad, the metric screw that fits, and the free radius per face to
+    the nearest copper of another net, other part's body or the board edge (limited_by;
+    exposed_free_radius to parts and pads or untented vias only; own_net_copper apart;
+    pad-less parts covering the hole are its hardware). mounting_hole_clearance: a part or
+    exposed copper inside half the larger of the head and washer plus clearance_margin
+    (defaults: the screw's ISO 7045 pan head and ISO 7089 washer, margin 0.5 mm: info;
+    screw_head_diameter / washer_diameter given: warning, without a washer when only the
+    head is given); copper under the solder mask only is one grouped info finding.
+    hole_near_edge: the wall closer to the edge than the board thickness, at most 1 mm
+    (info; half of it: warning); a hole in a board cutout is off_board. ICT: the probe
+    side from the test points (or probe_side); parts at least tall_part_height (5 mm) tall
+    on it are tall_part_on_probe_side (info; warning with probe_side) with the probe
+    points within 5 mm. connectors: edge (left/right/top/bottom of the outline, outline,
+    cutout),
+    edge_offset_mil (negative: overhang), body and pad distances to it, overhang_mil and
+    facing (+X, -Y ...) when at an edge. regions lists rooms, keepouts and the user's with
+    their tallest part; summary.sides the tallest parts, height classes and area used.
+
+    checks narrows the findings (aliases heights, keepout, holes, ict); side narrows
+    findings, parts and connectors to one side. Lengths in units (default: board display
+    unit), locations relative to origin_mil. Findings page with offset (next_offset), part
+    rows (tallest first) with parts_offset (next_parts_offset)."""
+    index, error = _pcb_index_or_error()
+    if error:
+        return json.dumps(error)
+    to_mm, resolved, units_error = _pcb_units_or_error(index, units)
+    if units_error:
+        return json.dumps(units_error)
+    lengths, error = _mechanical_lengths(
+        resolved, height_limit_top=height_limit_top, height_limit_bottom=height_limit_bottom,
+        tall_part_height=tall_part_height, screw_head_diameter=screw_head_diameter,
+        washer_diameter=washer_diameter, clearance_margin=clearance_margin)
+    if error:
+        return json.dumps(error)
+    project, netlist, variant_state = _require_project(netlist=False)
+    inputs = _mechanical_inputs(project, netlist, variant_state, index)
+    prepared = prepare_mechanical_fit_cached(
+        index, **inputs, height_limit_top_mil=lengths.get("height_limit_top"),
+        height_limit_bottom_mil=lengths.get("height_limit_bottom"), regions=regions,
+        probe_side=probe_side, tall_part_height_mil=lengths.get("tall_part_height"),
+        screw_head_mil=lengths.get("screw_head_diameter"),
+        washer_mil=lengths.get("washer_diameter"), margin_mil=lengths.get("clearance_margin"),
+        checks=checks, units=resolved)
+    if "error" in prepared:
+        return json.dumps(prepared)
+    context = _mechanical_context(project, resolved)
+    for limit, parts_limit, connectors, regions_limit, holes in MECHANICAL_FIT_STEPS:
+        result = _convert_units({**context, **render_mechanical_fit(
+            prepared, offset=offset, limit=limit, parts_offset=parts_offset,
+            parts_limit=parts_limit, connectors_limit=connectors, regions_limit=regions_limit,
+            holes_limit=holes, side=side)}, to_mm)
+        if limit != MECHANICAL_FIT_STEPS[0][0]:
+            result["page_limited_to"] = limit
+        rendered = json.dumps(result, indent=2)
+        if len(rendered) <= QUERY_NET_MAX_RESULT_SIZE_CHARS:
+            break
+    return rendered
+
+
+@mcp.tool(
+    title="Get Mechanical Handoff",
+    # It writes the drawings only into the folder the user names, never over a file.
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
+    meta={"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS},
+)
+def get_mechanical_handoff(
+    sections: list[str] | None = None,
+    output_dir: str | None = None,
+    formats: list[Literal["dxf", "svg"]] | None = None,
+    units: PcbUnits | None = None,
+    parts_offset: int = 0,
+) -> str:
+    """The board for the mechanical engineer, offline from the saved PcbDoc: "export the
+    outline for mechanical", "where are the mounting holes and connectors?", "give me a
+    DXF of the board outline", "what is the board thickness?". Sections (all by default,
+    or sections=[...]): board (thickness from the layer stack, a rigid-flex board's
+    rigid one; size, extent, area, copper layers), outline (polygon_mil and cutouts with
+    arcs as chords), mounting_holes (as check_mechanical_fit: drill, plated, net, screw,
+    free radius, edge distance), connectors (position, rotation, side, edge, edge offset,
+    overhang, facing, kind), regions (Keep-Out layer and copper keepout areas, rooms, free
+    3D bodies, named mechanical-layer areas, with polygons), rigid_flex (layer stacks and
+    board regions with flex, thickness, bending lines and polygons), sides (per side:
+    parts, tallest, height
+    classes, area used and its share of the board) and parts (every fitted part's height,
+    source, standoff, extent; tallest first per side; page with parts_offset).
+
+    output_dir (an existing folder the user names; nothing is written without it)
+    receives <PcbDoc>-mechanical.dxf (AutoCAD R12 ASCII, mm, layers OUTLINE, CUTOUTS,
+    HOLES, CONNECTORS, KEEPOUTS, ROOMS, BOARD_REGIONS, PARTS_TOP, PARTS_BOTTOM, LABELS) and
+    .svg (mm), or the formats asked; an existing file of that name is kept and the new
+    one numbered (-mechanical-2.dxf).
+    Coordinates are relative to the board origin (origin_mil), viewed from the top. Plan
+    view only: not a STEP or IDF / IDX replacement."""
+    index, error = _pcb_index_or_error()
+    if error:
+        return json.dumps(error)
+    to_mm, resolved, units_error = _pcb_units_or_error(index, units)
+    if units_error:
+        return json.dumps(units_error)
+    chosen, error = parse_mechanical_sections(sections)
+    if error:
+        return json.dumps(error)
+    if output_dir is not None and not Path(output_dir).is_dir():
+        return json.dumps({"error": "output_dir_not_found",
+                           "message": f"output_dir '{output_dir}' is not an existing folder."})
+    project, netlist, variant_state = _require_project(netlist=False)
+    inputs = _mechanical_inputs(project, netlist, variant_state, index, notes=False)
+    handoff = prepare_handoff(index, is_dnp=inputs["is_dnp"], texts=inputs["texts"],
+                              library_heights=inputs["library_heights"])
+    context = _mechanical_context(project, resolved)
+    if output_dir is not None:
+        paths = project.get("pcb_doc_paths") or []
+        stem = Path(paths[0]).stem if paths else project.get("name") or "board"
+        try:
+            context["drawings"] = write_drawings(handoff, output_dir, stem,
+                                                 tuple(dict.fromkeys(formats or ("dxf", "svg"))))
+        except OSError as error:
+            return json.dumps({"error": "write_failed",
+                               "message": f"The drawings could not be written: {error}"})
+        context["drawings_units"] = "mm, relative to the board origin"
+    for parts_limit, connectors, regions_limit, holes, polygons in MECHANICAL_HANDOFF_STEPS:
+        result = _convert_units({**context, **render_handoff(
+            handoff, chosen, parts_offset=parts_offset, parts_limit=parts_limit,
+            connectors_limit=connectors, regions_limit=regions_limit, holes_limit=holes,
+            polygons=polygons)}, to_mm)
+        if parts_limit != MECHANICAL_HANDOFF_STEPS[0][0]:
+            result["page_limited_to"] = parts_limit
+        if not polygons:
+            result["polygons_omitted"] = ("too large for one answer: ask for the outline or "
+                                          "regions section alone, or write the DXF/SVG")
+        rendered = json.dumps(result, indent=2)
+        if len(rendered) <= QUERY_NET_MAX_RESULT_SIZE_CHARS:
+            break
+    return rendered
+
+
 @mcp.tool(
     title="Check Pull Resistors",
     annotations=ToolAnnotations(readOnlyHint=True),
@@ -8779,12 +9082,29 @@ def _firmware_rows(project: dict, netlist: dict, variant_state) -> tuple[list[di
         return [], f"{type(error).__name__}: {error}"
 
 
+def _mechanical_rows(project: dict, netlist: dict, variant_state,
+                     index) -> tuple[dict | None, str | None]:
+    """The mech_* tables' rows of the snapshot (get_mechanical_handoff of the PcbDoc), and
+    why not when they could not be built (the snapshot is written either way)."""
+    try:
+        inputs = _mechanical_inputs(project, netlist, variant_state, index, notes=False)
+        handoff = prepare_handoff(index, is_dnp=inputs["is_dnp"], texts=inputs["texts"],
+                                  library_heights=inputs["library_heights"])
+        paths = project.get("pcb_doc_paths") or []
+        return mechanical_export_rows(handoff, Path(paths[0]).name if paths else None), None
+    except Exception as error:  # the handoff must never block the snapshot
+        logging.warning("Mechanical tables not built for the snapshot: %s", error)
+        return None, f"{type(error).__name__}: {error}"
+
+
 def _package_for_xfn_impl(
     project: dict,
     netlist: dict,
     variant_state,
     version: str,
     notes_cache: DesignNotesCache | None = None,
+    pcb_index=None,
+    pcb_error: str | None = None,
 ) -> str:
     # Never ship a hollow snapshot: nets present but no component metadata.
     no_components = netlist.get("pin_to_net") and _no_components_error(netlist)
@@ -8797,9 +9117,13 @@ def _package_for_xfn_impl(
     except Exception as error:  # never block the snapshot
         logging.warning("Variant variations not exported: %s", error)
         variations = []
+    mechanical, mechanical_error = (None, pcb_error)
+    if pcb_index is not None:
+        mechanical, mechanical_error = _mechanical_rows(project, netlist, variant_state,
+                                                        pcb_index)
     try:
         db_path = export_project(project, netlist, variant_state, version, notes, firmware,
-                                 variations)
+                                 variations, mechanical)
     except Exception as e:
         return json.dumps({"error": "export_failed", "message": str(e)})
     prj_pcb_name = Path(project["prj_pcb_path"]).name
@@ -8823,6 +9147,17 @@ def _package_for_xfn_impl(
         incomplete_warning += (
             f"\nWarning: the firmware pin map could not be built ({firmware_error}); the "
             "firmware_pins table is empty.")
+    if mechanical:
+        incomplete_warning += (
+            f"\nMechanical handoff: the board outline, {len(mechanical['mech_mounting_holes'])} "
+            f"mounting holes, {len(mechanical['mech_connectors'])} connectors, "
+            f"{len(mechanical['mech_regions'])} regions and {len(mechanical['mech_parts'])} "
+            "part heights in the mech_* tables (mm, relative to the board origin; plan view, "
+            "not a STEP or IDX replacement).")
+    elif mechanical_error:
+        incomplete_warning += (
+            f"\nWarning: the mechanical tables could not be built ({mechanical_error}); the "
+            "mech_* tables are empty.")
     if _offline(netlist):
         incomplete_warning += (
             "\nNote: the nets in this snapshot were compiled offline by the copilot from the "
@@ -8859,10 +9194,16 @@ def package_for_xfn() -> str:
     or export the project for sharing with firmware, mechanical, test, or reliability
     engineers. Do not call speculatively. The snapshot holds sheets, variants (and their
     varied parameters and alternate parts: variant_variations), components,
-    nets, pins, design notes and the firmware pin map (firmware_pins: pin, name, port, bit,
+    nets, pins, design notes, the firmware pin map (firmware_pins: pin, name, port, bit,
     net, function, role, pull, the parts each pin reaches; a heuristic) of each fitted MCU,
     radio or module candidate of get_firmware_pin_map in the active variant (at most four,
-    else its top candidate)."""
+    else its top candidate) and, with a PcbDoc, the mechanical handoff of
+    get_mechanical_handoff for the active variant (mm, relative to the board origin):
+    mech_board (thickness, size, area, per-side summaries), mech_outline (outline, cutouts,
+    rigid-flex board regions), mech_mounting_holes (drill, plated, net, screw, free
+    radius, fitted), mech_connectors (position, rotation, side, edge, offset, overhang, facing),
+    mech_regions (keepouts, rooms, free 3D bodies) and mech_parts (each part's height and
+    source, standoff and extent; Not Fitted parts with fitted 0)."""
     try:
         project, netlist, variant_state = _require_project()
     except ProjectNotReady as e:
@@ -8872,7 +9213,13 @@ def package_for_xfn() -> str:
             "error": "no_project",
             "message": "No project loaded. Ask the user to open a project in Altium first.",
         })
-    return _package_for_xfn_impl(project, netlist, variant_state, _read_version(), _design_notes)
+    pcb_index, pcb_error = None, None
+    if project.get("pcb_doc_paths"):
+        pcb_index, error = _pcb_session.get(project, netlist)
+        if pcb_index is None:
+            pcb_error = (error or {}).get("message") or "the PcbDoc could not be read"
+    return _package_for_xfn_impl(project, netlist, variant_state, _read_version(), _design_notes,
+                                 pcb_index, pcb_error)
 
 
 # ---------- entry point ----------

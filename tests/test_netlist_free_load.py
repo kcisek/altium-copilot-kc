@@ -77,6 +77,8 @@ WORKING_TOOL_CALLS = {
     "check_vias": lambda: main.check_vias(),
     "check_return_path": lambda: main.check_return_path(),
     "check_diff_pair_geometry": lambda: main.check_diff_pair_geometry(),
+    "check_mechanical_fit": lambda: main.check_mechanical_fit(),
+    "get_mechanical_handoff": lambda: main.get_mechanical_handoff(),
     "check_testpoints": lambda: main.check_testpoints(),
     "check_connectivity": lambda: main.check_connectivity(),
     "check_pcb_health": lambda: main.check_pcb_health(),

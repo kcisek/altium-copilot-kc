@@ -6,6 +6,84 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [Unreleased]
 
 ### Added
+- `check_mechanical_fit` and `get_mechanical_handoff` (roadmap #34): mechanical fit and the
+  mechanical handoff of the PcbDoc, offline (`server/services/mechanical_fit.py`); a PcbDoc
+  is required. Plan-view outlines and heights: not a STEP or IDF / IDX replacement.
+  - Heights per placed part: the tallest 3D body projected on its side (ComponentBodies6
+    overall height, standoff and model; a flat body of height 0 gives no height), else the
+    footprint's Height, else the tallest body of its library footprint (read with
+    check_libraries' resolver for the parts that have neither, at most 300), else none.
+    Parts without a body are `missing_3d_body` (info; a warning when nothing gives a height
+    and a limit the user or a drawing gives applies); graphical parts, net ties,
+    fiducials, pad-less parts, SMD test points and card-edge fingers (four or more
+    elongated SMD pads only, each within 0.5 mm of the board edge: board copper) are not
+    expected to have one. Not Fitted parts of the active variant are listed apart and take
+    part in nothing else (their mounting holes are still listed, fitted false: the hole is
+    drilled, its screw not checked). A part's
+    plan-view shape: its bodies, else its courtyard (the box, in the part's frame, of its
+    lines on a mechanical layer named courtyard or placement outline), else its pad box.
+  - Limits, the tightest that applies: height_limit_top / height_limit_bottom; regions=
+    (polygons or rectangles in the board origin's frame, per side, with max_height or as a
+    no-parts keepout); free 3D bodies (an enclosure part placed on the board: its standoff
+    is the limit, and it is a keepout when it reaches the board); areas on a mechanical
+    layer named for a height restriction with a length in its name; Altium's Height rules
+    (MAXHEIGHT, MINHEIGHT), the rule that applies to each component found by scope and
+    priority; and a maximum component height Draftsman notes state (only when every such
+    note agrees for a side; quoted with its place; a line with one top and one bottom
+    length gives both; a note for one place or with exceptions, such as "under the shield"
+    or "except connectors", is quoted in limits.draftsman_local_notes, not applied).
+    summary.parts_with_height_limit counts the parts a real limit applies to (Altium's
+    default 1000 mil Height rule is none). Findings `height_over_limit` and
+    `height_under_min` (warning, with the limit's source and the margin) and
+    `part_in_keepout` (bodies or courtyard over a no-parts region: a user keepout, a free
+    body reaching the board, an area on a mechanical layer named as a component keepout).
+    Keep-Out layer areas, outer-layer copper keepouts and rooms are regions listed with the
+    tallest part over them (Altium's DRC judges them).
+  - Mounting holes: free pads and bare holes of 1.5 mm or more and the holes of parts that
+    are mounting holes (holes, SMD pads only as copper rings centred on them, and an
+    H/MH/MTG designator, a mounting-hole or screw footprint name, a Mechanical part or at
+    most one net), with drill, slot, plated, net, pad (its own pad or ring), the metric
+    screw whose thread passes (ISO 273 clearance; the hole taken to 0.001 mm, so a 2.6 mm
+    hole stored as 102.3622 mil takes an M2.5) and the free radius per face: the nearest
+    copper of another net on the outer layer, another fitted part's body or pad box, or the
+    board edge, with what limits it; copper of the hole's own net is given apart, a free
+    hole's free ring pads are its own and pad-less parts covering the hole are its
+    hardware. A hole in a board cutout is off the board (off_board, in_cutout).
+    `mounting_hole_clearance`: a part or exposed copper (pads, untented vias) within half
+    the larger of the head and washer diameters plus clearance_margin (defaults: the
+    screw's ISO 7045 pan head and ISO 7089 washer, 0.5 mm: info; screw_head_diameter /
+    washer_diameter given: warning); copper under the solder mask only is one grouped info
+    finding. `hole_near_edge`: the wall closer to the edge than the board thickness, at
+    most 1 mm (info; half of it: warning).
+  - ICT: the probe side check_testpoints decides from the probe sites, or probe_side; parts
+    at least tall_part_height (5 mm) on it are `tall_part_on_probe_side` (info; a warning
+    when probe_side is given) with the probe points within 5 mm of them.
+  - Connectors (a connector designator prefix and no crystal, holder, jumper or test-point
+    text, external or internal by their text, the netlist's descriptions included): the
+    nearest board edge (left, right, top, bottom, another outline edge or a cutout), the
+    distance of the bodies and of each pad to it, the signed edge offset (negative: the
+    overhang past the outline) and the outward direction faced at an edge (on an arc
+    edge, the radial direction where the part is: at its point nearest the arc, or its
+    vertex deepest past it).
+  - Summaries: per side the tallest parts, height classes and the area used; per region
+    (user, keepout, room, free body) the parts over it and the tallest. Findings, part rows
+    (tallest first), connectors, regions and holes page and shrink to the result size.
+  - `get_mechanical_handoff`: board (thickness from the layer stack, size, extent, area),
+    outline polygon with cutouts (arc edges as chords), mounting holes, connectors, regions
+    with polygons, rigid-flex board regions (layer stack, flex, the thickness of the layers
+    its stack holds, bending lines; the board's thickness is then the rigid stack's),
+    per-side summaries and part rows; sections= picks them. An AutoCAD R12 ASCII DXF and an SVG (mm, origin-relative,
+    one layer or group per kind) are written only into the existing output_dir the user
+    names, never over a file (a new one is numbered).
+  - `package_for_xfn`: with a PcbDoc the snapshot gains the `mech_board`, `mech_outline`,
+    `mech_mounting_holes`, `mech_connectors`, `mech_regions` and `mech_parts` tables (mm,
+    origin-relative; `export.MECHANICAL_TABLES`); the existing tables are unchanged. A
+    handoff that cannot be built leaves them empty with a warning.
+  - Calibrated on the AD25 examples (all part heights against the ComponentBodies6 text,
+    every mounting hole's free radius by brute force and every connector's edge offset
+    agree) and on a private set of 63 boards, aggregates only (an independent review
+    re-derived heights, holes, free radii and connector offsets from the raw streams;
+    every connector facing points off the board).
 - `check_diff_pair_geometry` (roadmap #28): differential-pair routing geometry on the
   PcbDoc, read-only and offline (`server/services/diff_pair_geometry.py`); a PcbDoc is
   required.
@@ -2735,6 +2813,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
   uncommitted `.PcbDoc`, in about 0.3 s per clone
 
 ### Changed
+- Placement scopes are decided on components: `pcb_rules` evaluates a component object
+  (kind "component": IsComponent, IsSMTComponent and IsThruComponent by its holes,
+  WithinRoom / TouchesRoom on its extent, Name = its designator; IsBGA and the like stay
+  undecided), for the Height rule. The review checklist's PCB-PLC-07 (connectors, holes and
+  tall parts against the enclosure) is now assisted by check_mechanical_fit; it leans Yes
+  only when a real height limit applies to the parts (summary.parts_with_height_limit).
+- Helpers made public for the mechanical check: `dfm_assembly.outlines_overlap`,
+  `polygon_area`, `points_box`, `rotate_points` and `boundary_distance`;
+  `fab_drawing.note_lines` / `NoteLine`, `LENGTH`, `MAX_WORDS` and `length_mm`;
+  `interfaces.text_exposure` (the text part of a connector's exposure);
+  `dfm.stack_total_thickness` (with substack= for one layer stack of a rigid-flex
+  board); `dfm_geometry.nearest_true_cores`; the new `testpoints.probe_sides` and
+  `libraries.footprint_body_heights`. `decode_region_records` can read only the records
+  of given layers, BoardRegions records carry their layer stack id and bending line
+  count (`PcbRegion.layer_stack_id`, `bending_lines`), and stack layers the layer stacks
+  that hold them (`PcbLayer.substacks`, from V9_STACK_LAYERn_{id}CONTEXT = 0).
 - `check_release_readiness`: the dnp_parts and outputs_current gates cite verify_outputs'
   result of the generated files (`ReleaseInputs.verify_outputs`). dnp_parts warns when the
   files themselves list Not Fitted parts as placed; outputs_current warns when their
