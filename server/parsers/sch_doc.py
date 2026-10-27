@@ -1339,11 +1339,15 @@ class HarnessConnector:
 class ParameterSet:
     """A Parameter Set directive (RECORD=43) and its parameters (RECORD=41 children) as
     (name, value) in file order, unnamed ones included: a differential pair directive is
-    one with DifferentialPair=True. It applies to the wire or bus at its location."""
+    one with DifferentialPair=True. It applies to the wire, bus, signal harness or blanket
+    at its location. unique_id is its UniqueID, parameter_ids each parameter's ("" when
+    the record has none), in the order of parameters."""
     name: str
     x_mil: float
     y_mil: float
     parameters: list[tuple[str, str]] = field(default_factory=list)
+    unique_id: str = ""
+    parameter_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1368,6 +1372,9 @@ class SheetConnectivity:
     # Connect nothing; the offline ERC reads them (RECORD=22 and 43 with their 41s).
     no_ercs: list[NoErc] = field(default_factory=list)
     parameter_sets: list[ParameterSet] = field(default_factory=list)
+    # Blankets (RECORD=225): the outline of each, as vertices. A directive on a blanket's
+    # edge applies to the nets under it.
+    blankets: list[list[Point]] = field(default_factory=list)
     # The sheet header (RECORD=31) and title block, for the offline ERC: the sheet size
     # as parse_sch_integrity reads it, the snap grid (SnapGridSize, None when the header
     # has none; SnapGridOn=T when snap is on, absent when off: Altium leaves a false flag
@@ -1410,6 +1417,7 @@ def connectivity_from_stream(data: bytes, additional: bytes = b"",
         if record == "41" and owner in parameter_sets:
             parameter_sets[owner].parameters.append((props.get("name", ""),
                                                      props.get("text", "")))
+            parameter_sets[owner].parameter_ids.append(props.get("uniqueid", ""))
         elif record == "1":
             parts[pos] = len(result.parts)
             modes[pos] = (props.get("currentpartid", "1"), props.get("displaymode", "0"))
@@ -1487,8 +1495,17 @@ def connectivity_from_stream(data: bytes, additional: bytes = b"",
                 flags_written=any(k in props for k in ("isactive", "suppressall", "symbol"))))
         elif record == "43":
             parameter_sets[pos] = ParameterSet(props.get("name", ""),
-                                               *_location(props))
+                                               *_location(props),
+                                               unique_id=props.get("uniqueid", ""))
             result.parameter_sets.append(parameter_sets[pos])
+        elif record == "225":
+            outline = _vertices(props)
+            if len(outline) < 3 and "corner.x" in props:
+                (x0, y0), (x1, y1) = _location(props), (coord_mil(props, "corner.x"),
+                                                        coord_mil(props, "corner.y"))
+                outline = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+            if len(outline) >= 3:
+                result.blankets.append(outline)
         elif record == "31":
             (result.sheet_style, result.width_mil, result.height_mil,
              result.portrait) = _sheet_size(props)

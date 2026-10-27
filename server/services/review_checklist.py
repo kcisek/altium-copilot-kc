@@ -66,7 +66,7 @@ EVIDENCE_TOOLS = (
     "check_pull_resistors", "check_interfaces", "get_power_tree", "check_derating",
     "check_logic_levels", "get_circuit_calculations", "check_decoupling",
     "get_firmware_pin_map", "compare_variants", "list_variants", "get_bom", "check_bom",
-    "check_sch_pcb_sync", "check_connectivity", "check_pcb_health",
+    "check_sch_pcb_sync", "check_directive_sync", "check_connectivity", "check_pcb_health",
     "check_rule_compliance", "check_lengths", "check_diff_pairs", "list_diff_pairs",
     "get_classes", "get_design_rules", "check_vias", "check_testpoints", "check_dfm",
     "check_thermal", "check_hv_clearance", "check_power_paths", "check_return_path",

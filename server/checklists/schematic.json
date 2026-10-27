@@ -231,9 +231,19 @@
       }
     },
     {
-      "id": "SCH-SIG-09", "section": "signals", "kind": "judgment",
+      "id": "SCH-SIG-09", "section": "signals", "kind": "assisted",
       "text": "Differential pairs and other critical nets are named and marked (diff-pair directives, net classes) as the layout needs.",
-      "hint": "list_diff_pairs and get_classes show what reached the board."
+      "evidence": {
+        "tool": "check_directive_sync", "args": {}, "na_errors": [],
+        "no": [{"list": "findings", "where": {"check": ["directive_class_missing", "class_members_differ", "diff_pair_missing", "diff_pair_nets_differ", "directive_rule_missing", "rule_values_differ"], "kind": ["net_class", "diff_pair", "rule"], "severity": "warning"}, "label": "directives that did not reach the board, or differ there"}],
+        "judge": [{"list": "findings", "where": {"kind": ["net_class", "diff_pair", "rule"]}, "label": "directive notes (left out by Class Generation, a Constraint Manager project, board items no directive gives)"}],
+        "yes": [{"any": [
+          {"path": "summary.diff_pair.from_directives", "op": ">", "value": 0},
+          {"path": "summary.net_class.from_directives", "op": ">", "value": 0},
+          {"path": "summary.rule.from_directives", "op": ">", "value": 0}
+        ], "label": "pairs, net classes or rules marked by schematic directives reached the board"}]
+      },
+      "hint": "Which nets need a pair or a class is the designer's call; check_directive_sync says whether those marked reached the board (list_diff_pairs and get_classes list them)."
     },
     {
       "id": "SCH-CMP-01", "section": "components", "kind": "auto",

@@ -6,6 +6,96 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [Unreleased]
 
 ### Added
+- `check_directive_sync` (roadmap #4, narrowed): whether the schematic's directives
+  reached the PcbDoc, offline and read-only (`server/services/directive_sync.py`); it
+  needs the netlist and a PcbDoc, and reads the sheets as saved now through the offline
+  compile.
+  - Schematic side, per item with its sheets, places and nets: net classes from Parameter
+    Set directives with ClassName, differential pairs from Differential Pair directives
+    (legs named by Altium's _P / _N and the project's [DiffPairSuffixN] pairs, a channel
+    copy's room suffix set aside; with a ClassName, a differential pair class), design
+    rules from Rule parameters, net classes for buses (Generate Net Classes for Buses),
+    per-sheet component classes (named after the sheet symbol, the channel's room, or the
+    sheet in a flat design; a multi-part component split over sheets is in none; a part
+    Update PCB may not place, mechanical, graphical or without a footprint, is listed as
+    parts_not_on_pcb and not compared, and a sheet with only such parts gets no class) and
+    their rooms (named after the schematic's class), and user-defined component classes
+    from a ClassName part parameter. Each kind says whether the project's Class
+    Generation options enable it (`class_generation`, Altium's defaults where a key is not
+    written, listed); with a kind left out Update PCB neither adds nor changes its
+    classes, so its findings are info with option_off (a pair class is taken to follow
+    the user-defined net classes switch: unconfirmed).
+  - Coverage: the offline compile now records each Parameter Set's nets
+    (`ErcParameterSet.nets`, `.via`): the wire's net, a bus's members, the nets a signal
+    harness carries (its connectors' entries), or the nets under a blanket (RECORD=225,
+    wires and objects partly or wholly under it) when the directive sits on its edge; the
+    compiled sheet copies (`ErcFacts.instances`) and the buses with their member nets
+    (`ErcFacts.buses`). A directive on a blanket edge no longer reads as floating in
+    `run_erc`.
+  - PCB side: net, differential pair and component classes with their members, pairs,
+    rooms (RoomDefinition rules, by the component class they scope) and the rules marked
+    DEFINEDBYLOGICALDOCUMENT. Nets follow `check_sch_pcb_sync`'s matching (members, then
+    name; `sch_pcb_sync.sync_maps`), so a net renamed on the PCB is still found; parts
+    follow their unique-ID link. A class whose name is not on the PCB is matched by its
+    members as Altium's Comparator does (the project's Min Match % and Min Matched
+    Members per object kind): `class_name_differs`.
+  - Rule parameters are decoded leniently: KEY=value properties as Rules6 stores them
+    (RULEKIND, NAME, SCOPE1EXPRESSION, MINLIMIT ..., per-layer widths and gaps) or a
+    description ("Width Constraint (Min Width = 10mil)"), each value read whole with its
+    unit (mil, mm, cm, um or inch; "1e1mil" is 10 mil, an unknown unit is not read);
+    matched by unique ID, then name, and every schematic-defined rule of the kind whose
+    scope names a covered net, the class or the pair (a directive on a bus or blanket may
+    give one rule per net, none of them stale); values compared per field and layer. No
+    project read so far carries a Rule parameter, so the format is unconfirmed
+    (rule_text_not_decoded says when it cannot be read).
+  - Project type: classic, or Constraint Manager when the .PrjPcb's [Design]
+    ConstraintManagerFlow switch is not 0 (the name Altium's own code gives it; written
+    as 0 in a classic project, and then it outweighs any other trace, listed as
+    contrary_evidence), a Settings/Constraints file or a Constraints.xml beside the
+    .PrjPcb (only its root and top-level element counts are reported), a .CstrDot, or the
+    PcbDoc's ConstraintManager
+    stream (base64 of zlib data; empty in a classic board) says so. Other .PrjPcb keys
+    naming the Constraint Manager are listed, not taken as evidence. In a Constraint
+    Manager project every finding is info with reason constraint_manager_project:
+    directives are ignored unless imported.
+  - Findings: directive_class_missing (info when Class Generation leaves it out),
+    bus_class_missing (info), class_name_differs, class_members_differ (members missing
+    from the PCB class: warning; PCB members no directive gives: info; designators the
+    .Annotation file gives several parts are named; ClassName directives of the class on
+    no net are counted, as one moved off its wire leaves its nets in the PCB class),
+    diff_pair_missing (also a directive on one leg, or a net without a polarity suffix),
+    diff_pair_nets_differ (swapped legs, other nets), diff_pair_name_differs (the same nets
+    under another name, ignoring case: info), directive_rule_missing, rule_values_differ,
+    rule_text_not_decoded, component_class_missing, room_missing (one info finding when
+    the board has none of the generated rooms) and stale_pcb_item (a schematic-defined rule
+    no directive or power port gives now, and PCB pairs and net classes no directive gives
+    where the project defines that kind by directives: info). A SupplyNets rule on a net
+    with a power port is the power port's, not stale. summary counts per kind items,
+    transferred, missing, differing, disabled by options and from directives. kind= and
+    sheet= (with or without .SchDoc) narrow; findings page with offset, the directive rows
+    with directives_offset; the page shrinks to fit.
+  - `constraints_review` points to it for schematic Differential Pair directives;
+    `check_diff_pairs`' not_checked names it; the schematic checklist's SCH-SIG-09 is now
+    assisted with it as evidence (leaning yes only when pairs, net classes or rules from
+    directives reached the board, not on bus classes alone).
+  - `sch_pcb_sync.sync_maps` gives check_sch_pcb_sync's net and part matching, and the
+    parts Update PCB may not place, to other services.
+  - Calibrated on the AD25 examples: all 115 Differential Pair directives (MiniPC 96,
+    SODIMM 18, WiFi 1) found on the PCB, checked by hand against the raw
+    DifferentialPairs6 records (4 MiniPC pairs only through nets whose case differs on the
+    PCB); SpiritLevel's 3 bus classes and its sheet classes checked by hand against
+    Classes6 (its one mechanical part without a footprint, on no PCB part, is left out of
+    its sheet's class). On a private set of 63 boards, aggregates only: all classic (58
+    with ConstraintManagerFlow=0, 60 with the empty ConstraintManager stream); directives
+    on 1064 wires, 55 floating, none on a bus, harness or blanket; 99 ClassName net
+    classes in 19 projects (84 transferred, 15 with extra PCB members, 6 of these beside a
+    ClassName directive of the class on no net), 98 directive pairs in 25 projects (all
+    transferred), no Rule parameter; 278 schematic-defined PCB rules, all SupplyNets, 274
+    on a power-port net; 150 per-sheet component classes (125 transferred, 12 differing, 3
+    of them renamed on the PCB and matched by members, 4 missing in one project, 9 left
+    out by the option; 32 parts Update PCB may not place, 26 of them listed in a PCB class
+    all the same, left out of the comparison); 62 of 63 projects without a warning; at
+    most 0.02 s per board after the compile, first page at most 19.9 KB.
 - `check_mechanical_fit` and `get_mechanical_handoff` (roadmap #34): mechanical fit and the
   mechanical handoff of the PcbDoc, offline (`server/services/mechanical_fit.py`); a PcbDoc
   is required. Plan-view outlines and heights: not a STEP or IDF / IDX replacement.

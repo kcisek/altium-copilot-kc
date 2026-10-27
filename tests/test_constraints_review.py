@@ -181,11 +181,12 @@ def test_length_rules_match_the_length_engine(review_index):
 
 def test_prompt_promises_only_what_check_diff_pairs_returns(review_index):
     flat = _flat(_prompt(review_index))
-    # check_diff_pairs has no per-leg via counts and does not compare
-    # schematic directives yet.
+    # check_diff_pairs has no per-leg via counts and does not compare schematic
+    # directives: check_directive_sync does.
     assert "via count per leg, AC-coupling" not in flat
     assert "schematic directives missing on the PCB" not in flat
-    assert "Differential Pair directives are not compared with the PCB yet" in flat
+    assert "Differential Pair directives are not compared with the PCB yet" not in flat
+    assert 'check_directive_sync(kind="diff_pair") says whether each schematic' in flat
     assert "get_signal_length(<pair>) gives the via count per leg" in flat
     step = flat[flat.index("3. check_diff_pairs(pattern=...) per interface"):]
     assert step.startswith(

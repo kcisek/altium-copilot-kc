@@ -56,6 +56,7 @@ NETLIST_TOOL_CALLS = {
     "get_firmware_pin_map": lambda: main.get_firmware_pin_map(),
     "run_erc": lambda: main.run_erc(),
     "check_sch_pcb_sync": lambda: main.check_sch_pcb_sync(),
+    "check_directive_sync": lambda: main.check_directive_sync(),
     "schematic_review": lambda: main.schematic_review(),
     "package_for_xfn": lambda: main.package_for_xfn(),
 }

@@ -590,8 +590,10 @@ def _component_findings(
             )
 
 
-def _net_findings(report, parts, board, links, netlist, options) -> dict:
-    """Member sets, net matching, and the pin, pad and net findings. Returns counts."""
+def _net_findings(report, parts, board, links, netlist, options,
+                  maps: dict | None = None) -> dict:
+    """Member sets, net matching, and the pin, pad and net findings. Returns counts; maps,
+    when given, receives the matching (schematic net -> PCB net) under "nets"."""
     component_of = {name: board.components[index] for index, (name, _) in links.items()}
     skip = {
         index for index, component in board.components.items()
@@ -691,6 +693,8 @@ def _net_findings(report, parts, board, links, netlist, options) -> dict:
                 counts["matched_by_name"] += 1
 
     from_pcb = {pcb: net for net, pcb in to_pcb.items()}
+    if maps is not None:
+        maps["nets"] = dict(to_pcb)
     for net, pcb in to_pcb.items():
         if pcb != net:
             # Update PCB renames it; names drive classes, rules and pairs on the PCB.
@@ -825,6 +829,35 @@ def _net_findings(report, parts, board, links, netlist, options) -> dict:
     counts["schematic_nets"] = len(sch_members)
     counts["pcb_nets"] = len(board.net_members)
     return counts
+
+
+@dataclass
+class SyncMaps:
+    """How the schematic's names reach the PCB (see sync_maps)."""
+    nets: dict[str, str] = field(default_factory=dict)       # schematic net -> PCB net
+    parts: dict[str, str] = field(default_factory=dict)      # designator -> PCB designator
+    # Parts on no PCB part that Update PCB may not place (mechanical or graphical, or no
+    # footprint): the info missing_from_pcb rows of run_sync_check.
+    unplaced: set[str] = field(default_factory=set)
+
+
+def sync_maps(index, netlist: dict | None, net_matching: dict | None = None) -> SyncMaps:
+    """How the schematic's names reach the PCB, matched as run_sync_check matches them:
+    nets by shared members, then name; parts by unique ID, then designator; and the parts
+    Update PCB may not place. Empty without parts."""
+    parts, _ = _schematic_parts(netlist or {})
+    if not parts:
+        return SyncMaps()
+    board = _Board(index)
+    links, _ = _link(parts, board, (netlist or {}).get("pin_to_net") or {})
+    maps: dict = {}
+    _net_findings(_Report(), parts, board, links, netlist or {},
+                  net_matching or dict(DEFAULT_NET_MATCHING), maps)
+    designators = {name: board.designator(board.components[number])
+                   for number, (name, _) in links.items()}
+    unplaced = {part.name for part in parts.values() if part.name not in designators
+                and (part.kind in (MECHANICAL, GRAPHICAL) or not part.footprint)}
+    return SyncMaps(maps.get("nets", {}), designators, unplaced)
 
 
 def run_sync_check(

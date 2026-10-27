@@ -63,6 +63,7 @@ Part of the [ee-in-a-box](https://github.com/ee-in-a-box) suite.
 | *"Run a health check on the board"* | Altium's PCB Health Check Monitor offline, with Altium's categories and levels: shelved or modified polygons, duplicate designators, zero-area and self-intersecting shapes, micro-segments, slot holes, xSignals, 360-degree parts, reference points outside the part; plus parts outside the board shape. Compared with the last DRC report's health section | `check_pcb_health` |
 | *"What does my DRC report say? Any shorts?"* | Altium's last Batch DRC report grouped by rule, component or net, with a warning when it stopped at the violation limit, skipped checks or is older than the board | `get_drc_report` |
 | *"Is the PCB in sync with the schematic?"* | Offline Show Differences: missing or extra parts, footprint and comment changes, pads on the wrong net, and pins Update PCB would fail on | `check_sch_pcb_sync` |
+| *"Did my net classes, differential pairs and schematic rules reach the board?"* | Each schematic directive against the PcbDoc: net classes from ClassName directives (on a wire, a bus's members, a signal harness's nets or the nets under a blanket), differential pairs from Differential Pair directives (the project's _P/_N suffixes; with a ClassName a pair class), design rules from Rule parameters (kind, scope and values decoded leniently, compared with the rules marked as defined by the schematic), bus net classes and per-sheet component classes and rooms, each with whether Class Generation enables it (a kind left out gives info only); nets renamed on the PCB are followed and classes or pairs renamed on the PCB are matched by members as Altium's comparator does. Missing items, member, name, net and value differences, and PCB rules, pairs or classes no directive gives now. A Constraint Manager project (the .PrjPcb's ConstraintManagerFlow switch; directives ignored unless imported) makes every finding info | `check_directive_sync` |
 | *"Is my USB pair routed for 90 ohm?"* | Impedance profiles: target, solved width/gap and calculated impedance per layer, and which rules use them; the pair's routed widths checked against its rule | `get_board_info`, `check_rule_compliance` |
 | *"Where is U12? What's next to it?"* | Placement, side, rotation, nearest parts | `get_component_placement` |
 | *"What's at X 1200, Y 850?"* | Nets, components and saved pour outlines near a board coordinate | `query_pcb_region` |
@@ -121,7 +122,9 @@ or pairs that no longer exist. It also checks the saved copper against those rul
 widths, vias, holes, annular rings, routing layers, length groups and diff-pair
 consistency — and on the DRC reports we compared, its width, via, hole and
 routing-layer counts matched Altium's. `check_sch_pcb_sync` compares the board with
-the compiled schematic the way Show Differences does, without running an ECO.
+the compiled schematic the way Show Differences does, without running an ECO, and
+`check_directive_sync` checks that the schematic's directives (net classes, differential
+pairs, rules) and generated classes and rooms reached the board.
 It reads the saved file and never runs Altium's DRC; `get_drc_report` reads the last
 DRC report Altium saved and says when it should not be trusted.
 Data refreshes automatically every time you save the board in Altium. Read-only,

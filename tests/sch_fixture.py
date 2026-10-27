@@ -97,11 +97,19 @@ class Sheet:
     def no_erc(self, x, y) -> None:
         self._add(f"|RECORD=22|LOCATION.X={x}|LOCATION.Y={y}|ISACTIVE=T|SUPPRESSALL=T")
 
-    def parameter_set(self, x, y, parameters, name: str = "Parameter Set") -> None:
-        """A Parameter Set directive at (x, y) with (name, value) parameters."""
-        position = self._add(f"|RECORD=43|LOCATION.X={x}|LOCATION.Y={y}|NAME={name}")
-        for key, value in parameters:
-            self._add(f"|RECORD=41|OWNERINDEX={position - 1}|NAME={key}|TEXT={value}")
+    def parameter_set(self, x, y, parameters, name: str = "Parameter Set",
+                      uid: str | None = None) -> None:
+        """A Parameter Set directive at (x, y) with (name, value) or (name, value, unique
+        ID) parameters."""
+        extra = f"|UNIQUEID={uid}" if uid else ""
+        position = self._add(f"|RECORD=43|LOCATION.X={x}|LOCATION.Y={y}|NAME={name}{extra}")
+        for key, value, *ids in parameters:
+            extra = f"|UNIQUEID={ids[0]}" if ids else ""
+            self._add(f"|RECORD=41|OWNERINDEX={position - 1}|NAME={key}|TEXT={value}{extra}")
+
+    def blanket(self, *points) -> None:
+        """A blanket (RECORD=225) with these outline vertices."""
+        self._add(f"|RECORD=225|LOCATIONCOUNT={len(points)}{_points(points)}")
 
     def mask(self, x0, y0, x1, y1) -> None:
         self._add(f"|RECORD=211|LOCATION.X={x0}|LOCATION.Y={y0}|CORNER.X={x1}|CORNER.Y={y1}")
