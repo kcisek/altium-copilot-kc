@@ -160,6 +160,86 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
     variant, stale entries, more than one page of differences, no netlist), paging the way
     the view pages gives every difference once (also with trimmed pages), a later page,
     the error payloads and empty states, and unchanged text results.
+- BOM view (roadmap #62): Claude Desktop opens `get_bom`'s result as an interactive BOM;
+  the tool's text result is unchanged, byte for byte (only its `_meta` links the view),
+  and Claude Code shows the text as before.
+  - `server/ui/bom.html`, linked from `get_bom` only. `check_bom` has no page of its own:
+    its findings name parts, which read best on the BOM lines that hold them, so the view
+    asks `check_bom` for the variant it shows through `tools/call`; `get_active_bom` links
+    none either and gives a line's ranked solutions in the details pane. The registry
+    stays one tool per view.
+  - Every page of `get_bom` read with the call's arguments (a later page as the result:
+    from offset 0; a CSV result asked again as JSON, or without tool calls its rows shown
+    as text with the reason; without the call's arguments, which say how the lines were
+    grouped, read again from offset 0 with `group_by` mpn), each page checked to be one of
+    the same BOM. Lines with quantity, designators (ranges such as R1–R4, the first ones
+    with "+N more"), Comment, value, description, footprint, manufacturer, MPN (placeholders
+    marked as needing none or still needing one), what varies within a line (the first
+    five values of more, as `get_bom` lists them), alternate parts and varied parameters,
+    BomDoc line and chosen part; `get_bom`'s grouping (MPN or Comment, asked again) and the
+    view's own by manufacturer, footprint or finding; sort, text filter, column chooser;
+    the variant's totals (lines, parts in the BOM, Not Fitted, excluded by kind, MPN
+    coverage, `check_bom`'s severity counts) labelled as the whole BOM's over a filtered
+    table.
+  - Filters: the Not Fitted parts as lines (one `get_bom` call with `include_not_fitted`
+    when the result lists only their designators, grouped as the lines are; the chip
+    counts their lines once known, else says it counts parts), lines missing an MPN by
+    `mpn_coverage_percent`'s rule (`check_bom`'s missing_mpn names the parts once it has
+    answered for a project without a BomDoc, mechanical parts left out; otherwise a part
+    it names counts and the lines' own data decide the rest, a line they cannot decide,
+    such as a placeholder or one of more than five MPNs shared by only some of its parts,
+    marked "MPN may be missing"), and lines with `check_bom` findings: every page of
+    `check_bom` for the variant shown, its findings mapped to the lines by designator (a
+    duplicate sheet designator through the lines' sheet designators, on no line when
+    both a part of that name and parts with that sheet designator are in the BOM),
+    severity badges per line, a Findings tab grouped by check (a finding whose part list
+    reaches `check_bom`'s cap marks "at least" that many lines).
+  - A variant switch filled from `list_variants` (with the base design) that asks
+    `get_bom` and `check_bom` again with `variant`: it only shows, and the page says so (no
+    view calls `set_active_variant`); what each variant changes in the BOM (`get_bom` with
+    `compare_variants`) in a Variants tab; a button for the BomDoc columns (`active_bom`)
+    when the project has an ActiveBOM document.
+  - A number of boards that multiplies the quantities in the view, labelled as a local
+    calculation (not stock, not price).
+  - A details pane per line: all fields, designators with their sheet designators, what
+    varies, alternate parts, the line's findings, its BomDoc line and chosen part, a
+    button that asks `get_active_bom` for the line's ranked solutions and part choices
+    (designator by designator until every part of the line is on a BomDoc line found or
+    said to be on none, so lines numbered or not, and a line spread over several BomDoc
+    lines, are found; parts `check_bom` lists as without a line are not asked; up to 10
+    calls at a time, then a button for the next ones) with lifecycle, stock and price
+    only next to their cache date or marked cached (a risky lifecycle's badge, what
+    other suppliers report, the part choices' columns, whose cache date column cannot be
+    hidden) and `get_active_bom`'s note that they are cached, not current; and a
+    `get_component` button for a designator, labelled as the ACTIVE variant's (named, and
+    "not" the variant shown when they differ). A details pane per finding with buttons to
+    its lines.
+  - States: no project, no netlist, no components, an unknown variant (with the switch),
+    an empty BOM, BomDoc errors as notices, a cancelled call, paging stopped with its
+    reason, the view closed (no more asks, no answer waited for: a BOM being paged is
+    drawn with the lines read, and what was waiting says so); answers kept for another
+    variant are dropped and a failure is never kept; asked again for the same lines (the
+    BomDoc columns) the selected line stays open; focus stays on redraws and in the
+    details section it was in when a button disappears, with the pane's scroll kept; a
+    number of boards that is not a whole number is marked and put back; the switch and
+    filters fold unless the table keeps about five BOM rows, and a line's details take
+    the table's place on a narrow host too short for both.
+  - Shell: the page's height is measured with its scrollbar shown, so a height that just
+    fits no longer leaves a narrow page stuck taller than the host's limit with a
+    scrollbar that makes its text wrap more.
+  - Tests (`tests/test_ui_bom.py`): the resource and link, the self-contained page and
+    its five read-only tools, the contracts against `get_bom`, `check_bom`,
+    `get_active_bom` and `list_variants` on Altium's public examples with an ActiveBOM
+    document (Mini PC Motherboard and WiFi, a Harness Demo board), the repo's Demo and
+    ActiveBOM fixtures, a copy of the public SpiritLevel example with variants added and a
+    synthetic board (lines whose parts disagree, placeholders, a mechanical part, sheet
+    designators, no MPN parameters, no part needing one), paging the way the view pages
+    gives every line and finding once (also trimmed pages), a later page and a CSV result,
+    findings mapped to lines (a duplicate sheet designator too), the missing-MPN rule
+    against the parts `get_bom` builds (lines whose data cannot tell marked "may"), a
+    line's BomDoc lines found designator by designator (a line spread over several
+    numbered, unnumbered or mixed BomDoc lines, parts on none, ten calls at a time), and
+    unchanged text results.
 - `trace_net_across_boards`, `check_multiboard` and `get_system_connections` (roadmap
   #54): multi-board systems (`.PrjMbd`) read offline; the loaded project is never
   changed and none of the three needs its netlist.

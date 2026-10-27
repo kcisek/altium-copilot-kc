@@ -242,6 +242,10 @@ def test_the_shell_speaks_the_spec_messages():
     assert shell.count("postMessage(") == 1 and "event.source !== host" in shell
     # tools/call only when the host offers serverTools (an optional host capability).
     assert "capabilities.serverTools" in shell and "if (!canCallTools()) throw" in shell
+    # The page is measured with its scrollbar shown, so a height that fits never leaves it
+    # stuck taller than the host's limit with a scrollbar that narrows it (text wraps more).
+    measure = shell.split("function contentHeight() {", 1)[1].split("\n  }\n", 1)[0]
+    assert 'html.style.overflowY = "scroll";' in measure and "html.style.overflowY = overflow;" in measure
 
 
 def test_the_view_asks_the_host_only_for_what_it_offers():

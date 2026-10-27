@@ -1,0 +1,2579 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!--@csp-->
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BOM</title>
+<style>/*@shell.css*/</style>
+<style>
+/* BOM view (roadmap #62): get_bom's lines per variant as a grouped, filterable table with
+   check_bom's findings per line, the Not Fitted parts, MPN gaps, alternate parts, a local
+   quantity for a number of boards and, with an ActiveBOM document, a line's ranked
+   solutions from get_active_bom (cached supply data, always shown with its cache date). */
+.head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 0 0 6px; }
+.head h1 { font-size: var(--fs-lg); margin: 0; font-weight: var(--fw-bold); }
+.head .grow { flex: 1 1 auto; }
+.summary { display: flex; flex-wrap: wrap; gap: 4px; }
+.vs { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 4px 6px; min-width: 0; }
+.vs .name { font-weight: var(--fw-medium); overflow-wrap: anywhere; }
+.approx { font-size: var(--fs-xs); color: var(--c-text3); margin: 0 0 8px; overflow-wrap: anywhere; }
+.picker { border: 1px solid var(--c-line); border-radius: var(--radius); padding: 8px 10px; margin: 0 0 8px;
+          font-size: var(--fs-sm); }
+.picker-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 0 0 6px; }
+.picker label { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; }
+.picker .side { font-weight: var(--fw-bold); }
+select.pick { border: 1px solid var(--c-border); border-radius: var(--radius-sm); background: var(--c-bg);
+              padding: 2px 6px; font-size: var(--fs-sm); min-width: 8em; max-width: min(100%, 22em); }
+input.boards { border: 1px solid var(--c-border); border-radius: var(--radius-sm); background: var(--c-bg);
+               padding: 2px 6px; font-size: var(--fs-sm); width: 7em; }
+.picker .help { margin: 6px 0 0; color: var(--c-text2); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.filters { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; margin: 0 0 8px; }
+.tbl td.c-val { min-width: 6em; overflow-wrap: anywhere; }
+/* Part numbers and footprints keep a readable width; the table scrolls inside its frame. */
+.tbl td.c-part { min-width: 8.5em; overflow-wrap: anywhere; }
+.val { overflow-wrap: anywhere; }
+.val.unset { color: var(--c-text3); font-style: italic; }
+.mark { margin-left: 4px; }
+.marks { display: inline-flex; flex-wrap: wrap; gap: 3px; }
+.desig { overflow-wrap: anywhere; }
+.desig .btn-link { margin-left: 4px; font-size: var(--fs-xs); }
+.sub { display: block; font-size: var(--fs-xs); color: var(--c-text2); overflow-wrap: anywhere; }
+.findings { margin: 4px 0 8px; padding-left: 0; list-style: none; }
+.findings li { margin: 3px 0; overflow-wrap: anywhere; }
+.findings .badge { margin-right: 6px; }
+.status { font-size: var(--fs-xs); color: var(--c-text3); }
+.section-gap { margin-top: 14px; }
+/* The Variants and Notes tabs scroll as one pane (fitted to the host's height); their
+   tables inside it are not capped again, nor are the details pane's. */
+.content > .pane .tbl-wrap, aside.pane .tbl-wrap { max-height: none; }
+.pane dl.facts { grid-template-columns: fit-content(45%) minmax(0, 1fr); }
+.pane dl.facts dt { min-width: 0; overflow-wrap: anywhere; }
+.pane h3 { overflow-wrap: anywhere; }
+.pane .summary .badge { white-space: normal; overflow-wrap: anywhere; }
+.pane .btn-row .btn { white-space: normal; overflow-wrap: anywhere; text-align: left; max-width: 100%; }
+.pane .btn-row select.pick { max-width: 100%; }
+/* A short host 980 px wide or less: a selected line's details take the table's place
+   (Close or Esc brings the table back), rather than both shrinking to a row or two. */
+@media (max-width: 980px) {
+  .split.solo > .content { display: none; }
+}
+.bomdoc-line { border: 1px solid var(--c-line); border-radius: var(--radius-sm); padding: 6px 8px; margin: 6px 0; }
+.bomdoc-line h4 { font-size: var(--fs-sm); margin: 0 0 4px; overflow-wrap: anywhere; }
+.solution { border-top: 1px solid var(--c-line); padding: 6px 0 2px; }
+.solution h5 { font-size: var(--fs-sm); margin: 0 0 4px; font-weight: var(--fw-medium); overflow-wrap: anywhere; }
+.cached { font-size: var(--fs-xs); color: var(--c-text2); }
+.local { font-size: var(--fs-xs); color: var(--c-text2); overflow-wrap: anywhere; }
+.local.invalid { color: var(--c-danger); }
+input.boards[aria-invalid="true"] { border-color: var(--c-danger); }
+/* A solution's part choices have fixed columns: the cache date is never hidden from the
+   stock, price and lifecycle cached with it. */
+.solution .tbl-block > .toolbar { display: none; }
+/* Headings that take keyboard focus while their section's buttons are gone. */
+.pane h3[tabindex="-1"]:focus { outline: none; }
+.pane h3[tabindex="-1"]:focus-visible { outline: 2px solid var(--c-ring); outline-offset: 2px; }
+</style>
+</head>
+<body>
+<main id="app"></main>
+<script type="application/json" id="data-contract">
+{
+  "tool": "get_bom",
+  "checks_tool": "check_bom",
+  "solutions_tool": "get_active_bom",
+  "picker": "list_variants",
+  "paged": "lines",
+  "base": "[No Variations]",
+  "base_names": ["[no variations]", "no variations", "none", "base"],
+  "mpn_undecided": ["tbd", "tba", "?"],
+  "designators_listed": {"not_compiled": 30, "bom_doc": 50},
+  "checks": {
+    "duplicate_designator": "Duplicate designator",
+    "unresolved_special_string": "Unresolved special string",
+    "dnp_marker_on_fitted": "DNP mark on a fitted part",
+    "no_footprint": "No footprint",
+    "mpn_inconsistent": "MPN inconsistent",
+    "mpn_without_manufacturer": "MPN without manufacturer",
+    "missing_mpn": "Missing MPN",
+    "placeholder_description": "Placeholder description",
+    "stale_variant_entry": "Stale variant entry",
+    "consolidation": "Consolidation candidate",
+    "not_compiled": "Not compiled",
+    "lifecycle_risk": "Lifecycle risk (cached)",
+    "single_source": "Single source",
+    "no_solution": "No solution",
+    "out_of_stock_at_qty": "Out of stock at the need (cached)",
+    "stale_cache": "Stale supply cache",
+    "bomdoc_out_of_sync": "BomDoc out of sync"
+  },
+  "bom_doc_checks": ["lifecycle_risk", "single_source", "no_solution", "out_of_stock_at_qty", "stale_cache",
+                     "bomdoc_out_of_sync"],
+  "shapes": {
+    "result": {
+      "required": ["variant", "netlist_updated_utc", "compiled_part_list", "parts", "mpn_coverage_percent",
+                   "lines_total", "offset", "has_more"],
+      "optional": ["next_offset", "lines", "csv", "not_fitted", "not_fitted_designators", "variants",
+                   "lines_limited_to", "stale_variant_entries", "alternate_parts_note", "bom_doc", "bom_doc_error"]
+    },
+    "parts": {"required": ["in_bom", "not_fitted", "excluded_by_kind"], "optional": []},
+    "lines[]": {
+      "required": ["quantity", "designators"],
+      "optional": ["comment", "description", "value", "footprint", "manufacturer", "mpn", "mpn_placeholder",
+                   "mpn_source", "varies", "varies_count", "logical_designators", "alternate_parts",
+                   "varied_parameters", "bom_doc_lines", "bom_doc_chosen"]
+    },
+    "lines[].bom_doc_chosen[]": {"required": [], "optional": ["manufacturer", "mpn", "source", "lifecycle", "cache_date"]},
+    "not_fitted[]": {
+      "required": ["quantity", "designators"],
+      "optional": ["comment", "description", "value", "footprint", "manufacturer", "mpn", "mpn_placeholder",
+                   "mpn_source", "varies", "varies_count", "logical_designators", "alternate_parts",
+                   "varied_parameters"]
+    },
+    "variants[]": {"required": ["variant", "not_fitted", "changed"], "optional": []},
+    "variants[].changed[]": {
+      "required": ["designator"],
+      "optional": ["comment", "description", "value", "footprint", "manufacturer", "mpn", "alternate_part"]
+    },
+    "bom_doc": {
+      "required": ["file", "chosen_by", "in_project", "cache", "lines"],
+      "optional": ["other_bom_docs", "not_in_project", "missing_on_disk"]
+    },
+    "bom_doc_error": {"required": ["error", "message"], "optional": ["hint"]}
+  },
+  "check_bom": {
+    "result": {
+      "required": ["variant", "parts", "mpn_coverage_percent", "checks_run", "summary", "severity_counts",
+                   "findings", "total", "offset", "has_more"],
+      "optional": ["next_offset", "checks_not_run", "findings_limited_to", "bom_doc", "bom_doc_error"]
+    },
+    "severity_counts": {"required": ["error", "warning", "info"], "optional": []},
+    "findings[]": {
+      "required": ["check", "severity", "issue"],
+      "optional": ["designators", "line", "design_item_id", "lines", "unnumbered_lines", "mpn", "mpns",
+                   "manufacturer", "lifecycle", "cache_date", "other_lifecycles", "need", "stock", "field",
+                   "comment", "count", "reason", "why", "coverage_percent", "oldest", "newest", "part_mpn",
+                   "design_item_ids", "source", "bom_doc_lines", "bom_doc_unnumbered_lines"]
+    }
+  },
+  "get_active_bom": {
+    "result": {
+      "required": ["variant", "bom_doc", "summary", "production_quantity_used", "production_quantity_from", "cache"],
+      "optional": ["line", "lines_omitted"]
+    },
+    "cache": {"required": ["part_choices", "dated", "note"], "optional": ["oldest", "newest"]},
+    "line": {
+      "required": ["line", "designators", "quantity", "solutions"],
+      "optional": ["design_item_id", "source", "item_type", "description", "comment", "note", "status",
+                   "line_unnumbered", "ref", "quantity_at_production", "not_fitted", "join", "why_no_parts",
+                   "ambiguous_designators", "custom_parameters", "ranked_solutions", "cache_dates"]
+    },
+    "line.ranked_solutions[]": {
+      "required": ["source"],
+      "optional": ["rank", "manufacturer", "mpn", "lifecycle", "lifecycle_risk", "ranked_by_designer", "cache_date",
+                   "stock_total", "best_unit_price", "best_price_supplier", "currency",
+                   "best_price_below_minimum_order", "minimum_order_quantity", "suppliers", "part_choices"]
+    },
+    "line.ranked_solutions[].part_choices[]": {
+      "required": [],
+      "optional": ["supplier", "sku", "stock", "enough_stock", "unit_price", "currency", "lifecycle",
+                   "cache_date", "cache_date_text", "price_break_quantity", "below_minimum_order", "no_supplier",
+                   "pinned"]
+    }
+  },
+  "list_variants": {
+    "result": {"required": ["active_variant", "variants"], "optional": []},
+    "variants[]": {"required": ["name", "is_active"], "optional": []}
+  }
+}
+</script>
+<script>/*@shell.js*/</script>
+<script>
+(() => {
+  "use strict";
+  const { el, clear } = Shell;
+  const CONTRACT = JSON.parse(document.getElementById("data-contract").textContent);
+  const app = document.getElementById("app");
+
+  const MAX_PAGES = 60;
+  // The only tools this page calls. None of them changes the server's state: the variant
+  // switch shows another variant's BOM, it never switches the active variant.
+  const READ_ONLY_TOOLS = new Set(["get_bom", "check_bom", "get_active_bom", "list_variants", "get_component"]);
+  const BASE = CONTRACT.base;
+  // The names get_bom also takes for the base design (when no variant has one).
+  const BASE_NAMES = CONTRACT.base_names;
+  // MPN texts that say a part number is not chosen yet (it is still needed); any other
+  // placeholder ('N/A', '-') says the part has none on purpose (services/bom.needs_mpn).
+  const UNDECIDED = new Set(CONTRACT.mpn_undecided);
+  const CHECK_LABEL = CONTRACT.checks;
+  const BOM_DOC_CHECKS = new Set(CONTRACT.bom_doc_checks);
+  // check_bom lists at most this many designators of a not_compiled finding and of a
+  // BomDoc finding about many lines (with a count): the lines marked are "at least" these.
+  const LISTED = CONTRACT.designators_listed;
+  // get_bom's arguments the view keeps (offset and format are its own).
+  const ARG_KEYS = ["variant", "group_by", "include_not_fitted", "compare_variants", "active_bom"];
+  const FIELDS = [["comment", "Comment"], ["value", "Value"], ["description", "Description"],
+                  ["footprint", "Footprint"], ["manufacturer", "Manufacturer"], ["mpn", "MPN"]];
+  const FIELD_LABEL = Object.fromEntries(FIELDS);
+  const SEVERITY_RANK = { error: 0, warning: 1, info: 2 };
+  const SEVERITY_NOUN = { error: "error", warning: "warning", info: "info" };
+  const NONE = "\u0001none";
+  const NO_FINDING = "\u0001clean";
+  const NOT_KNOWN = "\u0001unknown";
+  const GROUPINGS = [
+    { id: "none", label: "None", title: "No groups: get_bom's lines in its order" },
+    { id: "manufacturer", label: "Manufacturer", title: "The lines of each manufacturer together" },
+    { id: "footprint", label: "Footprint", title: "The lines of each footprint together" },
+    { id: "finding", label: "Finding", title: "The lines of each check_bom finding together" },
+  ];
+  const SHOW = [
+    { id: "all", label: "All lines" },
+    { id: "missing", label: "Missing MPN", title: "Lines with a part that needs a manufacturer part number and has none (mpn_coverage_percent's rule)" },
+    { id: "findings", label: "With findings", title: "Lines check_bom names in a finding" },
+  ];
+  const READ_ONLY_NOTE = "Showing another variant does not switch the active variant: the view only asks get_bom and check_bom with variant=, never set_active_variant.";
+  const CACHE_NOTE = "Stock, prices and lifecycle are what ActiveBOM cached on the dates shown, not current data: no supplier is asked.";
+  const LOCAL_NOTE = "Quantity per board × boards, worked out in the view: a local calculation, not stock and not price.";
+  const MPN_RULE = "A line misses an MPN when a part on it needs a manufacturer part number and has none: the rule of get_bom's mpn_coverage_percent (no MPN parameter, and no placeholder that says none is needed, such as 'N/A' or '-'; 'TBD' still needs one; Not Fitted and mechanical parts are not counted). Once check_bom has answered for a project without a BomDoc, its missing_mpn findings name those parts. Until then, or with a BomDoc (whose part choices check_bom counts as MPNs, so it names only some of the parts), a part it names counts and the lines' own data decide the rest: they do not say which parts are mechanical, and they list a line's distinct placeholders and at most five of its MPNs, not each part's. A line they cannot decide is marked \"MPN may be missing\" and kept in the Missing MPN filter.";
+
+  const view = {
+    args: {}, argsKnown: false, data: null, errorPayload: null, busy: false, closed: false, warnings: [],
+    checks: null, notFitted: null, compare: null,
+    variants: null, active: null, variantsError: "", variantsLoading: null, listWarnings: [], pick: null, wanted: null,
+    query: "", groupBy: "none", kinds: new Set(["fitted"]), show: "all", tab: "lines",
+    selected: null, asked: [], expanded: new Set(), boards: 1, componentPick: null, solutions: new Map(),
+    filtersOpen: null, controlsOpen: null,
+  };
+  const ui = {};
+  const details = Shell.toolCache((tool, args, entry) => {
+    renderPane();
+    if (entry && !entry.loading) Shell.announce(`${tool} ${entry.error ? "failed" : "answered"}`);
+  });
+  // The active variant list_variants named just before each get_component call (null when
+  // it could not say): an answer is labelled with it, never with a later one, and asked
+  // again when list_variants names another active variant.
+  const askedUnder = new Map();
+
+  // ---------- helpers ----------
+
+  const canCall = () => Shell.canCallTools();
+  const plural = Shell.plural;
+  // The server's natural_key order (R9 before R10, case-insensitive, digits as numbers).
+  const naturalKey = (text) => String(text).split(/(\d+)/).map((part, index) => (index % 2 ? Number(part) : part.toLowerCase()));
+  function naturalOrder(x, y) {
+    const a = naturalKey(x);
+    const b = naturalKey(y);
+    for (let index = 0; index < Math.min(a.length, b.length); index += 1) {
+      if (a[index] === b[index]) continue;
+      if (typeof a[index] === "number") return a[index] - b[index];
+      return a[index] < b[index] ? -1 : 1;
+    }
+    return a.length - b.length;
+  }
+  const trimmed = (value) => String(value === null || value === undefined ? "" : value).trim();
+  // The server's variant names: case-insensitive, an empty name or [All Variants] is the base.
+  const normName = (name) => {
+    const text = trimmed(name).toLowerCase();
+    return text === "" || text === BASE.toLowerCase() || text === "[all variants]" ? BASE.toLowerCase() : text;
+  };
+  const sameVariant = (x, y) => normName(x) === normName(y);
+  const isBase = (name) => normName(name) === BASE.toLowerCase();
+  const baseAlias = (name) => BASE_NAMES.includes(trimmed(name).toLowerCase());
+  const checkLabel = (check) => CHECK_LABEL[check] || String(check || "").replace(/_/g, " ");
+  const stale = (count) => `${count} stale variant ${count === 1 ? "entry" : "entries"}`;
+  const severityText = (severity, count) => (severity === "info" ? `${count} info` : plural(count, SEVERITY_NOUN[severity] || severity));
+
+  /** get_bom's arguments the view keeps: the known keys, false and empty left out. */
+  function cleanArgs(args) {
+    const out = {};
+    for (const key of ARG_KEYS) {
+      const value = args ? args[key] : undefined;
+      if (value === undefined || value === null || value === false || value === "") continue;
+      out[key] = value;
+    }
+    return out;
+  }
+
+  // Heights for about five rows of the lines table (BOM rows wrap to 60-95 px where the
+  // table is under 800 px wide), the page around it with both disclosures folded (head,
+  // caption, filter, tabs, the table's own toolbar and foot) and what opening the two
+  // disclosures adds: measured on Mini PC with the BomDoc columns at 780 and 1100 px.
+  const ROWS_HEIGHT = 420;
+  const CHROME_HEIGHT = 260;
+  const OPEN_HEIGHT = 210;
+
+  function heightLimit() {
+    const dims = Shell.context().containerDimensions || {};
+    return Number(dims.height || dims.maxHeight) || 0;
+  }
+
+  /** Room for the open switch and filters while the table keeps about five rows, and so
+   *  does the details pane stacked under it on a host 980 px wide or less (unless the
+   *  details take the table's place there): 890 px side by side, 1320 px stacked. With
+   *  less, both start folded behind their one-line disclosures. */
+  function roomyHere() {
+    if (!Shell.roomy()) return false;
+    const limit = heightLimit();
+    if (!limit) return true;
+    const panes = window.innerWidth <= 980 && !compactHost() ? 2 : 1;
+    return limit >= CHROME_HEIGHT + OPEN_HEIGHT + panes * ROWS_HEIGHT + (panes - 1) * 10;
+  }
+
+  /** A host 980 px wide or less, where the details pane is stacked under the table, too
+   *  short for both to keep about five rows (under 1110 px): there a selected line's
+   *  details take the table's place. */
+  function compactHost() {
+    const limit = heightLimit();
+    return window.innerWidth <= 980 && limit > 0 && limit < CHROME_HEIGHT + 2 * ROWS_HEIGHT + 10;
+  }
+
+  // Teardown rejects every call still waiting: the closed view waits for no answer (a
+  // call the host never answers would otherwise hold its "Asking…" for two minutes).
+  let closeCalls = () => {};
+  const whenClosed = new Promise((resolve, reject) => {
+    closeCalls = () => reject(new Error("the view was closed"));
+  });
+  whenClosed.catch(() => {});
+
+  /** Call one of the page's read-only tools (through the shell, which checks serverTools). */
+  function call(tool, args) {
+    if (!READ_ONLY_TOOLS.has(tool)) return Promise.reject(new Error(`The view does not call ${tool}.`));
+    if (view.closed) return Promise.reject(new Error("the view was closed"));
+    return Promise.race([Shell.callTool(tool, args), whenClosed]);
+  }
+
+  /** Designators as short tokens in the order given: three or more consecutive numbers of
+   *  one prefix as a range (R1–R4), the others one by one. */
+  function ranges(list) {
+    const tokens = [];
+    let run = [];
+    const parse = (text) => {
+      const match = /^(.*?)(\d+)$/.exec(text);
+      if (!match || /\d$/.test(match[1]) || (match[2].length > 1 && match[2].startsWith("0"))) return null;
+      return { prefix: match[1], number: Number(match[2]) };
+    };
+    const close = () => {
+      if (run.length >= 3) tokens.push({ text: `${run[0].text}–${run[run.length - 1].text}`, count: run.length });
+      else for (const item of run) tokens.push({ text: item.text, count: 1 });
+      run = [];
+    };
+    for (const designator of list || []) {
+      const text = String(designator);
+      const parsed = parse(text);
+      const last = run[run.length - 1];
+      if (parsed && last && last.parsed.prefix === parsed.prefix && parsed.number === last.parsed.number + 1) {
+        run.push({ text, parsed });
+        continue;
+      }
+      close();
+      if (parsed) run.push({ text, parsed });
+      else tokens.push({ text, count: 1 });
+    }
+    close();
+    return tokens;
+  }
+
+  // ---------- data contract ----------
+
+  /** The rows a contract path names: "x.y[]" a list's items, "x.y{}" an object's values. */
+  function rowsAt(data, path) {
+    if (path === "result") return [data];
+    let rows = [data];
+    for (const part of path.split(".")) {
+      const key = part.replace(/(\[\]|\{\})$/, "");
+      rows = rows.flatMap((row) => {
+        const value = row && typeof row === "object" ? row[key] : undefined;
+        if (part.endsWith("[]")) return Array.isArray(value) ? value : [];
+        if (part.endsWith("{}")) return value && typeof value === "object" && !Array.isArray(value) ? Object.values(value) : [];
+        return value === undefined || value === null ? [] : [value];
+      });
+    }
+    return rows;
+  }
+
+  function checkContract(shapes, data) {
+    const problems = [];
+    for (const [path, shape] of Object.entries(shapes)) {
+      for (const key of shape.required) {
+        const missing = rowsAt(data, path).filter((row) => !row || typeof row !== "object" || !(key in row)).length;
+        if (missing) problems.push(`${path}: ${key} missing in ${missing} row(s)`);
+      }
+    }
+    return problems;
+  }
+
+  // ---------- lines ----------
+
+  function makeRows(lines, fitted, start) {
+    return (lines || []).map((line, index) => ({
+      ...line, _key: `${fitted ? "l" : "n"}${start + index}`, _rank: (fitted ? 0 : 1e7) + start + index,
+      _fitted: fitted, _findings: [], _severity: null, _missing: false,
+    }));
+  }
+
+  function fittedRows() {
+    return (view.data && view.data.rows) || [];
+  }
+
+  function notFittedRows() {
+    return (view.notFitted && view.notFitted.rows) || [];
+  }
+
+  function allRows() {
+    return [...fittedRows(), ...notFittedRows()];
+  }
+
+  /** The parts check_bom's missing_mpn names (upper case). listed: each needs an MPN and
+   *  has no MPN parameter (true whatever else holds). exact: those are all such parts
+   *  (every page read, no BomDoc, whose part choices count as MPNs there and leave their
+   *  parts out, and per-part findings, at half the parts or more with an MPN), else null
+   *  and the lines' own data decide for the parts not listed. */
+  function missingFromChecks() {
+    const checks = view.checks;
+    if (!checks || !checks.findings || !checks.header) return { exact: null, listed: new Set() };
+    const header = checks.header;
+    const findings = checks.findings.filter((finding) => finding.check === "missing_mpn");
+    const listed = new Set(findings.flatMap((finding) => (finding.designators || []).map((designator) => String(designator).toUpperCase())));
+    const exact = !checks.stopped && (header.checks_run || []).includes("missing_mpn") && !header.bom_doc &&
+      !header.bom_doc_error && findings.every((finding) => (finding.designators || []).length > 0);
+    return { exact: exact ? listed : null, listed };
+  }
+
+  const placeholderMarks = (row) => String(row.mpn_placeholder || "").split(" / ").map((text) => text.trim().toLowerCase());
+
+  /** Whether a fitted line has a part that needs an MPN and has none, by
+   *  mpn_coverage_percent's rule (services/bom.needs_mpn): {state: "yes", "may" (the
+   *  line's data cannot tell) or "", why}. No part needs one when the coverage is null;
+   *  check_bom's missing_mpn decides when it names the parts exactly (mechanical parts
+   *  left out), and a part it lists always counts. Else the line tells what it can: a
+   *  placeholder other than 'TBD', 'TBA' or '?' says none is needed, but get_bom lists a
+   *  line's distinct placeholders and up to five MPNs, not each part's. */
+  function missingMpn(row, checks) {
+    const no = { state: "", why: "" };
+    if (!row._fitted || !view.data) return no;
+    const coverage = view.data.mpn_coverage_percent;
+    if (coverage === null || coverage === undefined) return no;
+    const names = (row.designators || []).map((designator) => String(designator).toUpperCase());
+    if (checks.exact) return names.some((name) => checks.exact.has(name)) ? { state: "yes", why: "check_bom's missing_mpn names a part of this line." } : no;
+    if (names.some((name) => checks.listed.has(name))) return { state: "yes", why: "check_bom's missing_mpn names a part of this line." };
+    const varies = row.varies && Array.isArray(row.varies.mpn) ? row.varies.mpn : null;
+    if (row.mpn) {
+      if (varies && varies.some((value) => value === null)) {
+        return { state: "may", why: "A part of this line has no MPN parameter: get_bom does not say whether it has a placeholder that says none is needed (such as 'N/A') or is a mechanical part." };
+      }
+      const counted = row.varies_count && row.varies_count.mpn;
+      if (varies && counted && counted > varies.length) {
+        return { state: "may", why: `get_bom lists ${varies.length} of the ${counted} MPNs of this line's parts: a part without one may be among the others.` };
+      }
+      return no;
+    }
+    if (!row.mpn_placeholder) return { state: "yes", why: "No part of this line has an MPN parameter or a placeholder (a mechanical part would not count, and get_bom does not say which parts are mechanical)." };
+    const marks = placeholderMarks(row);
+    if (marks.some((text) => UNDECIDED.has(text))) return { state: "yes", why: `A part of this line has the placeholder ${row.mpn_placeholder}: it still needs an MPN.` };
+    if ((Number(row.quantity) || 0) > marks.length) {
+      return { state: "may", why: `get_bom lists the line's placeholders (${row.mpn_placeholder}), not which parts have one: a part without any may be among its ${row.quantity}.` };
+    }
+    return no;
+  }
+
+  function worst(findings) {
+    let best = null;
+    for (const finding of findings) {
+      if (best === null || (SEVERITY_RANK[finding.severity] ?? 9) < (SEVERITY_RANK[best] ?? 9)) best = finding.severity;
+    }
+    return best;
+  }
+
+  /** check_bom's findings mapped to the lines by designator: each line its findings, each
+   *  finding its lines and the designators on no line drawn. A duplicate_designator
+   *  finding names a sheet designator (as on its sheet): the lines of the parts with that
+   *  sheet designator, or the part of that name that has no other one; when both exist
+   *  (get_bom's lines give no sheet), no line is marked and the finding lists both. */
+  function mapFindings() {
+    const rows = allRows();
+    const missing = missingFromChecks();
+    for (const row of rows) {
+      const result = missingMpn(row, missing);
+      row._findings = [];
+      row._severity = null;
+      row._missing = result.state;
+      row._missingWhy = result.why;
+    }
+    const checks = view.checks;
+    if (!checks || !checks.findings) return;
+    const byName = new Map();
+    const upper = new Map();
+    const bySheet = new Map();
+    for (const row of rows) {
+      for (const designator of row.designators || []) {
+        byName.set(String(designator), row);
+        if (!upper.has(String(designator).toUpperCase())) upper.set(String(designator).toUpperCase(), row);
+      }
+      for (const logical of Object.values(row.logical_designators || {})) {
+        const key = String(logical).toUpperCase();
+        if (!bySheet.has(key)) bySheet.set(key, []);
+        if (!bySheet.get(key).includes(row)) bySheet.get(key).push(row);
+      }
+    }
+    const physical = (designator) => {
+      const row = byName.get(String(designator)) || upper.get(String(designator).toUpperCase());
+      if (!row) return null;
+      // A part whose sheet designator is another name is not called this on its sheet.
+      const own = Object.entries(row.logical_designators || {}).find(([name]) => name.toUpperCase() === String(designator).toUpperCase());
+      return own && String(own[1]).toUpperCase() !== String(designator).toUpperCase() ? null : row;
+    };
+    for (const finding of checks.findings) {
+      const lines = [];
+      const unmapped = [];
+      const maybe = [];
+      for (const designator of finding.designators || []) {
+        let found = [];
+        if (finding.check === "duplicate_designator") {
+          const sheet = bySheet.get(String(designator).toUpperCase()) || [];
+          const named = physical(designator);
+          if (sheet.length && named && !sheet.includes(named)) {
+            for (const row of [named, ...sheet]) if (!maybe.includes(row)) maybe.push(row);
+            continue;
+          }
+          found = sheet.length ? sheet : named ? [named] : [];
+        } else {
+          const row = byName.get(String(designator)) || upper.get(String(designator).toUpperCase());
+          found = row ? [row] : [];
+        }
+        if (!found.length) {
+          unmapped.push(designator);
+          continue;
+        }
+        for (const row of found) {
+          if (!lines.includes(row)) lines.push(row);
+          if (!row._findings.includes(finding)) row._findings.push(finding);
+        }
+      }
+      finding._rows = lines;
+      finding._unmapped = unmapped;
+      finding._maybe = maybe;
+    }
+    for (const row of rows) row._severity = worst(row._findings);
+  }
+
+  /** The designators a finding lists may stop at check_bom's listing cap. */
+  function listedCap(finding) {
+    if (finding.check === "not_compiled") return LISTED.not_compiled;
+    if (BOM_DOC_CHECKS.has(finding.check) || finding.source === "bom_doc") return LISTED.bom_doc;
+    return null;
+  }
+
+  function capped(finding) {
+    const cap = listedCap(finding);
+    return Boolean(cap) && (finding.designators || []).length >= cap;
+  }
+
+  // ---------- loading ----------
+
+  function showState(kind, title, detail) {
+    clear(app).appendChild(Shell.state(kind, title, detail));
+  }
+
+  const ERROR_TITLES = {
+    no_project: "No project is loaded",
+    netlist_required: "The netlist is not loaded",
+    no_components_loaded: "No components were loaded",
+    variant_not_found: "get_bom does not know that variant",
+  };
+
+  function showError(payload) {
+    clear(app).appendChild(Shell.state("error", ERROR_TITLES[payload.error] || "get_bom answered with an error",
+      payload.message || payload.error));
+    if ((payload.sheet_errors || []).length) {
+      app.appendChild(el("details", { class: "more section-gap" }, el("summary", { text: "Sheet errors" }),
+        el("ul", { class: "small" }, payload.sheet_errors.map((item) => el("li", { text: typeof item === "object" ? JSON.stringify(item) : String(item) })))));
+    }
+    if (payload.error === "variant_not_found" && canCall()) {
+      // The switch lists the variants get_bom knows.
+      ui.controls = el("section", { class: "picker section-gap", "aria-label": "Variant" });
+      app.appendChild(ui.controls);
+      renderControls();
+      if (!view.variants) loadVariants();
+    }
+  }
+
+  /** What a result says of the call that made it: all of get_bom's arguments but group_by. */
+  function inferredArgs(first) {
+    return cleanArgs({
+      variant: first.variant,
+      include_not_fitted: Array.isArray(first.not_fitted),
+      compare_variants: Array.isArray(first.variants),
+      active_bom: Boolean(first.bom_doc || first.bom_doc_error),
+    });
+  }
+
+  async function bomPage(args, offset, expect) {
+    const page = Shell.resultJson(await call("get_bom", { ...args, offset }));
+    if (page && page.error) throw new Error(page.message || page.error);
+    if (!page || !Array.isArray(page.lines)) throw new Error("it holds no lines");
+    // A page of another BOM (another variant, or the project changed) is not merged.
+    if (expect && (page.variant !== expect.variant || page.lines_total !== expect.lines_total)) {
+      throw new Error(`it is not a page of this BOM (${page.variant}, ${plural(page.lines_total, "line")})`);
+    }
+    return page;
+  }
+
+  async function loadResult(result) {
+    let first;
+    try {
+      first = Shell.resultJson(result);
+    } catch (error) {
+      view.busy = false;
+      showState("error", "The BOM could not be read", error.message);
+      return;
+    }
+    await loadFrom(first, view.argsKnown ? cleanArgs(view.args) : null);
+  }
+
+  /** Read a get_bom result: every page after it with the same arguments (from offset 0
+   *  when it is a later page), as JSON when it is CSV. asked: the call's arguments, or null
+   *  when the host did not send them (the result names all of them but group_by). */
+  async function loadFrom(first, asked) {
+    view.busy = true;
+    const notes = [];
+    try {
+      if (!first || typeof first !== "object") throw new Error("The result is not a BOM.");
+      if (first.error) {
+        view.data = null;
+        view.errorPayload = first;
+        view.wanted = asked ? asked.variant : null;
+        showError(first);
+        return;
+      }
+      view.errorPayload = null;
+      let groupKnown = Boolean(asked);
+      if (!asked) asked = inferredArgs(first);
+      const reasons = [];
+      let pageOn = true;  // false: the pages after this one are not read (their grouping is not known)
+      if (!Array.isArray(first.lines) && typeof first.csv === "string") {
+        if (!canCall() || view.closed) {
+          drawCsv(first, asked);
+          return;
+        }
+        // Without the call's arguments the grouping of the CSV is not known: the JSON is
+        // asked with get_bom's default grouping, and labelled so.
+        const json = groupKnown ? asked : { ...asked, group_by: "mpn" };
+        showState("loading", "Reading the BOM", "The result is CSV text: asking get_bom again for JSON.");
+        try {
+          first = await bomPage(json, 0, null);
+        } catch (error) {
+          drawCsv(first, asked, `get_bom could not be asked again for JSON: ${error.message}`);
+          return;
+        }
+        notes.push(groupKnown
+          ? "The call asked for CSV (format csv): the view asked get_bom again with the same arguments for JSON."
+          : "The call asked for CSV (format csv) and the host did not send its arguments: the view asked get_bom again for JSON with group_by mpn (the tool's default; the CSV may have been grouped by Comment) and the arguments the result names.");
+        asked = json;
+        groupKnown = true;
+      }
+      if (!groupKnown && (first.offset > 0 || first.has_more) && canCall() && !view.closed) {
+        // get_bom's lines do not say how they were grouped: pages asked with another
+        // group_by would not fit together, so all of them are read with the tool's default.
+        const json = { ...asked, group_by: "mpn" };
+        showState("loading", "Reading the BOM", "The host did not send the call's arguments: asking get_bom from offset 0 with group_by mpn.");
+        try {
+          first = await bomPage(json, 0, null);
+          asked = json;
+          groupKnown = true;
+          notes.push("The host did not send the call's arguments: the view read get_bom again from offset 0 with group_by mpn (the tool's default) and the arguments the result names.");
+        } catch (error) {
+          // The other pages could be grouped otherwise than this one: only it is shown.
+          reasons.push(`get_bom could not be read again from offset 0 with a known grouping (the host did not send the call's arguments), so only this page is shown: ${error.message}`);
+          pageOn = false;
+        }
+      } else if (first.offset > 0 && canCall() && !view.closed) {
+        // A later page: the earlier lines come with the first page, which the view asks for
+        // when it can (get_bom repeats its header on every page).
+        showState("loading", "Reading the BOM", "Asking get_bom for its first page.");
+        try {
+          const later = first.offset;
+          first = await bomPage(asked, 0, first);
+          notes.push(`The result was a later page of get_bom (offset ${later}): the view read it again from offset 0.`);
+        } catch (error) {
+          reasons.push(`its first page could not be read: ${error.message}`);
+        }
+      }
+      if (first.offset > 0) reasons.unshift(`this result starts at offset ${first.offset}, so its first ${plural(first.offset, "line")} are not in it`);
+      const lines = [...first.lines];
+      const { pages, stopped } = await Shell.readPages({
+        // The first page counts: a stop says "at most 60 pages" after 60 pages read.
+        first, tool: "get_bom", budget: Shell.pageBudget(MAX_PAGES, 1), closed: () => view.closed,
+        pageOffset: (page) => (pageOn && page.has_more && page.next_offset !== undefined ? page.next_offset : null),
+        getPage: (offset) => bomPage(asked, offset, first),
+        onPage: (page) => { lines.push(...page.lines); },
+        progress: (page, offset) => showState("loading", "Reading the BOM", `get_bom pages its lines: page ${page} (offset ${offset}).`),
+      });
+      // A page the closed view stopped waiting for: the reason is the closing.
+      if (stopped) reasons.push(view.closed ? "the view was closed" : stopped);
+      const previous = view.data;
+      const rows = makeRows(lines, true, first.offset || 0);
+      view.data = {
+        ...first, lines: undefined, csv: undefined, asked, groupKnown, notes, pages, rows,
+        incomplete: reasons.length > 0, stopReason: reasons.join("; ").replace(/[.\s]+$/, ""),
+      };
+      view.warnings = checkContract(CONTRACT.shapes, { ...first, lines });
+      // The same lines as before (asked again for the BomDoc columns, say): the selected
+      // line, its details and the designators shown stay.
+      const before = previous ? new Map(previous.rows.map((row) => [row._key, (row.designators || []).join("\u0001")])) : null;
+      const sameLines = Boolean(before) && previous.variant === first.variant && before.size === rows.length &&
+        rows.every((row) => before.get(row._key) === (row.designators || []).join("\u0001"));
+      // Answers kept for another variant are dropped: check_bom's findings, the Not Fitted
+      // lines (also grouped as asked) and a line's BomDoc solutions.
+      if (view.checks && view.checks.variant !== first.variant) view.checks = null;
+      if (Array.isArray(first.not_fitted)) {
+        view.notFitted = { rows: makeRows(first.not_fitted, false, 0), from: "result" };
+      } else if (!previous || previous.variant !== first.variant || previous.asked.group_by !== asked.group_by ||
+                 !view.notFitted || !view.notFitted.rows) {
+        view.notFitted = null;
+      }
+      if (Array.isArray(first.variants)) view.compare = { variants: first.variants, from: "result" };
+      // A call that asked for the Not Fitted parts shows them from the start.
+      if (!previous && asked.include_not_fitted) view.kinds.add("not_fitted");
+      const kept = sameLines && view.selected && (view.selected.kind === "finding" ||
+        allRows().some((row) => row._key === view.selected.id)) ? view.selected : null;
+      if (!kept) {
+        view.selected = null;
+        view.asked = [];
+        view.componentPick = null;
+      }
+      if (!sameLines) {
+        view.expanded = new Set();
+        view.solutions = new Map();
+      }
+      view.pick = first.variant;
+      mapFindings();
+      renderAll();
+      if (canCall() && !view.closed) {
+        loadChecks();
+        if (view.kinds.has("not_fitted")) loadNotFitted();
+        if (!view.variants) loadVariants();
+      }
+    } catch (error) {
+      showState("error", "The BOM could not be read", error.message);
+    } finally {
+      view.busy = false;
+    }
+  }
+
+  /** Ask get_bom again with other arguments (the variant switch, group_by, the BomDoc
+   *  columns); the table already drawn stays when the call fails. Never switches the
+   *  active variant. */
+  async function reask(change, what) {
+    if (view.closed) renderControls();  // says the view was closed, without its buttons
+    if (view.busy || !canCall() || view.closed) return;
+    const base = view.data ? { ...view.data.asked, variant: view.data.variant } : cleanArgs(view.args);
+    const args = cleanArgs({ ...base, ...change });
+    const mark = Shell.focusMark(app);
+    view.busy = true;
+    showState("loading", "Reading the BOM", `Asking get_bom for ${what}.`);
+    try {
+      const first = Shell.resultJson(await call("get_bom", { ...args, offset: 0 }));
+      if (first && first.error && !view.data) {
+        view.busy = false;
+        view.errorPayload = first;
+        view.wanted = args.variant || null;
+        showError(first);
+        app.prepend(Shell.notice("error", `Asking get_bom for ${what} failed: ${first.message || first.error}`));
+      } else {
+        if (first && first.error) throw new Error(first.message || first.error);
+        await loadFrom(first, args);
+      }
+    } catch (error) {
+      view.busy = false;
+      if (view.data) {
+        renderAll();
+      } else if (view.errorPayload) {
+        showError(view.errorPayload);
+      } else {
+        showState("error", "The BOM could not be read", error.message);
+      }
+      app.prepend(view.closed ? Shell.notice("info", `The view was closed before get_bom answered for ${what}.`)
+        : Shell.notice("error", `Asking get_bom for ${what} failed: ${error.message}`));
+    }
+    // The button used may be gone (Add BomDoc columns): focus goes to the selected line,
+    // else to Show.
+    if (mark) Shell.refocus(app, mark, focusAfterAsk);
+  }
+
+  function focusAfterAsk() {
+    const row = selectedRow();
+    if (row && ui.table && view.tab === "lines" && ui.table.focus((other) => other._key === row._key)) return document.activeElement;
+    return ui.showButton && !ui.showButton.disabled ? ui.showButton : ui.tabBar && ui.tabBar.selected();
+  }
+
+  // ---------- check_bom ----------
+
+  async function checkPage(variant, offset, first) {
+    const page = Shell.resultJson(await call("check_bom", { variant, offset }));
+    if (page && page.error) throw new Error(page.message || page.error);
+    if (!page || !Array.isArray(page.findings)) throw new Error("it holds no findings");
+    if (page.variant !== first.variant || page.total !== first.total) {
+      throw new Error(`it is not a page of these findings (${page.variant}, ${plural(page.total, "finding")})`);
+    }
+    return page;
+  }
+
+  /** check_bom for the variant shown, every page: its findings mapped to the lines. A
+   *  failure is shown with Retry, never kept as the answer; findings asked for another
+   *  variant than the one shown now are dropped. */
+  async function loadChecks(force = false) {
+    if (!view.data || view.closed || !canCall()) return;
+    const variant = view.data.variant;
+    if (!force && view.checks && view.checks.variant === variant && !view.checks.error) return;
+    const state = { variant, loading: true, findings: null, error: "", stopped: "", pages: 0, header: null, warnings: [] };
+    view.checks = state;
+    refreshChecks();
+    try {
+      const first = Shell.resultJson(await call("check_bom", { variant, offset: 0 }));
+      if (first && first.error) throw new Error(first.message || first.error);
+      if (!first || !Array.isArray(first.findings)) throw new Error("check_bom's answer holds no findings");
+      const findings = [...first.findings];
+      const { pages, stopped } = await Shell.readPages({
+        first, tool: "check_bom", budget: Shell.pageBudget(MAX_PAGES, 1), closed: () => view.closed,
+        pageOffset: (page) => (page.has_more && page.next_offset !== undefined ? page.next_offset : null),
+        getPage: (offset) => checkPage(variant, offset, first),
+        onPage: (page) => { findings.push(...page.findings); },
+      });
+      if (view.checks !== state) return;  // another variant was asked meanwhile
+      findings.forEach((finding, index) => { finding._id = index; });
+      Object.assign(state, { loading: false, findings, header: first, pages, stopped,
+                             warnings: checkContract(CONTRACT.check_bom, { ...first, findings }) });
+    } catch (error) {
+      if (view.checks !== state) return;
+      Object.assign(state, { loading: false, error: error.message, closed: view.closed });
+    }
+    mapFindings();
+    refreshChecks();
+  }
+
+  /** Where check_bom's findings stand: "ready", "loading" (a call on its way), "failed"
+   *  (Retry), "closed" (the view was closed before they came) or "none" (no tool calls). */
+  function checksState() {
+    const checks = view.checks;
+    if (checks && checks.findings) return "ready";
+    if (checks && checks.error && !checks.closed) return "failed";
+    if (view.closed) return "closed";
+    if (!canCall()) return "none";
+    return "loading";
+  }
+
+  const CHECKS_UNKNOWN = {
+    loading: "check_bom has not answered yet",
+    failed: "check_bom's findings could not be read",
+    closed: "Not known: the view was closed before check_bom answered",
+    none: "Not known: this host does not let the view ask check_bom",
+  };
+  const CHECKS_MARK = { loading: "…", failed: "!", closed: "?", none: "?" };
+
+  /** Redraw what check_bom's answer changes, keeping keyboard focus where it is. */
+  function refreshChecks() {
+    if (!view.data || !ui.content) return;
+    updateTabs();
+    updateHeadBadges();
+    updateFilters();
+    // Whether to offer the BomDoc columns (redrawn only then: a redraw closes an open list).
+    if (hasBomDoc() !== ui.controlsBomDoc) renderControls();
+    if (view.tab === "lines" && ui.table) {
+      if (view.groupBy === "finding") ui.table.setGroup(groupSpec());
+      else ui.table.setRows(rowsShown());
+    } else if (view.tab === "findings" || view.tab === "notes") {
+      Shell.keepFocus(ui.content, renderTab, () => ui.tabBar && ui.tabBar.selected());
+    }
+    renderPane();
+  }
+
+  /** Whether the project has an ActiveBOM document, as get_bom (asked with active_bom) or
+   *  check_bom said: true, false, "unreadable" (its bom_doc_error), or null (not known). */
+  function hasBomDoc() {
+    for (const header of [view.data, view.checks && view.checks.header]) {
+      if (!header) continue;
+      if (header.bom_doc) return true;
+      if (header.bom_doc_error) return header.bom_doc_error.error === "no_bom_doc" ? false : "unreadable";
+    }
+    // check_bom names the BomDoc whenever the project has one (and says when it cannot
+    // read it): without either, there is none.
+    return view.checks && view.checks.header ? false : null;
+  }
+
+  function bomDocError() {
+    const error = (view.data && view.data.bom_doc_error) || (view.checks && view.checks.header && view.checks.header.bom_doc_error);
+    return error ? error.message || error.error : "";
+  }
+
+  // ---------- Not Fitted lines and the variant comparison ----------
+
+  /** get_bom lists the Not Fitted parts as lines on every page with include_not_fitted:
+   *  one call (offset 0) with the shown BOM's arguments gives all of them. */
+  async function loadNotFitted(force = false) {
+    const data = view.data;
+    if (!data || !data.parts || !data.parts.not_fitted) return;
+    if (!force && view.notFitted && (view.notFitted.rows || view.notFitted.loading)) return;
+    if (!canCall() || view.closed) {
+      refreshNotFitted();
+      return;
+    }
+    // Grouped as the fitted lines are; when the host did not say how, with get_bom's
+    // default (MPN), and labelled so.
+    const args = cleanArgs({ ...data.asked, variant: data.variant, include_not_fitted: true,
+                             group_by: data.groupKnown ? data.asked.group_by : "mpn" });
+    const state = { loading: true, rows: null, error: "", args };
+    view.notFitted = state;
+    refreshNotFitted();
+    try {
+      const page = Shell.resultJson(await call("get_bom", { ...args, offset: 0 }));
+      if (page && page.error) throw new Error(page.message || page.error);
+      if (!page || page.variant !== data.variant || page.lines_total !== data.lines_total) {
+        throw new Error("its answer is not this BOM's (another variant, or the project changed)");
+      }
+      if (!Array.isArray(page.not_fitted)) throw new Error("get_bom listed no Not Fitted line");
+      if (view.notFitted !== state || view.data !== data) return;
+      Object.assign(state, { loading: false, rows: makeRows(page.not_fitted, false, 0) });
+    } catch (error) {
+      if (view.notFitted !== state) return;
+      Object.assign(state, { loading: false, error: error.message, closed: view.closed });
+    }
+    mapFindings();
+    refreshNotFitted();
+  }
+
+  function refreshNotFitted() {
+    if (!view.data || !ui.content) return;
+    updateFilters();
+    updateChips();
+    if (view.tab === "lines" && ui.table) {
+      if (view.groupBy === "none") ui.table.setRows(rowsShown());
+      else ui.table.setGroup(groupSpec());
+    }
+    if (ui.nfStatus) ui.nfStatus.textContent = notFittedStatus();
+  }
+
+  function notFittedStatus() {
+    const state = view.notFitted;
+    if (!view.kinds.has("not_fitted")) return "";
+    if (!state || state.loading || state.closed) {
+      if (view.closed) return "The view was closed: the Not Fitted lines were not read.";
+      if (!canCall()) return "This host does not let the view ask get_bom for the Not Fitted lines.";
+      return state ? "Asking get_bom for the Not Fitted lines…" : "";
+    }
+    if (state.error) return `The Not Fitted lines could not be read: ${state.error}`;
+    if (state.from !== "result" && !view.data.groupKnown) return "The Not Fitted lines are grouped by MPN (get_bom's default): the host did not say how the BOM's lines were grouped.";
+    return "";
+  }
+
+  /** What each variant changes in the BOM: get_bom with compare_variants, its first page
+   *  (the list comes whole on every page and does not depend on the variant shown). */
+  async function loadCompare() {
+    if (!view.data || view.closed || !canCall()) return;
+    if (view.compare && (view.compare.variants || view.compare.loading)) return;
+    const args = cleanArgs({ ...view.data.asked, variant: view.data.variant, compare_variants: true });
+    const state = { loading: true, variants: null, error: "" };
+    view.compare = state;
+    renderVariantsTab();
+    try {
+      const page = Shell.resultJson(await call("get_bom", { ...args, offset: 0 }));
+      if (page && page.error) throw new Error(page.message || page.error);
+      if (!page || !Array.isArray(page.variants)) throw new Error("get_bom's answer has no variant comparison");
+      Object.assign(state, { loading: false, variants: page.variants });
+      view.warnings = [...view.warnings, ...checkContract({ "variants[]": CONTRACT.shapes["variants[]"],
+        "variants[].changed[]": CONTRACT.shapes["variants[].changed[]"] }, page)];
+    } catch (error) {
+      if (view.compare !== state) return;
+      Object.assign(state, { loading: false, error: error.message, closed: view.closed });
+    }
+    renderVariantsTab();
+  }
+
+  function renderVariantsTab() {
+    updateTabs();
+    if (view.tab === "variants" && ui.content) Shell.keepFocus(ui.content, renderTab, () => ui.tabBar && ui.tabBar.selected());
+  }
+
+  // ---------- list_variants ----------
+
+  /** list_variants for the switch and the active variant's name (read-only). Resolves
+   *  when it answered; a call already on its way is shared, not repeated. */
+  function loadVariants() {
+    if (!canCall() || view.closed) return Promise.resolve();
+    if (view.variantsLoading) return view.variantsLoading;
+    view.variantsLoading = fetchVariants(variantsSignature());
+    if (!view.variants) renderControls();
+    return view.variantsLoading;
+  }
+
+  async function fetchVariants(before) {
+    try {
+      const listing = Shell.resultJson(await call("list_variants", {}));
+      if (listing && listing.error) throw new Error(listing.message || listing.error);
+      view.variants = Array.isArray(listing.variants) ? listing.variants : [];
+      view.active = listing.active_variant || (view.variants.find((variant) => variant.is_active) || {}).name || null;
+      view.variantsError = "";
+      view.listWarnings = checkContract(CONTRACT.list_variants, listing);
+    } catch (error) {
+      view.variantsError = error.message;
+    } finally {
+      view.variantsLoading = null;
+    }
+    if (variantsSignature() === before) return;
+    renderControls();
+    renderPane();
+    updateHeadBadges();
+  }
+
+  function variantsSignature() {
+    return JSON.stringify([view.variants, view.active, view.variantsError]);
+  }
+
+  // ---------- the variant switch, grouping, BomDoc columns and boards ----------
+
+  /** The names the switch offers: the project's variants, then the base design. */
+  function pickNames() {
+    const names = (view.variants || []).map((variant) => variant.name);
+    const shown = view.data ? view.data.variant : null;
+    for (const name of [shown, view.pick]) {
+      if (name && !isBase(name) && !names.some((other) => sameVariant(other, name))) names.push(name);
+    }
+    return [...names, BASE];
+  }
+
+  function optionLabel(name) {
+    if (isBase(name)) return `${BASE} (base design)`;
+    return sameVariant(name, view.active) ? `${name} (active)` : name;
+  }
+
+  function variantSelect() {
+    const select = el("select", { class: "pick", id: "pick-variant", "aria-label": "Variant to show" });
+    const names = pickNames();
+    for (const name of names) select.appendChild(el("option", { value: name, text: optionLabel(name) }));
+    const known = (wanted) => (wanted && trimmed(wanted) ? names.find((name) => sameVariant(name, wanted)) ||
+      (baseAlias(wanted) ? BASE : null) : null);
+    const current = known(view.pick) || known(view.wanted) || known(view.active) || names[0];
+    select.value = current;
+    view.pick = current;
+    select.addEventListener("change", () => {
+      view.pick = select.value;
+      syncShowButton();
+    });
+    return select;
+  }
+
+  /** The Show button's state says whether the picked variant is the one shown (its text and
+   *  title stay the same, so keyboard focus finds it again after the page is redrawn). */
+  function syncShowButton() {
+    if (!ui.showButton) return;
+    const shown = view.data && sameVariant(view.pick, view.data.variant);
+    ui.showButton.disabled = !canCall();
+    ui.showButton.setAttribute("aria-describedby", "pick-state");
+    if (ui.pickState) ui.pickState.textContent = shown ? "(shown)" : "";
+  }
+
+  function renderControls() {
+    if (!ui.controls) return;
+    Shell.keepFocus(ui.controls, drawControls, () => ui.showButton);
+  }
+
+  function drawControls() {
+    clear(ui.controls);
+    ui.showButton = null;
+    ui.pickState = null;
+    ui.controlsBomDoc = hasBomDoc();
+    if (view.closed) {
+      Shell.append(ui.controls, [el("p", { class: "help", text: "The view was closed: it asks the server nothing more." })]);
+      return;
+    }
+    if (!canCall()) {
+      Shell.append(ui.controls, [el("p", { class: "help", text: "This host does not let the view call tools: ask Claude for another variant's BOM (get_bom with variant), another grouping (group_by) or the Not Fitted parts (include_not_fitted)." })]);
+      return;
+    }
+    const body = [];
+    if (view.variantsLoading && !view.variants) body.push(el("p", { class: "muted", text: "Asking list_variants for the project's variants…" }));
+    if (view.variantsError) {
+      body.push(el("div", { class: "notice warning" }, el("span", { class: "grow", text: `list_variants failed: ${view.variantsError}` }),
+        el("button", { type: "button", class: "btn-link", text: "Retry", on: { click: () => loadVariants() } })));
+    }
+    if (view.variants || view.pick || view.data) {
+      ui.showButton = el("button", { type: "button", class: "btn", text: "Show",
+                                     title: "Ask get_bom and check_bom for the variant picked",
+                                     on: { click: () => reask({ variant: view.pick }, `variant ${view.pick}`) } });
+      ui.pickState = el("span", { class: "muted small", id: "pick-state" });
+      body.push(el("div", { class: "picker-row" },
+        el("label", {}, el("span", { class: "side", text: "Variant" }), variantSelect()), ui.showButton, ui.pickState));
+      syncShowButton();
+    }
+    if (view.data) {
+      const asked = view.data.asked;
+      const current = view.data.groupKnown ? asked.group_by || "mpn" : null;
+      const groupSwitch = Shell.segmented({
+        label: "Lines grouped by (get_bom)", current,
+        items: [{ id: "mpn", label: "MPN", title: "get_bom group_by mpn: by manufacturer part number, else Comment and footprint" },
+                { id: "comment", label: "Comment", title: "get_bom group_by comment: by Comment and footprint" }],
+        onChange: (id) => reask({ group_by: id }, `lines grouped by ${id === "mpn" ? "MPN" : "Comment"}`),
+      });
+      const row = el("div", { class: "picker-row" }, groupSwitch.el);
+      const bomDoc = hasBomDoc();
+      if (asked.active_bom) {
+        row.appendChild(el("span", { class: "muted small", text: "BomDoc columns: shown (asked with active_bom)" }));
+      } else if (bomDoc === true) {
+        row.appendChild(el("button", { type: "button", class: "btn", text: "Add BomDoc columns",
+          title: "Ask get_bom with active_bom for each line's ActiveBOM line numbers and chosen part",
+          on: { click: () => reask({ active_bom: true }, "the BomDoc columns") } }));
+      }
+      body.push(row);
+    }
+    body.push(el("p", { class: "help", text: `${READ_ONLY_NOTE} ${activeText()}` }));
+    Shell.append(ui.controls, body);
+  }
+
+  /** What the server's active variant is, as list_variants last said. */
+  function activeText() {
+    if (!view.active) return "get_component shows the server's active variant.";
+    const shown = view.data && !sameVariant(view.active, view.data.variant) ? ` (not ${view.data.variant}, the variant shown)` : "";
+    return `get_component shows the active variant, ${view.active}${shown}.`;
+  }
+
+  const MAX_BOARDS = 1e9;
+
+  /** The number of boards typed: a whole number from 1 to 10^9, else null. */
+  function boardsValue(input) {
+    const text = String(input.value).trim();
+    if (!/^\d+$/.test(text) || (input.validity && input.validity.badInput)) return null;
+    const number = Number(text);
+    return number >= 1 && number <= MAX_BOARDS ? number : null;
+  }
+
+  /** The boards field: a value that is not a whole number of boards is marked invalid and
+   *  said so (the quantities keep the last valid number), and is put back to that number
+   *  when the field is left, so the field shows the number the view uses. */
+  function boardsInput() {
+    const input = el("input", { type: "number", class: "boards", min: "1", max: String(MAX_BOARDS), step: "1", inputmode: "numeric",
+                                value: String(view.boards), "aria-label": "Number of boards (a local calculation)",
+                                "aria-describedby": "boards-note boards-error" });
+    ui.boardsError = el("span", { class: "local invalid", id: "boards-error", role: "status", hidden: true });
+    const mark = (valid) => {
+      input.setAttribute("aria-invalid", valid ? "false" : "true");
+      ui.boardsError.hidden = valid;
+      ui.boardsError.textContent = valid ? "" : `Not a whole number of boards from 1 to ${MAX_BOARDS}: the quantities use ${view.boards}.`;
+    };
+    const apply = (next) => {
+      if (next === view.boards) return;
+      const crossed = (next > 1) !== (view.boards > 1);
+      view.boards = next;
+      updateHeadBadges();
+      if (view.tab === "lines" && ui.table) {
+        if (crossed) Shell.keepFocus(ui.content, renderTab);
+        else ui.table.setRows(rowsShown());
+      }
+      renderPane();
+    };
+    let timer = null;
+    input.addEventListener("input", () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        const next = boardsValue(input);
+        if (next !== null) apply(next);
+        mark(next !== null);
+      }, 200);
+    });
+    input.addEventListener("change", () => {
+      clearTimeout(timer);
+      const next = boardsValue(input);
+      if (next !== null) apply(next);
+      else input.value = String(view.boards);
+      mark(true);
+    });
+    return input;
+  }
+
+  // ---------- the lines table ----------
+
+  function rowsShown() {
+    return allRows();
+  }
+
+  function fieldValues(row, field) {
+    const varies = row.varies && Array.isArray(row.varies[field]) ? row.varies[field] : null;
+    if (varies) return varies.map((value) => (value === null || value === undefined || value === "" ? NONE : String(value)));
+    return [row[field] ? String(row[field]) : NONE];
+  }
+
+  function groupSpec() {
+    const by = view.groupBy;
+    if (by === "none") return null;
+    const total = rowsShown().length;
+    if (by === "finding") {
+      const checks = view.checks;
+      const ready = Boolean(checks && checks.findings);
+      // check_bom's order: errors first, then by check (the order of its findings).
+      const first = new Map();
+      if (ready) checks.findings.forEach((finding) => { if (!first.has(finding.check)) first.set(finding.check, first.size); });
+      return {
+        key: (row) => (!ready ? NOT_KNOWN : row._findings.length ? [...new Set(row._findings.map((finding) => finding.check))] : NO_FINDING),
+        label: (key) => (key === NOT_KNOWN ? `Findings not known (${CHECKS_UNKNOWN[checksState()] || "check_bom has not answered"})`
+          : key === NO_FINDING ? "No check_bom finding" : checkLabel(key)),
+        count: (key, rows) => {
+          const parts = rows.reduce((sum, row) => sum + (row.designators || []).length, 0);
+          const severities = key.startsWith("\u0001") ? [] : [...new Set(checks.findings.filter((finding) => finding.check === key).map((finding) => finding.severity))];
+          return [...severities.map((severity) => Shell.levelBadge(severity)), el("span", { class: "badge", text: plural(rows.length, "line") }),
+            el("span", { class: "badge muted", text: plural(parts, "part") })];
+        },
+        order: (x, y) => (first.has(x) ? first.get(x) : 1e6 + Number(x === NO_FINDING)) - (first.has(y) ? first.get(y) : 1e6 + Number(y === NO_FINDING)),
+        open: (key, rows, groups) => groups === 1 || total <= 200,
+      };
+    }
+    const noun = FIELD_LABEL[by].toLowerCase();
+    return {
+      key: (row) => fieldValues(row, by),
+      label: (key) => (key === NONE ? `(no ${noun})` : key),
+      count: (key, rows) => {
+        const parts = rows.reduce((sum, row) => sum + (row.designators || []).length, 0);
+        return [el("span", { class: "badge", text: plural(rows.length, "line") }), el("span", { class: "badge muted", text: plural(parts, "part") })];
+      },
+      order: (x, y) => (Number(x === NONE) - Number(y === NONE)) || naturalOrder(x, y),
+      open: (key, rows, groups) => groups === 1 || total <= 200,
+    };
+  }
+
+  function rowFilter(row) {
+    if (!view.kinds.has(row._fitted ? "fitted" : "not_fitted")) return false;
+    if (view.show === "missing") return Boolean(row._missing);
+    if (view.show === "findings") return row._findings.length > 0;
+    return true;
+  }
+
+  function filtered() {
+    return !view.kinds.has("fitted") || view.show !== "all";
+  }
+
+  function designatorCell(row) {
+    const tokens = ranges(row.designators);
+    const open = view.expanded.has(row._key);
+    const shown = open ? tokens : tokens.slice(0, 6);
+    const hidden = tokens.slice(shown.length).reduce((sum, token) => sum + token.count, 0);
+    const box = el("span", { class: "desig" }, shown.map((token) => token.text).join(", "));
+    if (hidden || open && tokens.length > 6) {
+      box.appendChild(el("button", { type: "button", class: "btn-link",
+        text: open ? "fewer" : `+${hidden} more`, "aria-expanded": open ? "true" : "false",
+        title: open ? "Show the first designators only" : `Show all ${plural(row.designators.length, "designator")}`,
+        on: { click: (event) => toggleDesignators(row, event.currentTarget) } }));
+    }
+    return box;
+  }
+
+  /** Show all of a line's designators or the first ones. The rows are drawn again in the
+   *  same order (the designators do not change what is shown or how it is sorted), so
+   *  keyboard focus goes to the same toggle in the row at the same place. */
+  function toggleDesignators(row, button) {
+    const tr = button && button.closest("tr");
+    const at = tr && tr.parentElement ? [...tr.parentElement.children].indexOf(tr) : -1;
+    if (view.expanded.has(row._key)) view.expanded.delete(row._key);
+    else view.expanded.add(row._key);
+    if (!ui.table) return;
+    ui.table.setRows(rowsShown());
+    const body = ui.table.el.querySelector("tbody");
+    const again = at >= 0 && body ? body.children[at] : null;
+    const toggle = again && again.querySelector(".desig button");
+    if (toggle) toggle.focus();
+    else ui.table.focus((other) => other._key === row._key);
+  }
+
+  function fieldText(field) {
+    return (row) => (row[field] ? String(row[field]) : "");
+  }
+
+  function fieldCell(field) {
+    return (row) => {
+      const varies = row.varies && row.varies[field];
+      const text = row[field] ? String(row[field]) : "";
+      return [text ? el("span", { class: "val", text }) : el("span", { class: "val unset", text: "—" }),
+        varies ? el("span", { class: "badge info mark", text: "varies", title: `The line's parts have ${plural(variesCount(row, field), "value")} here` }) : null];
+    };
+  }
+
+  function variesCount(row, field) {
+    const counted = row.varies_count && row.varies_count[field];
+    return counted || (row.varies && row.varies[field] ? row.varies[field].length : 0);
+  }
+
+  function mpnText(row) {
+    if (row.mpn) return String(row.mpn);
+    return row.mpn_placeholder ? String(row.mpn_placeholder) : "";
+  }
+
+  function placeholderSaysNone(row) {
+    return placeholderMarks(row).every((text) => !UNDECIDED.has(text));
+  }
+
+  /** What a line's placeholder says: none needed, still needs one, or (get_bom lists the
+   *  distinct placeholders, not each part's) none needed for the parts that have it. */
+  function placeholderText(row) {
+    if (!placeholderSaysNone(row)) return "still needs one";
+    return row._missing === "may" ? "none needed for the parts that have it" : "none needed";
+  }
+
+  function mpnCell(row) {
+    if (row.mpn) {
+      return [el("span", { class: "val", text: row.mpn }),
+        row.varies && row.varies.mpn ? el("span", { class: "badge info mark", text: "varies" }) : null];
+    }
+    if (row.mpn_placeholder) {
+      return [el("span", { class: "val unset", text: row.mpn_placeholder }),
+        el("span", { class: "sub", text: `placeholder: ${placeholderText(row)}` })];
+    }
+    return el("span", { class: "val unset", text: "—" });
+  }
+
+  function bomDocText(row) {
+    const numbers = (row.bom_doc_lines || []).map((number) => (number === null ? "unnumbered" : String(number)));
+    const chosen = (row.bom_doc_chosen || []).map((entry) => entry.mpn).filter(Boolean);
+    return `${numbers.join(", ")} ${chosen.join(" / ")}`.trim();
+  }
+
+  function bomDocCell(row) {
+    if (!row._fitted) return el("span", { class: "muted", text: "" });
+    const numbers = (row.bom_doc_lines || []).map((number) => (number === null ? "unnumbered" : String(number)));
+    if (!numbers.length) return el("span", { class: "muted", text: row.bom_doc_lines ? "no line" : "" });
+    const chosen = (row.bom_doc_chosen || []).map((entry) => entry.mpn).filter(Boolean);
+    return [el("span", { text: `Line ${numbers.join(", ")}` }), chosen.length ? el("span", { class: "sub", text: chosen.join(" / ") }) : null];
+  }
+
+  function findingsValue(row) {
+    if (!view.checks || !view.checks.findings) return null;
+    return row._severity === null ? 3 : SEVERITY_RANK[row._severity] ?? 3;
+  }
+
+  function findingsCell(row) {
+    const state = checksState();
+    if (state !== "ready") return el("span", { class: "muted", text: CHECKS_MARK[state], title: CHECKS_UNKNOWN[state] });
+    if (!row._findings.length) return el("span", { class: "muted", text: "" });
+    const counts = {};
+    for (const finding of row._findings) counts[finding.severity] = (counts[finding.severity] || 0) + 1;
+    return el("span", { class: "marks" }, Object.keys(SEVERITY_RANK).filter((severity) => counts[severity])
+      .map((severity) => Shell.levelBadge(severity, severityText(severity, counts[severity]))));
+  }
+
+  function marksOf(row) {
+    const marks = [];
+    if (!row._fitted) marks.push(["error", "Not Fitted"]);
+    if (row._missing === "yes") marks.push(["warning", "no MPN"]);
+    else if (row._missing === "may") marks.push(["muted", "MPN may be missing"]);
+    if (row.varies) marks.push(["info", `varies: ${Object.keys(row.varies).map((key) => FIELD_LABEL[key] || key).join(", ")}`]);
+    const alternates = Object.keys(row.alternate_parts || {}).length;
+    if (alternates) marks.push(["info", plural(alternates, "alternate part")]);
+    if ((row.varied_parameters || []).length) marks.push(["muted", `varied: ${row.varied_parameters.join(", ")}`]);
+    return marks;
+  }
+
+  function marksCell(row) {
+    return el("span", { class: "marks" }, marksOf(row).map(([kind, text]) => el("span", { class: `badge ${kind}`, text })));
+  }
+
+  function linesEmpty() {
+    const data = view.data;
+    if (view.data.incomplete && !fittedRows().length) return "No line read: the notice above says why.";
+    if (!data.lines_total) return `${data.variant} has no BOM line.`;
+    return "No line to show.";
+  }
+
+  function linesTable() {
+    const rows = rowsShown();
+    const withBomDoc = rows.some((row) => Array.isArray(row.bom_doc_lines));
+    // Value is shown when half the lines or more have one (the column chooser has it).
+    const withValue = rows.filter((row) => row.value).length * 2 >= rows.length && rows.length > 0;
+    return Shell.table({
+      label: "BOM lines", ownFilter: false, rows, group: groupSpec(), filter: rowFilter,
+      rowKey: (row) => row._key, onActivate: selectLine, empty: linesEmpty(),
+      columns: [
+        { key: "quantity", label: "Qty", numeric: true, value: (row) => Number(row.quantity) || 0 },
+        // The boards' quantity, a local calculation (the label stays: the head says how many).
+        { key: "boards", label: "Qty × boards", numeric: true, hidden: view.boards <= 1,
+          value: (row) => (row._fitted ? (Number(row.quantity) || 0) * view.boards : 0),
+          render: (row) => (row._fitted ? String((Number(row.quantity) || 0) * view.boards) : el("span", { class: "muted", text: "0" })) },
+        // Sorted in get_bom's order (natural by the first designator), filtered by all of them.
+        { key: "designators", label: "Designators", cls: "c-name", value: (row) => row._rank,
+          text: (row) => [...(row.designators || []), ...Object.values(row.logical_designators || {})].join(" "),
+          render: designatorCell },
+        { key: "comment", label: "Comment", cls: "c-part", value: fieldText("comment"), render: fieldCell("comment") },
+        { key: "value", label: "Value", cls: "c-val", hidden: !withValue, value: fieldText("value"), render: fieldCell("value") },
+        { key: "description", label: "Description", cls: "c-msg", hidden: true, value: fieldText("description"), render: fieldCell("description") },
+        { key: "footprint", label: "Footprint", cls: "c-part", value: fieldText("footprint"), render: fieldCell("footprint") },
+        { key: "manufacturer", label: "Manufacturer", cls: "c-name", value: fieldText("manufacturer"), render: fieldCell("manufacturer") },
+        { key: "mpn", label: "MPN", cls: "c-part", value: mpnText, render: mpnCell },
+        { key: "bom_doc", label: "BomDoc", cls: "c-name", hidden: !withBomDoc, value: bomDocText, render: bomDocCell },
+        { key: "findings", label: "Findings", value: findingsValue,
+          text: (row) => row._findings.map((finding) => checkLabel(finding.check)).join(" "), render: findingsCell },
+        { key: "marks", label: "Marks", value: (row) => marksOf(row).map(([, text]) => text).join(" "), render: marksCell },
+      ],
+    });
+  }
+
+  function regroup(id) {
+    view.groupBy = id;
+    if (ui.table && view.tab === "lines") ui.table.setGroup(groupSpec());
+  }
+
+  // ---------- the findings table ----------
+
+  function findingRows() {
+    return (view.checks && view.checks.findings) || [];
+  }
+
+  function findingsBlock() {
+    const checks = view.checks;
+    const block = el("div", {});
+    if (!canCall() && !checks) {
+      block.appendChild(Shell.state("info", "Findings not known", "This host does not let the view call tools: ask Claude to check the BOM (check_bom)."));
+      return block;
+    }
+    if (checksState() === "closed") {
+      block.appendChild(Shell.state("info", "Findings not known", "The view was closed before check_bom answered: it asks the server nothing more."));
+      return block;
+    }
+    if (!checks || checks.loading) {
+      block.appendChild(Shell.state("loading", "Checking the BOM", `Asking check_bom for ${view.data.variant}.`));
+      return block;
+    }
+    if (checks.error) {
+      block.appendChild(el("div", { class: "notice error" }, el("span", { class: "grow", text: `check_bom failed: ${checks.error}` }),
+        view.closed ? null : el("button", { type: "button", class: "btn-link", text: "Retry", on: { click: () => loadChecks(true) } })));
+      return block;
+    }
+    const header = checks.header;
+    const counts = header.severity_counts || {};
+    block.appendChild(el("p", { class: "approx", text: `check_bom for ${checks.variant}: ${plural(header.total, "finding")} (${["error", "warning", "info"].map((severity) => severityText(severity, counts[severity] || 0)).join(", ")}), errors first. Each finding marks the lines that hold the parts it names.` }));
+    if (checks.stopped) {
+      block.appendChild(Shell.notice("warning", `Read ${plural(checks.pages, "page")} of check_bom, then stopped: ${checks.stopped}. The table holds ${checks.findings.length} of the ${header.total} findings.`));
+    }
+    if (header.bom_doc_error) block.appendChild(Shell.notice("warning", `check_bom could not read the BomDoc: ${header.bom_doc_error.message || header.bom_doc_error.error}`));
+    const notRun = Object.entries(header.checks_not_run || {});
+    if (notRun.length) block.appendChild(Shell.notice("info", `Not run: ${notRun.map(([check, why]) => `${checkLabel(check)} (${why})`).join("; ")}.`));
+    if (checks.warnings.length) block.appendChild(Shell.notice("warning", `check_bom is not quite the shape this view reads: ${checks.warnings.slice(0, 3).join("; ")}.`));
+    if (!checks.findings.length) {
+      block.appendChild(Shell.state("empty", "No findings", `check_bom finds nothing to report in ${checks.variant} (${(header.checks_run || []).length} checks run).`));
+      ui.table = null;
+      return block;
+    }
+    const first = new Map();
+    checks.findings.forEach((finding) => { if (!first.has(finding.check)) first.set(finding.check, first.size); });
+    ui.table = Shell.table({
+      label: "check_bom findings", ownFilter: false, rows: checks.findings, rowKey: (finding) => finding._id,
+      onActivate: selectFinding,
+      group: {
+        key: (finding) => finding.check,
+        label: (key) => checkLabel(key),
+        // check_bom's summary counts each check's findings, read or not.
+        count: (key, rows) => {
+          const total = (header.summary || {})[key];
+          return [...["error", "warning", "info"].filter((severity) => rows.some((finding) => finding.severity === severity))
+            .map((severity) => Shell.levelBadge(severity)),
+          el("span", { class: "badge", text: total && total > rows.length ? `${rows.length} of ${plural(total, "finding")}` : plural(rows.length, "finding") })];
+        },
+        order: (x, y) => first.get(x) - first.get(y),
+        open: (key, rows, groups) => groups === 1 || checks.findings.length <= 120,
+      },
+      columns: [
+        { key: "severity", label: "Severity", value: (finding) => SEVERITY_RANK[finding.severity] ?? 3, text: (finding) => finding.severity,
+          render: (finding) => Shell.levelBadge(finding.severity) },
+        { key: "issue", label: "Issue", cls: "c-msg" },
+        { key: "designators", label: "Parts", cls: "c-name", value: (finding) => (finding.designators || []).length,
+          text: (finding) => (finding.designators || []).join(" "),
+          render: (finding) => {
+            const tokens = ranges(finding.designators);
+            const more = tokens.slice(6).reduce((sum, token) => sum + token.count, 0);
+            return el("span", { class: "desig" }, tokens.slice(0, 6).map((token) => token.text).join(", ") || "—",
+              more ? el("span", { class: "muted", text: ` +${more}` }) : null);
+          } },
+        { key: "lines", label: "BOM lines", numeric: true, value: (finding) => (finding._rows || []).length,
+          render: (finding) => {
+            const count = (finding._rows || []).length;
+            const maybe = (finding._maybe || []).length;
+            if (!(finding.designators || []).length) return el("span", { class: "muted", text: "whole BOM" });
+            if (maybe && !count) return el("span", { class: "muted", text: `one of ${maybe}?`, title: "get_bom's lines give no sheet: the details list the lines it may be" });
+            return el("span", { text: `${capped(finding) ? "at least " : ""}${count}${maybe ? ` (+ one of ${maybe}?)` : ""}` });
+          } },
+        { key: "bom_doc_line", label: "BomDoc line", cls: "c-name", hidden: !checks.findings.some((finding) => "line" in finding || finding.lines),
+          value: (finding) => bomDocLines(finding) },
+        { key: "check", label: "Check", hidden: true, value: (finding) => checkLabel(finding.check) },
+      ],
+    });
+    ui.table.setQuery(view.query);
+    if (view.selected && view.selected.kind === "finding") ui.table.select((finding) => finding._id === view.selected.id);
+    block.appendChild(ui.table.el);
+    return block;
+  }
+
+  function bomDocLines(finding) {
+    if ("line" in finding) return finding.line === null ? `unnumbered ${finding.design_item_id || ""}`.trim() : String(finding.line);
+    const numbers = [...(finding.lines || []), ...(finding.unnumbered_lines || [])];
+    return numbers.join(", ");
+  }
+
+  // ---------- selection and details pane ----------
+
+  function selectedRow() {
+    if (!view.selected || view.selected.kind !== "line") return null;
+    return allRows().find((row) => row._key === view.selected.id) || null;
+  }
+
+  function selectedFinding() {
+    if (!view.selected || view.selected.kind !== "finding") return null;
+    return findingRows().find((finding) => finding._id === view.selected.id) || null;
+  }
+
+  function selectLine(row) {
+    const fromTable = Boolean(ui.table && ui.table.el.contains(document.activeElement));
+    view.selected = row ? { kind: "line", id: row._key } : null;
+    view.asked = [];
+    view.componentPick = null;
+    if (ui.table && view.tab === "lines") ui.table.select((other) => Boolean(row) && other._key === row._key);
+    renderPane();
+    // The details took the table's place (a short, narrow host): focus goes to them.
+    if (row && fromTable && ui.split && ui.split.classList.contains("solo") && ui.closeButton) ui.closeButton.focus();
+    if (row) Shell.announce(`Details: ${(row.designators || []).slice(0, 3).join(", ")}`);
+  }
+
+  function selectFinding(finding) {
+    const fromTable = Boolean(ui.table && ui.table.el.contains(document.activeElement));
+    view.selected = finding ? { kind: "finding", id: finding._id } : null;
+    if (ui.table && view.tab === "findings") ui.table.select((other) => Boolean(finding) && other._id === finding._id);
+    renderPane();
+    if (finding && fromTable && ui.split && ui.split.classList.contains("solo") && ui.closeButton) ui.closeButton.focus();
+    if (finding) Shell.announce(`Details: ${checkLabel(finding.check)}`);
+  }
+
+  /** From a finding's details to one of its lines in the Lines tab: the filters that would
+   *  hide it are cleared, the line selected and focused. */
+  function showLine(row) {
+    view.show = "all";
+    view.query = "";
+    view.kinds = new Set([...view.kinds, row._fitted ? "fitted" : "not_fitted"]);
+    view.tab = "lines";
+    view.selected = { kind: "line", id: row._key };
+    view.asked = [];
+    view.componentPick = null;
+    renderAll();
+    if (ui.table) ui.table.focus((other) => other._key === row._key);
+    Shell.announce(`Details: ${(row.designators || []).slice(0, 3).join(", ")}`);
+  }
+
+  /** Close the details (Close, or Esc): focus goes back to the row that was selected. */
+  function closeDetails() {
+    const selected = view.selected;
+    const inPane = ui.pane && ui.pane.contains(document.activeElement);
+    if (view.tab === "findings") selectFinding(null);
+    else selectLine(null);
+    if (!inPane && document.activeElement && document.activeElement !== document.body) return;
+    if (ui.table && selected && ui.table.focus((other) => (selected.kind === "line" ? other._key : other._id) === selected.id)) return;
+    if (ui.tabBar) ui.tabBar.focus();
+  }
+
+  /** Ask get_component for a part: it answers for the ACTIVE variant. list_variants is
+   *  asked first, so the answer is labelled with the active variant it was asked under; a
+   *  kept answer asked under another active variant than list_variants names now is
+   *  dropped and asked again. */
+  async function ask(tool, args, label) {
+    if (!READ_ONLY_TOOLS.has(tool)) return;
+    if (view.closed || !canCall()) {
+      renderPane();
+      return;
+    }
+    const key = JSON.stringify([tool, args]);
+    view.asked = [[tool, args, label], ...view.asked.filter(([other, otherArgs]) => JSON.stringify([other, otherArgs]) !== key)];
+    renderPane();
+    await loadVariants();
+    if (view.closed) return;
+    const under = view.variantsError ? null : view.active;
+    const kept = details.get(tool, args);
+    if (kept && kept.data && askedUnder.get(key) !== under) details.forget(tool, args);
+    const entry = details.get(tool, args);
+    if (!entry || entry.error) askedUnder.set(key, under);
+    details.load(tool, args);
+  }
+
+  function askAgain(tool, args, label) {
+    details.forget(tool, args);
+    ask(tool, args, label);
+  }
+
+  /** The active variant an answer shows: the one get_component names when the variant
+   *  changes the part, else the one list_variants named just before it was asked. */
+  function answeredUnder(tool, args, json) {
+    if (json && json.variant_changes && json.variant_changes.variant) return json.variant_changes.variant;
+    return askedUnder.get(JSON.stringify([tool, args])) || null;
+  }
+
+  function parsed(entry) {
+    const text = Shell.resultText(entry.data);
+    try {
+      return { json: JSON.parse(text), text };
+    } catch (error) {
+      return { json: null, text };
+    }
+  }
+
+  /** What get_component answered: the part as the ACTIVE variant shows it. */
+  function componentAnswer(tool, args, title) {
+    const entry = details.get(tool, args);
+    const head = el("h3", { text: title });
+    if (view.closed && (!entry || entry.loading)) return [head, el("p", { class: "muted", text: "The view was closed: it asks the server nothing more." })];
+    if (!entry || entry.loading) return [head, el("p", { class: "muted", text: `Asking ${tool}…` })];
+    if (entry.error) {
+      return [head, el("div", { class: "notice error" }, el("span", { class: "grow", text: entry.error }),
+        el("button", { type: "button", class: "btn-link", text: "Retry", on: { click: () => ask(tool, args, title) } }))];
+    }
+    const { json, text } = parsed(entry);
+    if (!json) return [head, el("pre", { class: "text", text: String(text).slice(0, 4000) })];
+    if (json.error) return [head, el("div", { class: "notice warning", text: json.message || json.error })];
+    const pins = Object.keys(json.pins || {}).length;
+    const under = answeredUnder(tool, args, json);
+    // list_variants has named another active variant since: this answer is not its.
+    const moved = under && view.active && !view.variantsError && !sameVariant(under, view.active);
+    const shown = view.data ? view.data.variant : null;
+    return [head,
+      el("p", { class: "help small", text: under
+        ? `As the active variant when asked, ${under}, shows it${shown && !sameVariant(under, shown) ? ` (not ${shown}, the variant this BOM shows)` : ""}.`
+        : "As the active variant when asked shows it (list_variants did not name it; not necessarily the variant this BOM shows)." }),
+      moved ? el("div", { class: "notice warning", text: `The active variant is now ${view.active}: Ask again for its values.` }) : null,
+      Shell.facts([
+        ["Fitted", json.dnp ? "no: Not Fitted in the active variant" : "yes, in the active variant"],
+        ["Value", json.value], ["Description", json.description], ["MPN", json.mpn], ["Sheet", json.sheet],
+        ["Sheet designator", json.logical_refdes], ["Pins", pins ? String(pins) : null],
+        ["Variant changes", json.variant_changes ? Object.keys(json.variant_changes.fields || {}).join(", ") || "parameters or alternate part" : null],
+      ]),
+      el("div", { class: "btn-row" }, el("button", { type: "button", class: "btn", text: "Ask again",
+        title: "The active variant may have changed: ask get_component again",
+        on: { click: () => askAgain(tool, args, title) } }))];
+  }
+
+  function componentSection(row) {
+    ui.componentHead = el("h3", { text: "The part in the active variant", tabindex: "-1" });
+    const head = ui.componentHead;
+    if (!canCall()) return [head, el("p", { class: "muted", text: "This host does not let the view call tools: ask Claude for the part (get_component)." })];
+    if (view.closed) return [head, el("p", { class: "muted", text: "The view was closed: it asks the server nothing more." })];
+    const designators = row.designators || [];
+    if (!designators.length) return [];
+    const designator = designators.includes(view.componentPick) ? view.componentPick : designators[0];
+    const shown = view.data.variant;
+    const other = view.active && !sameVariant(view.active, shown);
+    const label = `get_component ${designator}`;
+    const args = { refdes: designator };
+    ui.askButton = el("button", { type: "button", class: "btn",
+      text: other ? `${label} (active variant: ${view.active}, not ${shown})` : `${label} (active variant)`,
+      title: `Ask get_component for ${designator}: the active variant's values`,
+      on: { click: () => ask("get_component", args, label) } });
+    let picker = null;
+    if (designators.length > 1) {
+      picker = el("select", { class: "pick", "aria-label": "Designator for get_component" },
+        designators.map((name) => el("option", { value: name, text: name })));
+      picker.value = designator;
+      picker.addEventListener("change", () => {
+        view.componentPick = picker.value;
+        renderPane();
+      });
+    }
+    return [head,
+      el("p", { class: "help", text: `get_component shows the part as the ACTIVE variant${view.active ? `, ${view.active},` : ""} has it${other ? `, not as ${shown} (the variant this BOM shows)` : ""}; the view never switches the active variant.` }),
+      el("div", { class: "btn-row" }, picker, ui.askButton),
+      ...view.asked.map(([tool, askedArgs, askedLabel]) => componentAnswer(tool, askedArgs, askedLabel))];
+  }
+
+  // ---------- a line's BomDoc solutions (get_active_bom) ----------
+
+  function rowSolutions(row) {
+    return view.solutions.get(row._key) || null;
+  }
+
+  // get_active_bom calls one click of a line's solutions makes at most (then a button
+  // asks for the next ones): one per BomDoc line found, or per part on no BomDoc line.
+  const WALK_ASKS = 10;
+  const upperName = (designator) => String(designator).toUpperCase();
+
+  /** The parts check_bom's bomdoc_out_of_sync names as having no BomDoc line (upper
+   *  case; it lists at most 50 of them): get_active_bom would only answer line_not_found. */
+  function partsWithoutLine() {
+    const checks = view.checks;
+    if (!checks || !checks.findings || !view.data || checks.variant !== view.data.variant) return new Set();
+    return new Set(checks.findings.filter((finding) => finding.check === "bomdoc_out_of_sync" && finding.reason === "parts_without_line")
+      .flatMap((finding) => (finding.designators || []).map(upperName)));
+  }
+
+  /** A line's BomDoc lines, asked of get_active_bom one designator at a time (line= with
+   *  a designator names the BomDoc line that holds it, numbered or not): the first
+   *  designator, then the first one no answer covers yet, until every designator of the
+   *  line is covered (its parts may sit on several BomDoc lines, numbered or not), or
+   *  WALK_ASKS calls were made ("more" goes on from there), or a call failed or left the
+   *  line out (the parts not asked are named). "again" forgets the answers first. */
+  async function askSolutions(row, mode = "start") {
+    if (view.closed || !canCall()) {
+      renderPane();
+      return;
+    }
+    const variant = view.data.variant;
+    let state = rowSolutions(row);
+    if (mode === "again" && state) for (const args of state.asks) details.forget("get_active_bom", args);
+    if (mode !== "more" || !state || state.variant !== variant) {
+      state = { variant, asks: [], covered: new Set(), budget: 0, done: false, stopped: false, left: [] };
+      view.solutions.set(row._key, state);
+    }
+    if (state.running) return;
+    state.running = true;
+    state.done = false;
+    state.stopped = false;
+    state.budget = state.asks.length + WALK_ASKS;
+    const designators = row.designators || [];
+    const skip = partsWithoutLine();
+    const open = () => designators.filter((designator) => !state.covered.has(upperName(designator)) && !skip.has(upperName(designator)));
+    while (state.asks.length < state.budget) {
+      const next = open()[0];
+      if (next === undefined) break;
+      const args = { line: next, variant };
+      state.asks.push(args);
+      renderPane();
+      const entry = await details.load("get_active_bom", args);
+      if (view.closed || view.solutions.get(row._key) !== state) return;
+      state.covered.add(upperName(next));
+      const json = entry && entry.data ? parsed(entry).json : null;
+      if (json && json.line) {
+        for (const designator of [...(json.line.designators || []), ...(json.line.not_fitted || [])]) state.covered.add(upperName(designator));
+      } else if (!json || json.error !== "line_not_found") {
+        // A failed call (Retry), no BomDoc, or a line too large for one answer
+        // (lines_omitted, which names no part): the walk stops and names the rest.
+        state.stopped = true;
+        break;
+      }
+    }
+    state.left = open();
+    state.running = false;
+    state.done = true;
+    renderPane();
+  }
+
+  function cachedText(date, text) {
+    if (date) return `cached ${String(date).replace("T", " ")}, not current`;
+    if (text) return `cached: ${text}, not current`;
+    return "no cache date: not current";
+  }
+
+  /** A cached figure with its cache date, never alone. */
+  function cachedValue(value, date, text) {
+    if (value === null || value === undefined || value === "") return null;
+    return [el("span", { text: String(value) }), " ", el("span", { class: "cached", text: `(${cachedText(date, text)})` })];
+  }
+
+  function priceText(value, currency) {
+    if (value === null || value === undefined) return null;
+    return `${value}${currency ? ` ${currency}` : ""}`;
+  }
+
+  function solutionBlock(solution, index) {
+    const title = [`Rank ${solution.rank === null || solution.rank === undefined ? "?" : solution.rank}`,
+      [solution.manufacturer, solution.mpn].filter(Boolean).join(" ") || "(no part number)"].join(": ");
+    const best = solution.best_unit_price !== undefined
+      ? `${priceText(solution.best_unit_price, solution.currency)}${solution.best_price_supplier ? ` at ${solution.best_price_supplier}` : ""}${solution.best_price_below_minimum_order ? ` (only from a minimum order of ${solution.minimum_order_quantity})` : ""}`
+      : null;
+    const choices = solution.part_choices || [];
+    const block = el("div", { class: "solution" },
+      el("h5", {}, index === 0 ? el("span", { class: "badge ok", text: "chosen" }) : el("span", { class: "badge muted", text: "alternate" }), " ", title),
+      el("div", { class: "summary" },
+        solution.lifecycle_risk ? Shell.levelBadge("warning", `${solution.lifecycle} (cached)`) : null,
+        solution.ranked_by_designer ? el("span", { class: "badge muted", text: "ranked by the designer" }) : null,
+        solution.source === "component_parameters" ? el("span", { class: "badge muted", text: "from the parts' MPN parameter" }) : null),
+      Shell.facts([
+        ["Lifecycle", cachedValue(solution.lifecycle, solution.cache_date)],
+        ["Stock (all suppliers)", cachedValue(solution.stock_total, solution.cache_date)],
+        ["Best unit price at the need", cachedValue(best, solution.cache_date)],
+        ["Suppliers", solution.suppliers === undefined ? null : String(solution.suppliers)],
+      ]));
+    if (choices.length) {
+      // Fixed columns (no column chooser: .solution hides it), so the cache date is never
+      // hidden from the stock, price and lifecycle cached with it.
+      block.appendChild(el("details", { class: "more" }, el("summary", { text: plural(choices.length, "part choice") }),
+        Shell.table({
+          label: "Part choices", ownFilter: false, rows: choices,
+          columns: [
+            { key: "supplier", label: "Supplier", cls: "c-name", value: (choice) => choice.supplier || (choice.no_supplier ? "manufacturer part only" : ""),
+              render: (choice) => [choice.supplier || (choice.no_supplier ? "manufacturer part only" : ""),
+                choice.pinned ? el("span", { class: "badge muted mark", text: "pinned" }) : null] },
+            { key: "sku", label: "SKU", cls: "c-name" },
+            { key: "cache_date", label: "Cached on", cls: "c-name", value: (choice) => cachedText(choice.cache_date, choice.cache_date_text) },
+            { key: "stock", label: "Stock (cached)", numeric: true,
+              render: (choice) => (choice.stock === undefined ? el("span", { class: "muted", text: "—" })
+                : [String(choice.stock), choice.enough_stock === false ? el("span", { class: "badge warning mark", text: "short" }) : null]) },
+            { key: "unit_price", label: "Unit price (cached)", numeric: true, value: (choice) => choice.unit_price,
+              render: (choice) => (choice.unit_price === undefined ? el("span", { class: "muted", text: "—" })
+                : [priceText(choice.unit_price, choice.currency), choice.below_minimum_order ? el("span", { class: "sub", text: `minimum order ${choice.price_break_quantity}` }) : null]) },
+            { key: "lifecycle", label: "Lifecycle (cached)", cls: "c-name" },
+          ],
+        }).el));
+    }
+    return block;
+  }
+
+  function bomDocLineBlock(json) {
+    const line = json.line;
+    const title = line.line_unnumbered || line.line === null ? `Unnumbered BomDoc line${line.design_item_id ? ` ${line.design_item_id}` : ""}` : `BomDoc line ${line.line}`;
+    const solutions = line.ranked_solutions || [];
+    return el("div", { class: "bomdoc-line" },
+      el("h4", { text: `${title}${line.ref ? ` (${line.ref} in the file)` : ""}` }),
+      Shell.facts([
+        ["Design Item ID", line.design_item_id], ["Source", line.source], ["Item type", line.item_type],
+        ["Description", line.description], ["Comment", line.comment], ["Note", line.note], ["BOM status", line.status],
+        ["Parts", (line.designators || []).join(", ")], ["Not Fitted", (line.not_fitted || []).join(", ")],
+        ["Ambiguous", (line.ambiguous_designators || []).join(", ")], ["Joined by", line.join], ["No parts", line.why_no_parts],
+        ["Quantity per board", line.quantity === null ? "not known" : String(line.quantity)],
+        ["At the BomDoc's production quantity", line.quantity_at_production === undefined ? null
+          : `${line.quantity_at_production} (${plural(json.production_quantity_used, "board")}, ${json.production_quantity_from === "bom_doc" ? "the BomDoc's" : json.production_quantity_from})`],
+        ["Custom columns", line.custom_parameters ? Object.entries(line.custom_parameters).map(([key, value]) => `${key}=${value}`).join(", ") : null],
+        ["Cache dates", line.cache_dates ? `${String(line.cache_dates.oldest).replace("T", " ")} to ${String(line.cache_dates.newest).replace("T", " ")}` : null],
+      ]),
+      solutions.length ? solutions.map(solutionBlock)
+        : el("p", { class: "muted", text: line.solutions ? `${plural(line.solutions, "solution")} (not listed)` : "No solution: no part choice in the BomDoc and no MPN parameter on its parts." }));
+  }
+
+  function solutionsSection(row) {
+    // The heading takes keyboard focus while the buttons are gone (a call on its way).
+    ui.solutionsHead = el("h3", { text: "BomDoc solutions (get_active_bom)", tabindex: "-1" });
+    const head = ui.solutionsHead;
+    const bomDoc = hasBomDoc();
+    if (bomDoc === false) return [head, el("p", { class: "muted", text: "The project has no ActiveBOM document (check_bom names none)." })];
+    if (bomDoc === "unreadable") return [head, el("p", { class: "muted", text: `The BomDoc could not be read: ${bomDocError()}` })];
+    if (!canCall()) return [head, el("p", { class: "muted", text: "This host does not let the view call tools: ask Claude for the line's solutions (get_active_bom with line)." })];
+    const state = rowSolutions(row);
+    if (view.closed && (!state || !state.done)) return [head, el("p", { class: "muted", text: "The view was closed: it asks the server nothing more." })];
+    const variant = view.data.variant;
+    if (!state) {
+      // Whether there is a BomDoc to ask is known once check_bom has answered (or get_bom
+      // was asked with active_bom); if check_bom failed, the button is offered anyway.
+      if (bomDoc === null && checksState() === "loading") {
+        return [head, el("p", { class: "muted", text: "Whether the project has an ActiveBOM document is not known yet: check_bom has not answered." })];
+      }
+      ui.solutionsButton = el("button", { type: "button", class: "btn", text: "Ranked solutions from the BomDoc",
+        title: `Ask get_active_bom for the BomDoc lines of this line's parts (variant ${variant})`,
+        on: { click: () => askSolutions(row) } });
+      return [head, el("p", { class: "help", text: `Every ranked manufacturer solution and supplier part choice of the BomDoc lines that hold this line's parts, as get_active_bom joins them to ${variant}. ${CACHE_NOTE}` }),
+        bomDoc === null ? el("p", { class: "help small", text: "check_bom could not say whether the project has an ActiveBOM document." }) : null,
+        el("div", { class: "btn-row" }, ui.solutionsButton)];
+    }
+    const blocks = [head, el("p", { class: "help small", text: `Asked for ${state.variant}.` })];
+    let cacheNote = null;
+    const noLine = [];
+    for (const args of state.asks) {
+      const entry = details.get("get_active_bom", args);
+      if (!entry || entry.loading) {
+        blocks.push(el("p", { class: "muted", text: `Asking get_active_bom for the BomDoc line of ${args.line}…` }));
+        continue;
+      }
+      if (entry.error) {
+        blocks.push(el("div", { class: "notice error" }, el("span", { class: "grow", text: `get_active_bom (${args.line}): ${entry.error}` }),
+          el("button", { type: "button", class: "btn-link", text: "Retry", on: { click: () => askSolutions(row) } })));
+        continue;
+      }
+      const { json, text } = parsed(entry);
+      if (!json) {
+        blocks.push(el("pre", { class: "text", text: String(text).slice(0, 2000) }));
+      } else if (json.error === "line_not_found") {
+        noLine.push(args.line);
+      } else if (json.error) {
+        blocks.push(el("div", { class: "notice warning", text: json.message || json.error }));
+      } else if (json.lines_omitted) {
+        blocks.push(el("div", { class: "notice warning", text: `get_active_bom left the BomDoc line of ${args.line} out: even that one line is too large for its answer. Ask Claude for it in parts (get_active_bom with line and sections).` }));
+      } else if (json.line) {
+        const warnings = checkContract(CONTRACT.get_active_bom, json);
+        if (warnings.length) blocks.push(Shell.notice("warning", `get_active_bom is not quite the shape this view reads: ${warnings.slice(0, 2).join("; ")}.`));
+        const holds = [...(json.line.designators || []), ...(json.line.not_fitted || [])].map(upperName);
+        if (!holds.includes(upperName(args.line))) {
+          // line= takes a line number or Design Item ID before a designator.
+          blocks.push(el("div", { class: "notice warning", text: `get_active_bom answered for ${args.line} with a BomDoc line that does not hold it (${args.line} is also a line number or Design Item ID there): ask Claude for that part's line by its ref.` }));
+          if (!holds.some((name) => (row.designators || []).map(upperName).includes(name))) continue;
+        }
+        if (json.cache && !cacheNote) cacheNote = json.cache;
+        blocks.push(bomDocLineBlock(json));
+      }
+    }
+    const known = state.done ? (row.designators || []).filter((designator) => !state.covered.has(upperName(designator)) &&
+      partsWithoutLine().has(upperName(designator)) && !state.left.includes(designator)) : [];
+    const listed = (names) => names.slice(0, 12).join(", ") + (names.length > 12 ? ` and ${names.length - 12} more` : "");
+    if (noLine.length) blocks.push(el("p", { class: "help", text: `On no BomDoc line (get_active_bom): ${listed(noLine)}.` }));
+    if (known.length) blocks.push(el("p", { class: "help", text: `On no BomDoc line (check_bom lists them as parts without one, so they were not asked): ${listed(known)}.` }));
+    if (state.done && state.left.length) {
+      blocks.push(el("p", { class: "help", text: state.stopped
+        ? `Not asked, as the calls stopped above: ${listed(state.left)}.`
+        : `Not asked yet (${plural(state.left.length, "part")}; the view makes up to ${WALK_ASKS} get_active_bom calls at a time): ${listed(state.left)}.` }));
+    }
+    // get_active_bom's own note on the cache, with its dates (else the view's).
+    const span = !cacheNote ? "" : cacheNote.oldest
+      ? ` The BomDoc's cache: ${cacheNote.dated} of its ${plural(cacheNote.part_choices, "part choice")} dated, ${String(cacheNote.oldest).replace("T", " ")} to ${String(cacheNote.newest).replace("T", " ")}.`
+      : " None of its part choices has a cache date.";
+    blocks.splice(2, 0, el("p", { class: "cached", text: `${cacheNote ? cacheNote.note : CACHE_NOTE}${span}` }));
+    if (state.done) {
+      const more = state.left.length && !state.stopped && !view.closed
+        ? el("button", { type: "button", class: "btn", text: "Ask for the next ones",
+                         title: `Ask get_active_bom for the BomDoc lines of the parts not asked yet (up to ${WALK_ASKS})`,
+                         on: { click: () => askSolutions(row, "more") } }) : null;
+      ui.solutionsButton = view.closed ? null : el("button", { type: "button", class: "btn", text: "Ask again",
+        title: "Ask get_active_bom again for this line", on: { click: () => askSolutions(row, "again") } });
+      blocks.push(el("div", { class: "btn-row" }, more, ui.solutionsButton));
+    }
+    return blocks;
+  }
+
+  // ---------- the details panes ----------
+
+  function chosenText(entry) {
+    const name = [entry.manufacturer, entry.mpn].filter(Boolean).join(" ") || "(no part number)";
+    const source = entry.source === "component_parameters" ? " (from the parts' MPN parameter)" : "";
+    const lifecycle = entry.lifecycle ? `; lifecycle ${entry.lifecycle} (${cachedText(entry.cache_date)})` : "";
+    return `${name}${source}${lifecycle}`;
+  }
+
+  function findingItem(finding) {
+    return el("li", {}, Shell.levelBadge(finding.severity), el("strong", { text: checkLabel(finding.check) }), ": ", finding.issue);
+  }
+
+  function linePane(row) {
+    const data = view.data;
+    const designators = row.designators || [];
+    ui.closeButton = el("button", { type: "button", class: "btn", text: "Close", on: { click: closeDetails } });
+    const title = row.comment || row.mpn || row.value || designators[0] || "Line";
+    const blocks = [el("div", { class: "row" }, el("h2", { text: title }), ui.closeButton),
+      el("div", { class: "summary" }, marksOf(row).map(([kind, text]) => el("span", { class: `badge ${kind}`, text })))];
+    const logical = row.logical_designators || {};
+    const quantity = Number(row.quantity) || 0;
+    blocks.push(Shell.facts([
+      ["Quantity per board", String(row.quantity)],
+      ["For boards", row._fitted && view.boards > 1 ? `${quantity * view.boards} (${quantity} × ${view.boards}: a local calculation)` : null],
+      ["Designators", designators.map((designator) => (logical[designator] ? `${designator} (sheet ${logical[designator]})` : designator)).join(", ")],
+      ["Comment", row.comment], ["Value", row.value], ["Description", row.description], ["Footprint", row.footprint],
+      ["Manufacturer", row.manufacturer],
+      ["MPN", row.mpn || (row.mpn_placeholder ? `${row.mpn_placeholder} (placeholder: ${placeholderText(row)})` : null)],
+      ["MPN from", row.mpn_source === "part number" ? "a Part Number parameter" : null],
+      ["Varied in the variant", (row.varied_parameters || []).join(", ")],
+      ["Fitted", row._fitted ? null : `no: Not Fitted in ${data.variant}`],
+    ], "facts section-gap"));
+    if (row._missing === "yes") blocks.push(el("p", { class: "help small", text: `A part on this line needs a manufacturer part number and has none (mpn_coverage_percent's rule; the Notes tab says how the view tells). ${row._missingWhy}` }));
+    if (row._missing === "may") blocks.push(el("p", { class: "help small", text: `A part on this line may need a manufacturer part number and have none: ${row._missingWhy} Once check_bom has answered for a project without a BomDoc, its missing_mpn findings decide.` }));
+    if (row.varies) {
+      blocks.push(el("h3", { text: "Varies within the line" }));
+      blocks.push(Shell.facts(Object.entries(row.varies).map(([field, values]) => {
+        const count = variesCount(row, field);
+        const shown = values.map((value) => (value === null || value === undefined ? "(none)" : String(value))).join(" / ");
+        return [FIELD_LABEL[field] || field, count > values.length ? `${shown} (the first ${values.length} of ${count})` : shown];
+      })));
+    }
+    const alternates = Object.entries(row.alternate_parts || {});
+    if (alternates.length) {
+      blocks.push(el("h3", { text: "Alternate parts" }));
+      blocks.push(Shell.facts(alternates.map(([designator, part]) => [designator, part || "(no library reference)"])));
+      if (data.alternate_parts_note) blocks.push(el("p", { class: "help small", text: data.alternate_parts_note }));
+    }
+    blocks.push(el("h3", { text: "check_bom findings" }));
+    const checks = view.checks;
+    const state = checksState();
+    if (state === "loading") blocks.push(el("p", { class: "muted", text: "Asking check_bom…" }));
+    else if (state === "failed") blocks.push(el("p", { class: "muted", text: `Not known: check_bom failed (${checks.error}).` }));
+    else if (state !== "ready") blocks.push(el("p", { class: "muted", text: `${CHECKS_UNKNOWN[state]}.` }));
+    else if (!row._findings.length) blocks.push(el("p", { class: "muted", text: "None for this line's parts." }));
+    else blocks.push(el("ul", { class: "findings" }, row._findings.map(findingItem)));
+    const maybe = state === "ready" ? checks.findings.filter((finding) => (finding._maybe || []).includes(row)) : [];
+    if (maybe.length) {
+      blocks.push(el("p", { class: "help small", text: "These findings may be about this line too (get_bom's lines give no sheet, so the view cannot tell which part a sheet designator names):" }));
+      blocks.push(el("ul", { class: "findings" }, maybe.map(findingItem)));
+    }
+    if (Array.isArray(row.bom_doc_lines)) {
+      blocks.push(el("h3", { text: "BomDoc (get_bom active_bom)" }));
+      blocks.push(Shell.facts([
+        ["Lines", row.bom_doc_lines.length ? row.bom_doc_lines.map((number) => (number === null ? "unnumbered" : String(number))).join(", ") : "no BomDoc line"],
+        ["Chosen", (row.bom_doc_chosen || []).map(chosenText).join("; ")],
+      ]));
+    }
+    blocks.push(el("section", { data: { section: "solutions" } }, solutionsSection(row)));
+    blocks.push(el("section", { data: { section: "component" } }, componentSection(row)));
+    return blocks;
+  }
+
+  const FINDING_FIELDS = [
+    ["mpn", "MPN"], ["mpns", "MPNs"], ["part_mpn", "Parts' MPN"], ["manufacturer", "Manufacturer"],
+    ["field", "Field"], ["comment", "Comment"], ["reason", "Reason"], ["why", "Why"], ["count", "Count"],
+    ["coverage_percent", "MPN coverage (%)"], ["design_item_id", "Design Item ID"], ["design_item_ids", "Design Item IDs"],
+    ["source", "Source"], ["bom_doc_lines", "BomDoc lines"], ["bom_doc_unnumbered_lines", "Unnumbered BomDoc lines"],
+  ];
+
+  function findingFacts(finding) {
+    const text = (value) => (Array.isArray(value) ? value.join(", ") : value === null || value === undefined ? null : String(value));
+    const pairs = [["Check", checkLabel(finding.check)], ["Severity", finding.severity],
+      ["BomDoc line", "line" in finding || finding.lines || finding.unnumbered_lines ? bomDocLines(finding) : null]];
+    for (const [key, label] of FINDING_FIELDS) pairs.push([label, text(finding[key])]);
+    // Cached supply figures: always with their cache date.
+    pairs.push(["Lifecycle", "lifecycle" in finding ? cachedValue(finding.lifecycle, finding.cache_date) : null]);
+    // What the other part choices report: cached too, their dates on the line's part choices.
+    pairs.push(["Other lifecycles", cachedValue(text(finding.other_lifecycles), null, "the line's part choices give each one's date")]);
+    pairs.push(["Stock", "stock" in finding ? cachedValue(finding.stock, finding.cache_date) : null]);
+    pairs.push(["Need", text(finding.need)]);
+    pairs.push(["Cached", finding.oldest ? `${String(finding.oldest).replace("T", " ")} to ${String(finding.newest).replace("T", " ")}` : null]);
+    return Shell.facts(pairs, "facts section-gap");
+  }
+
+  function findingPane(finding) {
+    ui.closeButton = el("button", { type: "button", class: "btn", text: "Close", on: { click: closeDetails } });
+    const rows = finding._rows || [];
+    const unmapped = finding._unmapped || [];
+    const notFitted = new Set((view.data.not_fitted_designators || []).map(String));
+    const blocks = [el("div", { class: "row" }, el("h2", { text: checkLabel(finding.check) }), ui.closeButton),
+      el("div", { class: "summary" }, Shell.levelBadge(finding.severity)),
+      el("p", { text: finding.issue }), findingFacts(finding)];
+    if ((finding.designators || []).length) {
+      blocks.push(el("h3", { text: `Parts (${finding.designators.length}${capped(finding) ? ` listed: check_bom lists the first ${finding.designators.length}` : ""})` }));
+      blocks.push(el("p", { class: "desig", text: finding.designators.join(", ") }));
+      const lineButton = (row) => el("button", { type: "button", class: "btn",
+        text: `${(row.designators || []).slice(0, 3).join(", ")}${(row.designators || []).length > 3 ? "…" : ""}: ${row.comment || row.mpn || "line"}`,
+        title: "Show this line in the Lines tab", on: { click: () => showLine(row) } });
+      blocks.push(el("h3", { text: `BOM lines (${capped(finding) ? "at least " : ""}${rows.length})` }));
+      if (finding.check === "duplicate_designator") {
+        blocks.push(el("p", { class: "help small", text: "check_bom names a sheet designator (as on the sheet the issue names): the lines of the parts with that sheet designator, or of the part of that name." }));
+      }
+      blocks.push(el("div", { class: "btn-row" }, rows.map(lineButton)));
+      const maybe = finding._maybe || [];
+      if (maybe.length) {
+        blocks.push(el("p", { class: "help", text: `One of these lines, not marked: both a part named ${finding.designators.join(", ")} and parts with that sheet designator are in the BOM, and get_bom's lines give no sheet.` }));
+        blocks.push(el("div", { class: "btn-row" }, maybe.map(lineButton)));
+      }
+      if (unmapped.length) {
+        const nf = unmapped.filter((designator) => notFitted.has(String(designator)));
+        const other = unmapped.filter((designator) => !notFitted.has(String(designator)));
+        if (nf.length) blocks.push(el("p", { class: "help", text: `Not Fitted in ${view.data.variant} (the Lines chip "Not Fitted" shows their lines): ${nf.join(", ")}.` }));
+        if (other.length) blocks.push(el("p", { class: "help", text: `On no BOM line of ${view.data.variant}: ${other.join(", ")}.` }));
+      }
+    } else {
+      blocks.push(el("p", { class: "muted", text: "This finding is about the whole BOM: it names no part." }));
+    }
+    return blocks;
+  }
+
+  /** Where keyboard focus is in the details: "solutions-head", a section ("solutions",
+   *  "component"), "pane" elsewhere in it, or "" outside. */
+  function paneFocus() {
+    const active = document.activeElement;
+    if (!ui.pane || !active || !ui.pane.contains(active)) return "";
+    if (active === ui.solutionsHead) return "solutions-head";
+    const section = active.closest("[data-section]");
+    return section ? section.dataset.section : "pane";
+  }
+
+  /** Redraw the details. The pane keeps its scroll position while it shows the same line
+   *  or finding (an answer arriving does not move what the user reads), and keyboard
+   *  focus stays in the section it was in: a button that is gone (Ranked solutions, Ask
+   *  again, Retry: "Asking…" now) hands it to that section's own button or heading,
+   *  never to another section's action. */
+  function renderPane() {
+    if (!ui.pane) return;
+    const was = paneFocus();
+    const top = ui.pane.scrollTop;
+    const before = ui.paneShows;
+    Shell.keepFocus(ui.pane, drawPane, () => {
+      if (was === "solutions-head") return ui.solutionsHead;
+      if (was === "solutions") return ui.solutionsButton || ui.solutionsHead;
+      if (was === "component") return ui.askButton || ui.componentHead;
+      return ui.closeButton;
+    });
+    if (before && before === ui.paneShows) {
+      ui.pane.scrollTop = top;
+      const active = document.activeElement;
+      if (active && active !== ui.pane && ui.pane.contains(active)) keepInView(active);
+    }
+  }
+
+  /** Scroll the details pane just enough to show a control that has keyboard focus. */
+  function keepInView(node) {
+    const box = ui.pane.getBoundingClientRect();
+    const at = node.getBoundingClientRect();
+    if (!box.height || !at.height) return;
+    if (at.top < box.top) ui.pane.scrollTop -= box.top - at.top + 8;
+    else if (at.bottom > box.bottom) ui.pane.scrollTop += Math.min(at.bottom - box.bottom + 8, at.top - box.top);
+  }
+
+  function drawPane() {
+    clear(ui.pane);
+    ui.askButton = null;
+    ui.solutionsButton = null;
+    ui.solutionsHead = null;
+    ui.componentHead = null;
+    ui.closeButton = null;
+    const row = view.tab === "lines" ? selectedRow() : null;
+    const finding = view.tab === "findings" ? selectedFinding() : null;
+    const shown = Boolean(row || finding);
+    ui.paneShows = row ? `line ${row._key}` : finding ? `finding ${finding._id}` : "";
+    ui.pane.classList.toggle("idle", !shown);
+    if (ui.split) ui.split.classList.toggle("solo", shown && compactHost());
+    if (row) {
+      Shell.append(ui.pane, linePane(row));
+      return;
+    }
+    if (finding) {
+      Shell.append(ui.pane, findingPane(finding));
+      return;
+    }
+    Shell.append(ui.pane, [
+      el("h2", { text: view.tab === "findings" ? "Select a finding" : "Select a line" }),
+      el("p", { class: "help", text: view.tab === "findings"
+        ? "Click a finding (or move to it and press Enter) for its details and the BOM lines that hold its parts."
+        : "Click a line (or move to it and press Enter) for all its fields and designators, what varies within it, its alternate parts and check_bom findings, its BomDoc solutions and the part from get_component." }),
+      el("p", { class: "help", text: "Keys: Up and Down move between rows and group headers, Enter selects or opens and closes a group, Left and Right close and open a group, Esc clears." }),
+    ]);
+  }
+
+  // ---------- the variant comparison and notes ----------
+
+  function compareRows(variants) {
+    const rows = [];
+    for (const entry of variants) {
+      for (const designator of entry.not_fitted || []) rows.push({ variant: entry.variant, designator, what: "Fitted", from: "Fitted", to: "Not Fitted" });
+      for (const changed of entry.changed || []) {
+        for (const [field] of FIELDS) {
+          const change = changed[field];
+          if (change && typeof change === "object") {
+            rows.push({ variant: entry.variant, designator: changed.designator, what: FIELD_LABEL[field],
+                        from: change.from === null || change.from === undefined ? "(none)" : String(change.from),
+                        to: change.to === null || change.to === undefined ? "(none)" : String(change.to) });
+          }
+        }
+        if (changed.alternate_part) rows.push({ variant: entry.variant, designator: changed.designator, what: "Alternate part", from: "the base part", to: String(changed.alternate_part) });
+      }
+    }
+    rows.forEach((row, index) => { row._id = index; });
+    return rows;
+  }
+
+  function variantsBlock() {
+    const block = el("div", { class: "pane" }, el("h2", { text: "What each variant changes in the BOM" }));
+    const state = view.compare;
+    if (!state || (!state.variants && !state.loading && !state.error)) {
+      block.appendChild(el("p", { class: "help", text: "get_bom with compare_variants lists, for each variant, its Not Fitted parts, the values it changes against the base design and its alternate parts." }));
+      if (!canCall()) block.appendChild(el("p", { class: "muted", text: "This host does not let the view call tools: ask Claude (get_bom with compare_variants)." }));
+      else if (view.closed) block.appendChild(el("p", { class: "muted", text: "The view was closed: it asks the server nothing more." }));
+      else block.appendChild(el("div", { class: "btn-row" }, el("button", { type: "button", class: "btn", text: "Ask get_bom what each variant changes", on: { click: () => loadCompare() } })));
+      return block;
+    }
+    if (state.loading || state.closed) {
+      block.appendChild(el("p", { class: "muted", text: view.closed ? "The view was closed: it asks the server nothing more." : "Asking get_bom with compare_variants…" }));
+      return block;
+    }
+    if (state.error) {
+      block.appendChild(el("div", { class: "notice error" }, el("span", { class: "grow", text: `get_bom with compare_variants failed: ${state.error}` }),
+        view.closed ? null : el("button", { type: "button", class: "btn-link", text: "Retry", on: { click: () => { view.compare = null; loadCompare(); } } })));
+      return block;
+    }
+    const variants = state.variants;
+    block.appendChild(el("p", { class: "help small", text: `${state.from === "result" ? "From the call's own result" : "Asked of get_bom with compare_variants"}: each variant against the base design (${BASE}), whatever variant this BOM shows.` }));
+    if (!variants.length) {
+      block.appendChild(el("p", { class: "muted", text: "The project defines no variant that changes the BOM." }));
+      return block;
+    }
+    block.appendChild(Shell.facts(variants.map((entry) => [entry.variant,
+      `${(entry.not_fitted || []).length} Not Fitted, ${plural((entry.changed || []).length, "part")} changed${view.data && sameVariant(entry.variant, view.data.variant) ? " (shown)" : ""}${view.active && sameVariant(entry.variant, view.active) ? " (active)" : ""}`])));
+    const rows = compareRows(variants);
+    const order = new Map(variants.map((entry, index) => [entry.variant, index]));
+    block.appendChild(Shell.table({
+      label: "What each variant changes", ownFilter: false, rows, rowKey: (row) => row._id,
+      empty: "No variant changes the BOM.",
+      group: { key: (row) => row.variant, order: (x, y) => order.get(x) - order.get(y),
+               count: (key, members) => el("span", { class: "badge", text: plural(members.length, "change") }),
+               open: (key, members, groups) => groups === 1 || rows.length <= 150 },
+      columns: [
+        { key: "designator", label: "Part", cls: "c-name", value: (row) => row.designator, render: (row) => row.designator },
+        { key: "what", label: "What", cls: "c-name" },
+        { key: "from", label: "Base design", cls: "c-val" },
+        { key: "to", label: "Variant", cls: "c-val" },
+      ],
+    }).el);
+    return block;
+  }
+
+  function notesBlock() {
+    const data = view.data;
+    const asked = data.asked;
+    const bomDoc = data.bom_doc;
+    const checks = view.checks;
+    const excluded = Object.entries((data.parts || {}).excluded_by_kind || {});
+    return el("div", { class: "pane" },
+      el("h2", { text: "Notes" }),
+      Shell.facts([
+        ["Variant", `${data.variant}${isBase(data.variant) ? " (the base design)" : ""}`],
+        ["Asked with", askedText()],
+        ["Read", `${plural(data.pages, "page")} of get_bom${data.incomplete ? `, then stopped: ${data.stopReason}` : ""}`],
+        ["Page size", data.lines_limited_to ? `get_bom cut its pages to ${data.lines_limited_to} lines to fit its size limit` : null],
+        ["Netlist", data.netlist_updated_utc ? `updated ${data.netlist_updated_utc}` : "update time not known"],
+        ["Parts from", data.compiled_part_list ? "the compiled part list" : "the sheets (no compiled part list)"],
+        ["Excluded by kind", excluded.map(([kind, count]) => `${count} ${kind}`).join(", ")],
+        ["Stale variant entries", data.stale_variant_entries ? `${stale(data.stale_variant_entries)}: check_bom lists them (stale_variant_entry)` : null],
+        ["MPN coverage", data.mpn_coverage_percent === null ? "no part needs an MPN" : `${data.mpn_coverage_percent}% of the parts that need one`],
+        ["check_bom", checks && checks.header ? `${plural(checks.pages, "page")} read; checks run: ${(checks.header.checks_run || []).map(checkLabel).join(", ")}${checks.header.findings_limited_to ? `; pages cut to ${checks.header.findings_limited_to} findings` : ""}` : null],
+      ], "facts section-gap"),
+      ...data.notes.map((note) => el("p", { class: "help small", text: note })),
+      el("h3", { text: "Missing MPN" }), el("p", { class: "help small", text: MPN_RULE }),
+      data.alternate_parts_note ? [el("h3", { text: "Alternate parts" }), el("p", { class: "help small", text: data.alternate_parts_note })] : null,
+      bomDoc ? [el("h3", { text: "ActiveBOM document" }), Shell.facts([
+        ["File", bomDoc.file], ["Chosen", bomDoc.chosen_by], ["In the project", bomDoc.in_project ? "yes" : "no: Altium does not use it for the project's BOM"],
+        ["Lines", String(bomDoc.lines)],
+        ["Cache", bomDoc.cache && bomDoc.cache.oldest ? `${String(bomDoc.cache.oldest).replace("T", " ")} to ${String(bomDoc.cache.newest).replace("T", " ")} (cached, not current)` : "no dated part choice"],
+        ["Other BomDocs", (bomDoc.other_bom_docs || []).join(", ")], ["Not in the project", (bomDoc.not_in_project || []).join(", ")],
+        ["Missing on disk", (bomDoc.missing_on_disk || []).join(", ")],
+      ])] : null,
+      el("h3", { text: "Boards" }), el("p", { class: "help small", text: LOCAL_NOTE }),
+      el("p", { class: "help small section-gap", text: READ_ONLY_NOTE }));
+  }
+
+  function askedText() {
+    const data = view.data;
+    const asked = data.asked;
+    return [asked.variant ? `variant ${asked.variant}` : "no variant (the active one)",
+      data.groupKnown ? `group_by ${asked.group_by || "mpn"}` : "group_by not known (the host did not send the call's arguments)",
+      asked.include_not_fitted ? "include_not_fitted" : null, asked.compare_variants ? "compare_variants" : null,
+      asked.active_bom ? "active_bom" : null].filter(Boolean).join(", ");
+  }
+
+  // ---------- page ----------
+
+  function headBadges() {
+    const data = view.data;
+    const parts = data.parts || {};
+    const excluded = Object.values(parts.excluded_by_kind || {}).reduce((sum, count) => sum + count, 0);
+    const badges = [
+      el("span", { class: "badge", text: plural(data.lines_total || 0, "line") }),
+      el("span", { class: "badge muted", text: `${plural(parts.in_bom || 0, "part")} in the BOM` }),
+      parts.not_fitted ? el("span", { class: "badge muted", text: `${parts.not_fitted} Not Fitted` }) : null,
+      excluded ? el("span", { class: "badge muted", text: `${excluded} excluded by kind`, title: Object.entries(parts.excluded_by_kind).map(([kind, count]) => `${count} ${kind}`).join(", ") }) : null,
+      el("span", { class: "badge muted", text: data.mpn_coverage_percent === null ? "no MPN needed" : `MPN ${data.mpn_coverage_percent}%`,
+                   title: "MPN coverage: the parts that need a manufacturer part number and have one" }),
+      view.boards > 1 ? el("span", { class: "badge info", text: `× ${view.boards} boards: ${(parts.in_bom || 0) * view.boards} parts`, title: LOCAL_NOTE }) : null,
+    ];
+    const checks = view.checks;
+    if (checks && checks.header) {
+      const counts = checks.header.severity_counts || {};
+      for (const severity of ["error", "warning", "info"]) {
+        if (counts[severity]) badges.push(Shell.levelBadge(severity, severityText(severity, counts[severity])));
+      }
+    }
+    return badges;
+  }
+
+  function updateHeadBadges() {
+    if (!ui.summary || !view.data) return;
+    clear(ui.summary);
+    Shell.append(ui.summary, headBadges());
+    if (ui.caption) ui.caption.textContent = captionText();
+  }
+
+  function captionText() {
+    const data = view.data;
+    const checks = view.checks && view.checks.header ? ` and check_bom's for ${view.checks.variant}` : "";
+    return `Totals of ${data.variant}'s whole BOM as get_bom counts them${checks}, not of the rows the filters show. ${data.groupKnown ? `Lines grouped by ${(data.asked.group_by || "mpn") === "mpn" ? "MPN" : "Comment"} (get_bom group_by).` : ""}`.trim();
+  }
+
+  function tabItems() {
+    const state = checksState();
+    const findings = state === "ready" ? String(view.checks.findings.length) : CHECKS_MARK[state];
+    const rows = fittedRows().length;
+    return [
+      { id: "lines", label: `Lines (${rows})` },
+      { id: "findings", label: `Findings (${findings})` },
+      { id: "variants", label: "Variants" },
+      { id: "notes", label: "Notes" },
+    ];
+  }
+
+  function updateTabs() {
+    if (!ui.tabBar) return;
+    const buttons = [...ui.tabBar.el.querySelectorAll("button")];
+    tabItems().forEach((item, index) => { if (buttons[index]) buttons[index].textContent = item.label; });
+  }
+
+  function updateFilters() {
+    if (ui.filteredBadge) ui.filteredBadge.hidden = !filtered();
+    if (ui.showSwitch) {
+      const buttons = [...ui.showSwitch.el.querySelectorAll("button")];
+      const rows = allRows().filter((row) => view.kinds.has(row._fitted ? "fitted" : "not_fitted"));
+      const state = checksState();
+      const missing = rows.filter((row) => row._missing === "yes").length;
+      const maybe = rows.filter((row) => row._missing === "may").length;
+      const findings = rows.filter((row) => row._findings.length).length;
+      if (buttons[1]) {
+        buttons[1].textContent = maybe ? `Missing MPN (${missing} + ${maybe} may)` : `Missing MPN (${missing})`;
+        buttons[1].disabled = view.data.mpn_coverage_percent === null && view.show !== "missing";
+        buttons[1].title = view.data.mpn_coverage_percent === null ? "get_bom: no part of this BOM needs an MPN"
+          : maybe ? `${SHOW[1].title}; ${plural(maybe, "line")} may be missing one: their data cannot tell (the line's details say why)` : SHOW[1].title;
+      }
+      if (buttons[2]) {
+        buttons[2].textContent = `With findings (${state === "ready" ? findings : CHECKS_MARK[state]})`;
+        buttons[2].disabled = state !== "ready" && view.show !== "findings";
+        buttons[2].title = state === "ready" ? SHOW[2].title : `${SHOW[2].title}: ${CHECKS_UNKNOWN[state]}`;
+      }
+    }
+  }
+
+  /** The Not Fitted chip counts lines, as the In the BOM chip does, once get_bom has
+   *  listed them; before, it says the number of parts. */
+  function notFittedChip() {
+    const parts = (view.data.parts || {}).not_fitted || 0;
+    const rows = view.notFitted && view.notFitted.rows ? view.notFitted.rows.length : null;
+    return rows === null
+      ? { count: plural(parts, "part"), title: `The variant's ${plural(parts, "Not Fitted part")}, as lines once get_bom lists them (include_not_fitted)` }
+      : { count: String(rows), title: `The variant's ${plural(parts, "Not Fitted part")} on ${plural(rows, "line")} (get_bom include_not_fitted)` };
+  }
+
+  function chipRow() {
+    const parts = view.data.parts || {};
+    const items = [{ id: "fitted", label: "In the BOM", count: fittedRows().length, title: "The BOM's lines" }];
+    if (parts.not_fitted) items.push({ id: "not_fitted", label: "Not Fitted", ...notFittedChip() });
+    return Shell.chips({
+      label: "Lines", items, selected: [...view.kinds].filter((kind) => items.some((item) => item.id === kind)),
+      onChange: (on) => {
+        view.kinds = on;
+        if (on.has("not_fitted") && !(view.notFitted && (view.notFitted.rows || view.notFitted.loading))) loadNotFitted();
+        updateFilters();
+        if (ui.table && view.tab === "lines") ui.table.setFilter(rowFilter);
+        if (ui.nfStatus) ui.nfStatus.textContent = notFittedStatus();
+      },
+    });
+  }
+
+  function updateChips() {
+    const chip = ui.chips ? ui.chips.el.querySelectorAll(".chip")[1] : null;
+    if (!chip || !view.data) return;
+    const { count, title } = notFittedChip();
+    const badge = chip.querySelector(".chip-count");
+    if (badge) badge.textContent = count;
+    chip.setAttribute("title", title);
+  }
+
+  function emptyBlock() {
+    const data = view.data;
+    const parts = data.parts || {};
+    const excluded = Object.values(parts.excluded_by_kind || {}).reduce((sum, count) => sum + count, 0);
+    return Shell.state("empty", `${data.variant} has no BOM line`,
+      `${plural(parts.not_fitted || 0, "part")} Not Fitted and ${excluded} excluded by kind (Graphical, Net Tie, Standard (No BOM)). Pick another variant, or show the Not Fitted lines.`);
+  }
+
+  function renderTab() {
+    clear(ui.content);
+    // The details pane belongs to the lines and findings: the other tabs take the width.
+    const split = view.tab === "lines" || view.tab === "findings";
+    if (ui.split) ui.split.classList.toggle("split", split);
+    if (ui.pane) ui.pane.hidden = !split;
+    if (ui.tableTools) ui.tableTools.hidden = view.tab !== "lines";
+    if (ui.filterRow) ui.filterRow.hidden = !split;
+    ui.table = null;
+    if (view.tab === "lines") {
+      if (!view.data.lines_total && !view.data.incomplete) ui.content.appendChild(emptyBlock());
+      ui.table = linesTable();
+      ui.table.setQuery(view.query);
+      const row = selectedRow();
+      if (row) ui.table.select((other) => other._key === row._key);
+      ui.content.appendChild(ui.table.el);
+      return;
+    }
+    if (view.tab === "findings") ui.content.appendChild(findingsBlock());
+    else if (view.tab === "variants") ui.content.appendChild(variantsBlock());
+    else ui.content.appendChild(notesBlock());
+  }
+
+  function renderAll() {
+    const data = view.data;
+    ui.content = el("div", { class: "content" });
+    ui.pane = el("aside", { class: "pane", "aria-label": "Details" });
+    ui.split = el("div", { class: "split" }, ui.content, ui.pane);
+    const filter = Shell.filterBox({
+      placeholder: "Filter designators, values, parts", label: "Filter the table", value: view.query,
+      onInput: (text) => {
+        view.query = text;
+        if (ui.table) ui.table.setQuery(text);
+      },
+    });
+    ui.filterRow = el("div", { class: "toolbar" }, filter);
+    const roomy = roomyHere();
+    if (view.filtersOpen === null) view.filtersOpen = roomy;
+    if (view.controlsOpen === null) view.controlsOpen = roomy;
+    const grouping = Shell.segmented({ label: "Group rows by", items: GROUPINGS, current: view.groupBy, onChange: regroup });
+    ui.showSwitch = Shell.segmented({ label: "Show", items: SHOW, current: view.show, onChange: (id) => {
+      view.show = id;
+      updateFilters();
+      if (ui.table && view.tab === "lines") ui.table.setFilter(rowFilter);
+    } });
+    const groupTools = el("span", { class: "toolbar" },
+      el("button", { type: "button", class: "btn", text: "Expand all", on: { click: () => ui.table && view.tab === "lines" && ui.table.expandAll() } }),
+      el("button", { type: "button", class: "btn", text: "Collapse all", on: { click: () => ui.table && view.tab === "lines" && ui.table.collapseAll() } }));
+    // "filtered" while a filter hides lines (the chips and the switch update it): the
+    // disclosure may be closed.
+    ui.filteredBadge = el("span", { class: "badge info", text: "filtered", hidden: !filtered() });
+    ui.nfStatus = el("span", { class: "status", "aria-live": "off", text: notFittedStatus() });
+    ui.chips = chipRow();
+    ui.tableTools = el("details", { class: "filters-box", open: view.filtersOpen },
+      el("summary", { text: "Group and filter" }, ui.filteredBadge),
+      el("div", { class: "toolbar" }, grouping.el, groupTools),
+      el("div", { class: "filters" }, ui.chips.el, ui.showSwitch.el, ui.nfStatus));
+    ui.tableTools.addEventListener("toggle", () => { view.filtersOpen = ui.tableTools.open; });
+    ui.tabBar = Shell.tabs(tabItems(), (id) => {
+      view.tab = id;
+      view.selected = null;
+      view.asked = [];
+      renderTab();
+      renderPane();
+    }, view.tab, ui.split);
+    // One full-screen button for the page's life: it follows the host's display mode.
+    ui.displayButton = ui.displayButton || Shell.displayModeButton((error) => app.prepend(Shell.notice("error", error.message)));
+    const warnings = [];
+    if (data.incomplete) {
+      warnings.push(Shell.notice("warning", `Read ${plural(data.pages, "page")} of get_bom, then stopped: ${data.stopReason}. ` +
+        `The table holds ${fittedRows().length} of the ${plural(data.lines_total, "line")}; the totals above are the whole BOM's.`));
+    }
+    if (!canCall()) warnings.push(Shell.notice("info", "This host does not let the view call tools: more pages, check_bom's findings, the variant switch, the Not Fitted lines and the details' calls are off."));
+    if (data.bom_doc_error) {
+      const error = data.bom_doc_error;
+      const text = `${error.message || error.error}${error.hint ? ` ${error.hint}` : ""}`;
+      warnings.push(error.error === "no_bom_doc" ? Shell.notice("info", `No BomDoc columns: ${text}`)
+        : Shell.notice("warning", `The BomDoc could not be read: ${text}`));
+    }
+    if (data.bom_doc && data.bom_doc.in_project === false) warnings.push(Shell.notice("info", `The BomDoc read (${data.bom_doc.file}) is not in the project: Altium does not use it for the project's BOM.`));
+    if (data.stale_variant_entries) warnings.push(Shell.notice("info", `${data.variant} has ${stale(data.stale_variant_entries)} that no longer fit their parts: the Findings tab lists them (stale_variant_entry).`));
+    if (view.warnings.length) warnings.push(Shell.notice("warning", `The result is not quite the shape this view reads: ${view.warnings.slice(0, 3).join("; ")}.`));
+    if (view.listWarnings.length) warnings.push(Shell.notice("warning", `list_variants is not quite the shape this view reads: ${view.listWarnings.slice(0, 3).join("; ")}.`));
+    // The switch: open where there is room, else behind a one-line disclosure (a short or
+    // narrow host), which the user opens or closes.
+    // The boards row is not redrawn with the rest (typing in it keeps its place).
+    ui.controls = el("div", {});
+    const section = el("section", { class: "picker", "aria-label": "Variant, grouping and boards" }, ui.controls,
+      el("div", { class: "picker-row" }, el("label", {}, el("span", { class: "side", text: "Boards" }), boardsInput()),
+        el("span", { class: "local", id: "boards-note", text: LOCAL_NOTE }), ui.boardsError));
+    const controlsBox = el("details", { class: "filters-box", open: view.controlsOpen },
+      el("summary", { text: "Variant, grouping and boards" }), section);
+    controlsBox.addEventListener("toggle", () => { view.controlsOpen = controlsBox.open; });
+    ui.summary = el("span", { class: "summary" });
+    ui.caption = el("p", { class: "approx" });
+    clear(app).append(
+      el("div", { class: "head" },
+        el("h1", { text: "BOM" }),
+        el("span", { class: "vs" }, el("span", { class: "badge info", text: "variant" }), el("span", { class: "name", text: data.variant })),
+        ui.summary,
+        el("span", { class: "grow" }), ui.displayButton),
+      ui.caption,
+      ...warnings,
+      controlsBox,
+      ui.filterRow,
+      ui.tableTools,
+      ui.tabBar.el,
+      ui.split);
+    updateHeadBadges();
+    drawControls();
+    renderTab();
+    updateFilters();
+    renderPane();
+  }
+
+  // ---------- a CSV result without tools ----------
+
+  /** RFC 4180 CSV as get_bom writes it: quoted cells, doubled quotes. */
+  function parseCsv(text) {
+    const rows = [];
+    let row = [];
+    let cell = "";
+    let quoted = false;
+    for (let index = 0; index < text.length; index += 1) {
+      const char = text[index];
+      if (quoted) {
+        if (char === '"' && text[index + 1] === '"') {
+          cell += '"';
+          index += 1;
+        } else if (char === '"') quoted = false;
+        else cell += char;
+      } else if (char === '"') quoted = true;
+      else if (char === ",") {
+        row.push(cell);
+        cell = "";
+      } else if (char === "\n" || char === "\r") {
+        if (char === "\r" && text[index + 1] === "\n") index += 1;
+        row.push(cell);
+        rows.push(row);
+        row = [];
+        cell = "";
+      } else cell += char;
+    }
+    if (cell || row.length) {
+      row.push(cell);
+      rows.push(row);
+    }
+    // get_bom puts an apostrophe before a cell a spreadsheet would run as a formula.
+    return rows.map((cells) => cells.map((value) => (/^'[=+\-@\t\r]/.test(value) ? value.slice(1) : value)));
+  }
+
+  function drawCsv(first, asked, failure = "") {
+    const [header = [], ...body] = parseCsv(first.csv || "");
+    const rows = body.filter((cells) => cells.some(Boolean)).map((cells, index) => {
+      const row = { _id: index };
+      header.forEach((title, column) => { row[`c${column}`] = cells[column] || ""; });
+      return row;
+    });
+    clear(app).append(
+      el("div", { class: "head" }, el("h1", { text: "BOM" }),
+        el("span", { class: "vs" }, el("span", { class: "badge info", text: "variant" }), el("span", { class: "name", text: first.variant })),
+        el("span", { class: "summary" }, el("span", { class: "badge", text: plural(first.lines_total || 0, "line") }),
+          el("span", { class: "badge muted", text: `${plural((first.parts || {}).in_bom || 0, "part")} in the BOM` }))),
+      Shell.notice("info", failure || "The call asked for CSV (format csv) and this host does not let the view ask get_bom again for JSON: the table shows this page's CSV rows as text, without the view's grouping, filters and details."),
+      first.has_more || first.offset > 0 ? Shell.notice("warning", `This CSV page holds lines ${first.offset + 1} to ${first.offset + rows.length} of ${first.lines_total}: ask Claude for the others (offset ${first.has_more ? first.next_offset : 0}).`) : null,
+      Shell.table({
+        label: "BOM lines (CSV)", rows, rowKey: (row) => row._id,
+        columns: header.map((title, column) => ({ key: `c${column}`, label: title, cls: "c-name",
+          numeric: title === "Quantity", value: title === "Quantity" ? (row) => Number(row[`c${column}`]) || 0 : undefined })),
+      }).el);
+    view.busy = false;
+  }
+
+  // ---------- host ----------
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && view.selected && !event.defaultPrevented) closeDetails();
+  });
+  Shell.on("toolInput", (args) => {
+    view.args = args || {};
+    view.argsKnown = true;
+    if (!view.data && !view.busy) showState("loading", "Reading the BOM", "get_bom is building the bill of materials.");
+  });
+  Shell.on("toolInputPartial", () => {
+    if (!view.data && !view.busy) showState("loading", "Reading the BOM", "Waiting for the tool's arguments.");
+  });
+  Shell.on("toolResult", (result) => {
+    view.busy = true;
+    return loadResult(result);
+  });
+  Shell.on("toolCancelled", (reason) => {
+    if (!view.data) showState("info", "The get_bom call was cancelled", reason || "No result to show.");
+  });
+  Shell.on("teardown", () => {
+    view.closed = true;
+    // Nothing more is asked, and no answer is waited for: what was waiting says the view
+    // was closed (a BOM being paged is drawn with the lines read, stopped by the closing).
+    closeCalls();
+    if (view.data && ui.content) {
+      renderControls();
+      refreshChecks();
+      if (ui.nfStatus) ui.nfStatus.textContent = notFittedStatus();
+      if (view.tab === "variants") renderVariantsTab();
+    } else if (app.firstElementChild && app.firstElementChild.classList.contains("loading")) {
+      showState("info", "The view was closed", "It asks the server nothing more, and no BOM was read before it closed.");
+    }
+  });
+  // The host's size changed: whether the details take the table's place may too.
+  Shell.on("context", () => {
+    if (view.selected && ui.pane) renderPane();
+  });
+
+  showState("loading", "Connecting to the host", "");
+  Shell.connect({ name: "altium-copilot-kc BOM", version: "1.0.0" })
+    .then(() => {
+      if (!view.data && !view.busy) showState("loading", "Waiting for get_bom", "The BOM appears when the tool's result arrives.");
+    })
+    .catch((error) => showState("error", "This view needs a host that shows MCP Apps", error.message));
+})();
+</script>
+</body>
+</html>

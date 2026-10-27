@@ -220,12 +220,19 @@ const Shell = (() => {
   const INLINE_PANE = 560;  // the tallest pane inline when the host gives only a maxHeight
   let fitted = "";
 
+  /** The page's height, measured with its vertical scrollbar shown: a page that fits then
+   *  fits without one too (a scrollbar narrows the page, so text wraps more and the page
+   *  grows). Measured without it, a height that just fits could leave the page stuck
+   *  with a scrollbar it needs only because it has one, taller than the host's limit. */
   function contentHeight() {
     const html = document.documentElement;
     const saved = html.style.height;
+    const overflow = html.style.overflowY;
     html.style.height = "max-content";
+    html.style.overflowY = "scroll";
     const height = Math.ceil(html.getBoundingClientRect().height);
     html.style.height = saved;
+    html.style.overflowY = overflow;
     return height;
   }
 
