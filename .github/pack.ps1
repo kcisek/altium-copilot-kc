@@ -11,6 +11,7 @@ if (-not $SkipBuild) {
         --workpath "$root\build" `
         --add-data "$root\server\scripts;scripts" `
         --add-data "$root\server\checklists;checklists" `
+        --add-data "$root\server\ui;ui" `
         --add-data "$root\manifest.json;." `
         --paths "$root\server" `
         "$root\server\main.py"

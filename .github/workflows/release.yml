@@ -92,6 +92,7 @@ jobs:
             --workpath build `
             --add-data "server/scripts;scripts" `
             --add-data "server/checklists;checklists" `
+            --add-data "server/ui;ui" `
             --add-data "manifest.json;." `
             --paths server `
             server/main.py

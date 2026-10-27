@@ -1,6 +1,9 @@
 # MCP server framework (official SDK — FastMCP class is included)
 # Pinned <2: mcp 2.x removed mcp.server.fastmcp, which server/main.py imports.
-mcp>=1.0.0,<2
+# >=1.26.0: the first release whose FastMCP.resource() takes meta and returns it on
+# resources/list and resources/read (python-sdk #1928), which the MCP Apps views'
+# ui:// resources need for their _meta.ui (content security policy).
+mcp>=1.26.0,<2
 
 # HTTP client for the release auto-update check (server/main.py imports it directly)
 httpx

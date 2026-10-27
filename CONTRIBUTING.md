@@ -107,6 +107,9 @@ takes effect immediately without any reinstallation step).
     --distpath server/dist `
     --workpath build `
     --add-data "server/scripts;scripts" `
+    --add-data "server/checklists;checklists" `
+    --add-data "server/ui;ui" `
+    --add-data "manifest.json;." `
     --paths server `
     server/main.py
 ```
@@ -119,6 +122,8 @@ Test the resulting `server/dist/altium-copilot.exe` on a machine **without Pytho
 |------|---------------|
 | Server code + Python runtime | compiled into `server/dist/altium-copilot.exe` by PyInstaller |
 | PowerShell scripts | embedded in the `.exe` via `--add-data`; extracted to `sys._MEIPASS/scripts/` at runtime |
+| Review checklists | `server/checklists`, embedded the same way (`sys._MEIPASS/checklists/`) |
+| Interactive views (MCP Apps pages) | `server/ui`, embedded the same way (`sys._MEIPASS/ui/`); `services/ui_views.py` serves them as `ui://` resources |
 
 The `manifest.json` `mcp_config.command` points to the `.exe` directly, so Claude
 Desktop needs nothing else on the PATH.
@@ -133,6 +138,8 @@ server/
   parsers/         — .PrjPcb, .SchDoc, .PcbDoc and Draftsman .PCBDwf parsers
   services/        — registry, sheet context, PCB index, design notes and image helpers
   scripts/         — PowerShell scripts called at runtime
+  ui/              — MCP Apps views: shell.css and shell.js (shared, inlined) and one HTML
+                     page per view, served as ui:// resources by services/ui_views.py
   dist/            — compiled binary (git-ignored, produced by PyInstaller)
 
 tests/             — pytest suite

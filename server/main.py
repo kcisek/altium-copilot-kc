@@ -168,6 +168,7 @@ try:
     )
     from services import db_parts
     from services import multiboard
+    from services import ui_views
     from parsers.pin_table import PinTableError, parse_pin_file, parse_pin_text
     from services.pin_table import (
         check_pins as check_pin_rows, page as page_pin_table, placed_pins, symbol_pins,
@@ -341,6 +342,7 @@ except ImportError:
     )
     from server.services import db_parts
     from server.services import multiboard
+    from server.services import ui_views
     from server.parsers.pin_table import PinTableError, parse_pin_file, parse_pin_text
     from server.services.pin_table import (
         check_pins as check_pin_rows, page as page_pin_table, placed_pins, symbol_pins,
@@ -1210,6 +1212,8 @@ mcp = FastMCP("altium-copilot-kc", instructions=SERVER_INSTRUCTIONS)
 # FastMCP 1.27 reports its framework version unless the low-level server
 # version is explicitly set.
 mcp._mcp_server.version = _read_version()
+# MCP Apps views (ui:// resources) the hosts that support them draw next to a tool's result.
+ui_views.register(mcp)
 
 # ---------- module-level state ----------
 _altium: AltiumClient = AltiumClient()
@@ -6499,7 +6503,8 @@ def _parse_vref(text: str | None) -> tuple[dict[str, float] | float | None, dict
 @mcp.tool(
     title="Get Power Tree",
     annotations=ToolAnnotations(readOnlyHint=True),
-    meta={"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS},
+    meta=ui_views.link_meta("get_power_tree",
+                            {"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS}),
 )
 def get_power_tree(
     rail: str | None = None,
