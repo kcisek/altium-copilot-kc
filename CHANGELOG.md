@@ -293,6 +293,73 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
     (Mini PC Motherboard, SODIMM and WiFi with its panel, SpiritLevel, Bluetooth
     Sentinel), page sizes and the plan, the page budgets, the locator text and its
     errors, one finding round trip per tool, and the page's contract and read-only rule.
+- Extension settings form (roadmap #73): `manifest.json` declares `user_config`, so
+  Claude Desktop shows the extension's settings: Project folders, Units, Fab profile,
+  Derating policy, Default variant, Check for updates and Allow check-pack Python
+  plugins, all optional (`required: false`) with defaults that keep today's behaviour.
+  Every tool's text result is unchanged, byte for byte, when nothing is set, and when the
+  extension starts the server with every field left at its default or unsubstituted
+  (except `run_custom_checks`' plugin "not run" reason, which then names the extension's
+  switch).
+  - How values reach the server: `server.mcp_config.env` maps each field to one
+    environment variable (`ALTIUM_COPILOT_UNITS`, `_FAB_PROFILE`, `_DERATING_POLICY`,
+    `_DEFAULT_VARIANT`, `_CHECK_UPDATES`, `_ALLOW_PLUGINS`) from
+    `${user_config.<key>}`; Project folders, a several-folder field that the manifest
+    can only expand in `args`, arrives as `--project-folders <folder> ...` (or
+    `ALTIUM_COPILOT_PROJECT_FOLDERS`, folders separated by `;`, elsewhere). Empty values
+    and values that are exactly a placeholder the host left in place (an optional field
+    without a value) are unset; a placeholder inside other text (the host's substitution
+    puts one back for a value containing `$&`) fails its check. The same variables work in Claude Desktop's own configuration, Claude Code's
+    MCP configuration and a CI job; `manifest_version` stays 0.4.
+  - `server/services/settings.py` reads and checks them once at start (absolute paths
+    that exist, units `mil` or `mm`, `true`/`false` switches, the profile and policy files
+    parsed as their tools read them) and never stops the server: problems go to the log,
+    `detect_altium_project` (`settings.problems`, with `settings.applied` whenever a
+    setting is set; the profile and policy files are checked again each time, so a file
+    fixed since the start is no longer listed) and `set_project_dir`
+    (`settings_problems`), and the setting is not applied. The messages say when a path
+    is a file instead of a folder (or the other way round) or longer than Windows opens
+    without long-path support; a link to a profile or policy file elsewhere is followed.
+    The same folder spelt twice (a short 8.3 name, `..`) is listed once. Precedence
+    everywhere: the tool's argument, then the setting, then the tool's own default.
+  - Wiring: Units fill every tool's omitted `units` (35 tools; `settings.units_note`
+    tells the model that the numbers it passes are read in that unit too), except inside
+    check packs' tool rules and review checklists, which keep each tool's own default so
+    that a pack's numbers mean the same for every user. Fab profile is
+    `load_profile`'s default after the project's `fab_profile.json` (`chosen_by`
+    `setting`, also in the release check's fiducials gate and the manufacturing review);
+    a file that cannot be read is an error naming the setting, never another profile.
+    Derating policy is a layer under the project's `derating_policy.json` and the
+    `policy` argument (`chosen_by` joins the layers, `setting_file`, `set_by_setting`)
+    for `check_derating`, and for the resistor limits of `get_circuit_calculations` and
+    `check_thermal`, which leave an unreadable setting file out with a note (the
+    project's file still applies). The review-checklist and check-pack caches see edits
+    to the setting files.
+    Default variant is made active by `set_project_dir` when the project defines it
+    (`default_variant_note`; `refresh_netlist` keeps the variant in use). Project
+    folders are listed by `detect_altium_project` (`project_folders`: at most 50
+    projects, 4 levels deep) and searched by `check_libraries`' where-used when no
+    `folders` is given. Check for updates off skips the daily GitHub request and the
+    update notice; a copy running as an extension gets `update_note` (install a newer
+    `.mcpb`) instead of the `install.ps1` command, which would add a second copy.
+  - Allow check-pack Python plugins keeps the plugin opt-in's meaning: off by default,
+    set only by the user where the server starts, and still needing `allow_plugins=true`
+    in the call; `ALTIUM_COPILOT_ALLOW_PLUGINS` now accepts `true` as well as `1` (the
+    form's boolean arrives as `true`/`false`). With the variable present but off, the
+    "not run" reason names the extension's switch as well as the variable.
+  - The `check` command reads the same variables (`--variant` wins over the Default
+    variant; a setting that cannot be applied exits 2, except Project folders and a
+    plugin switch other than `true`/`1`, which are notes; Units apply to `--checks` only;
+    `options.settings` in the JSON).
+    `install.ps1` keeps the `env` and `args` of an existing Claude Desktop registration
+    when it updates the copilot.
+  - Not offered: an update channel (only stable releases are published, so the setting
+    is on/off) and any secret or token field (Nexar/Octopart is roadmap #44).
+  - Tests (`tests/test_settings.py`): the manifest's `user_config` against the MCPB
+    v0.4 schema rules and its placeholders against `env` and `args` both ways, every field
+    reaching the server through the reference substitution of `@anthropic-ai/mcpb`,
+    unset, empty and placeholder values, each validation message, precedence, the plugin
+    switch, the check command, and unchanged results with nothing set.
 - `trace_net_across_boards`, `check_multiboard` and `get_system_connections` (roadmap
   #54): multi-board systems (`.PrjMbd`) read offline; the loaded project is never
   changed and none of the three needs its netlist.

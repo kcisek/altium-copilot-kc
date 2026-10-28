@@ -181,13 +181,21 @@ def _panel_line(index) -> str | None:
     )
 
 
-def profile_lines(root_dir) -> list[str]:
-    """Which fab profile check_dfm uses by default for this project folder, and the
-    other .json files in it that a profile argument could name (at most
-    SNAPSHOT_MAX_FILES). Never the profile file's own name or source text."""
+def profile_lines(root_dir, setting: str | None = None) -> list[str]:
+    """Which fab profile check_dfm uses by default for this project folder (setting: the
+    user's Fab profile setting), and the other .json files in it that a profile argument
+    could name (at most SNAPSHOT_MAX_FILES). Never the profile file's own name or source
+    text."""
     root = root_dir or None
-    profile, error = load_profile(None, root)
-    if error:
+    profile, error = load_profile(None, root, setting=setting)
+    if error and error.get("setting"):
+        message = " ".join(str(error.get("message", "")).split())
+        line = (
+            "- Fab profile: the user's Fab profile setting cannot be used, so check_dfm "
+            f"answers {error.get('error')} until it is fixed (or a profile is passed): "
+            f"{message}"
+        )
+    elif error:
         message = " ".join(str(error.get("message", "")).split())
         line = (
             f"- Fab profile: the project's {DEFAULT_FILE} cannot be used, so check_dfm "
@@ -213,6 +221,18 @@ def profile_lines(root_dir) -> list[str]:
                 "default; confirm with the user that it is the fabricator building this "
                 "board"
             )
+    elif profile.chosen_by == "setting":
+        if profile.file is not None:
+            what = "a profile file"
+        elif profile.key == "altimade":
+            what = "Altimade's published limits"
+        else:
+            what = "profile none: no fabricator limit"
+        line = (
+            f"- Fab profile: no {DEFAULT_FILE} in the project folder, so check_dfm uses "
+            f"the user's Fab profile setting ({what}); confirm with the user that it is "
+            "the fabricator building this board"
+        )
     else:
         line = (
             f"- Fab profile: no {DEFAULT_FILE} in the project folder, so check_dfm "
@@ -234,7 +254,7 @@ def profile_lines(root_dir) -> list[str]:
     return lines
 
 
-def manufacturing_snapshot(index, root_dir) -> str:
+def manufacturing_snapshot(index, root_dir, fab_profile_setting: str | None = None) -> str:
     """Bounded facts for the review, one Markdown bullet per line: copper layers, the
     outline, parts per side, embedded boards (a panel) and the default fab profile with
     the other .json files of the project folder."""
@@ -242,7 +262,7 @@ def manufacturing_snapshot(index, root_dir) -> str:
     panel = _panel_line(index)
     if panel:
         lines.append(panel)
-    lines += profile_lines(root_dir)
+    lines += profile_lines(root_dir, fab_profile_setting)
     return "\n".join(lines)
 
 
@@ -460,9 +480,11 @@ def _check_list(names: tuple[str, ...]) -> str:
 
 
 def build_manufacturing_review(project: dict, variant_name: str, index, *,
-                               netlist_free: bool = False) -> str:
+                               netlist_free: bool = False,
+                               fab_profile_setting: str | None = None) -> str:
     """The manufacturing-review prompt for a loaded project and its PCB index;
-    netlist_free appends MANUFACTURING_REVIEW_NETLIST_FREE_NOTE."""
+    netlist_free appends MANUFACTURING_REVIEW_NETLIST_FREE_NOTE; fab_profile_setting is
+    the user's Fab profile setting (check_dfm's default after the project's file)."""
     paths = project.get("pcb_doc_paths") or []
     pcb_doc = PureWindowsPath(paths[0]).name if paths else "(none)"
     if len(paths) > 1:
@@ -472,7 +494,8 @@ def build_manufacturing_review(project: dict, variant_name: str, index, *,
         pcb_doc=pcb_doc,
         active_variant=variant_name,
         root_dir=project.get("root_dir", ""),
-        snapshot=manufacturing_snapshot(index, project.get("root_dir")),
+        snapshot=manufacturing_snapshot(index, project.get("root_dir"),
+                                        fab_profile_setting),
         fab_checks=_check_list(FAB_CHECKS),
         assembly_checks=_check_list(ASSEMBLY_CHECKS),
         dfa_guidance=render_dfa_guidance(),

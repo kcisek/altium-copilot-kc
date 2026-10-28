@@ -94,6 +94,15 @@ if ($configPath) {
         $config | Add-Member -MemberType NoteProperty -Name mcpServers -Value ([PSCustomObject]@{})
     }
     $entry = [PSCustomObject]@{ command = $exeDest; args = @() }
+    # Keep the settings of an earlier registration (env: the ALTIUM_COPILOT_* variables,
+    # args: --project-folders), so an update does not reset them.
+    $previous = $config.mcpServers.PSObject.Properties[$name]
+    if ($previous -and $previous.Value.env) {
+        $entry | Add-Member -MemberType NoteProperty -Name env -Value $previous.Value.env
+    }
+    if ($previous -and $previous.Value.args) {
+        $entry.args = @($previous.Value.args)
+    }
     $config.mcpServers | Add-Member -MemberType NoteProperty -Name $name -Value $entry -Force
     New-Item -ItemType Directory -Force -Path (Split-Path $configPath) | Out-Null
     $json = $config | ConvertTo-Json -Depth 10 -Compress

@@ -124,9 +124,16 @@ Test the resulting `server/dist/altium-copilot.exe` on a machine **without Pytho
 | PowerShell scripts | embedded in the `.exe` via `--add-data`; extracted to `sys._MEIPASS/scripts/` at runtime |
 | Review checklists | `server/checklists`, embedded the same way (`sys._MEIPASS/checklists/`) |
 | Interactive views (MCP Apps pages) | `server/ui`, embedded the same way (`sys._MEIPASS/ui/`); `services/ui_views.py` serves them as `ui://` resources |
+| Extension settings | `manifest.json` `user_config` (the form Claude Desktop shows), mapped by `mcp_config.env` to `ALTIUM_COPILOT_*` variables and by `mcp_config.args` to `--project-folders`; `services/settings.py` reads and checks them at start |
 
 The `manifest.json` `mcp_config.command` points to the `.exe` directly, so Claude
 Desktop needs nothing else on the PATH.
+
+A new setting is a `user_config` field and its `env` entry in `manifest.json`, a `Field`
+in `services/settings.py` with its validation, its variable in `SETTING_VARIABLES` in
+`conftest.py` (so a developer's shell cannot change test results), the code that uses
+it (a tool argument first, the setting next, the old default last) and a README row;
+`tests/test_settings.py` fails until the manifest, the module and `conftest.py` agree.
 
 ## Project structure
 

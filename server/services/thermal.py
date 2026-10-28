@@ -54,7 +54,8 @@ try:
     from services.connectivity import connectivity
     from services.decoupling import component_pads, designator_prefix, pcb_components, pin_role
     from services.derating import (
-        across_voltage, is_shunt, load_policy, merged_params, net_voltages, resistor_limits,
+        across_voltage, is_shunt, merged_params, net_voltages, policy_or_defaults,
+        resistor_limits,
     )
     from services.logic_levels import POWER_DRIVER_TEXT
     from services.pcb_geometry import point_in_polygon, point_seg_distance
@@ -69,7 +70,8 @@ except ImportError:
         component_pads, designator_prefix, pcb_components, pin_role,
     )
     from server.services.derating import (
-        across_voltage, is_shunt, load_policy, merged_params, net_voltages, resistor_limits,
+        across_voltage, is_shunt, merged_params, net_voltages, policy_or_defaults,
+        resistor_limits,
     )
     from server.services.logic_levels import POWER_DRIVER_TEXT
     from server.services.pcb_geometry import point_in_polygon, point_seg_distance
@@ -348,13 +350,13 @@ class _Design:
     """The schematic read once: circuit_calcs' Board (power tree, parts, voltages, chips,
     processors) and the net voltages with divider midpoints (check_derating's)."""
 
-    def __init__(self, netlist: dict, plan, project_params, rails, vref, root_dir):
-        policy, error = load_policy(root_dir)
-        self.notes: list[str] = []
-        if error:
-            policy, _ = load_policy(None)
-            self.notes.append(f"{error.get('file') or 'derating_policy.json'} could not be "
-                              f"read ({error['message']}): the default resistor ratings apply.")
+    def __init__(self, netlist: dict, plan, project_params, rails, vref, root_dir,
+                 policy_setting: str | None = None):
+        # The resistor ratings: check_derating's policy layers (the Derating policy
+        # setting's file, then the project's derating_policy.json).
+        policy, notes = policy_or_defaults(root_dir, policy_setting,
+                                           "the default resistor ratings")
+        self.notes: list[str] = notes
         self.policy = policy["values"]
         self.board = Board(netlist, plan, project_params, rails, vref, self.policy)
         self.tree = self.board.tree
@@ -1243,15 +1245,17 @@ def prepare_thermal(
     max_distance_mil: float = DEFAULT_MAX_DISTANCE_MIL,
     units: str = "mm",
     root_dir=None,
+    policy_setting: str | None = None,
 ) -> dict:
     """Read the design (and the PcbDoc) once; render_thermal pages the result. An
-    {"error": ...} dict for an unknown check or part."""
+    {"error": ...} dict for an unknown check or part. policy_setting: the Derating policy
+    setting's file (resistor ratings), under the project's derating_policy.json."""
     requested = [check.strip().lower() for check in checks or [] if check.strip()]
     if invalid := [check for check in requested if check not in CHECKS]:
         return {"error": "invalid_checks",
                 "message": f"Unknown checks {invalid}; use {list(CHECKS)}."}
     inputs = inputs or Inputs()
-    design = _Design(netlist, plan, project_params, rails, vref, root_dir)
+    design = _Design(netlist, plan, project_params, rails, vref, root_dir, policy_setting)
     tree = design.tree
     notes = list(design.notes)
     wanted_parts, unknown_parts = resolve_names(parts, tree.design.part_pins)

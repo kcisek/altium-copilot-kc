@@ -34,9 +34,10 @@ row on every page (shortened when the page must shrink, never dropped).
 
 Python plugins (check_packs/plugins/*.py in the project folder only; a folder linked to
 another place gives none) run only when the call asks for them and the server's
-environment has ALTIUM_COPILOT_ALLOW_PLUGINS=1: they are repository code run with the
-server's permissions, with no time limit, and output written past sys.stdout (os.write,
-sys.__stdout__) is not captured. Each defines check(api) returning findings; an
+environment has ALTIUM_COPILOT_ALLOW_PLUGINS=1 (or true: what Claude Desktop's settings
+form sets when the user ticks "Allow check-pack Python plugins", off by default): they
+are repository code run with the server's permissions, with no time limit, and output
+written past sys.stdout (os.write, sys.__stdout__) is not captured. Each defines check(api) returning findings; an
 exception or sys.exit in one is reported in its rule row, never raised.
 
 Pure logic, no MCP: main.py passes the design API, the tools and the PCB in.
@@ -1699,17 +1700,40 @@ def run_tool_rule(runner: ToolRunner, rule: dict) -> tuple[dict, list[dict]]:
 
 # ---------- plugins ----------
 
+PLUGIN_ENV_VALUES = ("1", "true")  # any case; anything else (unset, false, yes) is off
+
+
+def plugin_env_enabled(value) -> bool:
+    """True when the server's ALTIUM_COPILOT_ALLOW_PLUGINS value opts in."""
+    return str(value if value is not None else "").strip().lower() in PLUGIN_ENV_VALUES
+
+
+PLUGIN_SETTING = (
+    "turn on Allow check-pack Python plugins in the extension's settings (Claude Desktop), "
+    f"or set {PLUGIN_ENV}=1 or true where the server is started"
+)
+
+
 def plugins_allowed(allow: bool, environ=None) -> tuple[bool, str | None]:
-    """(run plugins?, why not)."""
+    """(run plugins?, why not). With the variable in the environment but off (Claude
+    Desktop's extension always sets it, false by default), the reason names the
+    extension's setting too."""
     environ = os.environ if environ is None else environ
-    enabled = str(environ.get(PLUGIN_ENV, "")).strip() == "1"
+    enabled = plugin_env_enabled(environ.get(PLUGIN_ENV, ""))
     if allow and enabled:
         return True, None
+    present = PLUGIN_ENV in environ
     if not allow and not enabled:
+        if present:
+            return False, ("not run: call with allow_plugins=true, and the user must "
+                           f"{PLUGIN_SETTING}")
         return False, ("not run: call with allow_plugins=true, and start the server with "
                        f"{PLUGIN_ENV}=1 in its environment")
     if not allow:
         return False, "not run: call with allow_plugins=true to run them"
+    if present:
+        return False, (f"not run: the server's environment does not set {PLUGIN_ENV}=1 or "
+                       f"true: the user must {PLUGIN_SETTING} (it cannot be set from a call)")
     return False, (f"not run: the server's environment does not set {PLUGIN_ENV}=1 (the "
                    "user sets it where the server is started; it cannot be set from a call)")
 

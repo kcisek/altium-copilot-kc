@@ -23,6 +23,16 @@ project registry and the state file are not written, the update check does not r
 nothing is written into the project folder. Only the files named by --junit, --markdown
 and --json (and GITHUB_STEP_SUMMARY) are written.
 
+Settings: the ALTIUM_COPILOT_* environment variables the MCP server reads (roadmap #73:
+Units, Fab profile, Derating policy, Default variant, Project folders, Allow check-pack
+Python plugins) apply here too, through the same tools; --variant wins over the Default
+variant, and Units applies to the --checks tools only (checklists and packs keep each
+tool's own default unit, as in the MCP server). A setting that cannot be applied is a
+configuration error (exit 2): a CI job must not pass with a setting silently ignored.
+Two are notes instead: Project folders (only a pack's where-used rule reads them) and a
+plugin switch other than true or 1 (the plugins stay off, as they always did). The
+update check never runs here, so ALTIUM_COPILOT_CHECK_UPDATES is not read.
+
 Statuses: the project load is a suite of its own (a sheet that cannot be read or a
 netlist that cannot be compiled fails as an error: the checks after it would otherwise
 pass on what was not read). A checklist item's Yes passes, No fails (severity error; a
@@ -135,9 +145,12 @@ def build_parser() -> argparse.ArgumentParser:
                              "folder); the checklists' custom items see its rules too")
     parser.add_argument("--allow-plugins", action="store_true",
                         help="run the packs' Python plugins: they run only when "
-                             "ALTIUM_COPILOT_ALLOW_PLUGINS=1 is set in the environment too")
-    parser.add_argument("--variant", help="the variant to check (default: the project's "
-                                          "first, as the tools use)")
+                             "ALTIUM_COPILOT_ALLOW_PLUGINS=1 (or true) is set in the "
+                             "environment too")
+    parser.add_argument("--variant", help="the variant to check (default: the "
+                                          "ALTIUM_COPILOT_DEFAULT_VARIANT setting when the "
+                                          "project defines it, else the project's first, as "
+                                          "the tools use)")
     parser.add_argument("--rails", help="net voltages for the tools that take rails=, e.g. "
                                         "'VIN=24,VBAT=12.6'")
     parser.add_argument("--hv", help="working voltages for check_hv_clearance, e.g. "
@@ -875,6 +888,35 @@ def _validate_passthrough(server, args) -> dict[str, str]:
     return values
 
 
+# Settings the check command does not use: their problems are not its errors.
+UNUSED_SETTINGS = ("check_updates",)
+# Settings whose problem is a note, not a configuration error: the project folders serve
+# only check_libraries' where-used (a pack's tool rule), and a plugin switch other than
+# true or 1 leaves the plugins off, as it always did.
+NOTED_SETTINGS = ("project_folders", "allow_plugins")
+
+
+def _problem_text(problem: dict) -> str:
+    return f"{problem['variable']} ({problem['title']}): {problem['message']}"
+
+
+def read_settings(server) -> tuple:
+    """(the server's settings from the environment (the tools read the same), notes on
+    the settings not applied that the run can do without), or (None, []) for a server
+    module without them; UsageError when one the run needs cannot be applied."""
+    module = getattr(server, "app_settings", None)
+    if module is None:
+        return None, []
+    settings = module.current()
+    problems = [problem for problem in settings.problems_now()
+                if problem["setting"] not in UNUSED_SETTINGS]
+    errors = [problem for problem in problems if problem["setting"] not in NOTED_SETTINGS]
+    if errors:
+        raise UsageError("invalid_setting", " ".join(map(_problem_text, errors)))
+    return settings, [f"Setting not applied: {_problem_text(problem)}"
+                      for problem in problems]
+
+
 def run(args, server) -> dict:
     """Load the project headless and run what the arguments ask for; the result model
     every output is rendered from. UsageError before anything ran."""
@@ -905,6 +947,7 @@ def run(args, server) -> dict:
                          "Nothing to check: --checklist none and --packs none, and no "
                          "--checks, --drc-report or --diff-base.")
     defaults = _validate_passthrough(server, args)
+    settings, setting_notes = read_settings(server)
     prj = find_project(args.project)
     started = time.perf_counter()
     result: dict = {
@@ -918,8 +961,12 @@ def run(args, server) -> dict:
         "project": {"prj_pcb": prj.name, "name": prj.stem},
         "suites": [],
         "errors": [],
-        "notes": [],
+        "notes": list(setting_notes),
     }
+    applied = {key: value for key, value in (settings.applied() if settings else {}).items()
+               if key not in UNUSED_SETTINGS}
+    if applied:
+        result["options"]["settings"] = applied
 
     def config_error(suite_id: str, name: str, code: str, message: str, time_s: float = 0.0):
         result["suites"].append(error_suite(suite_id, name, code, message, time_s=time_s))
@@ -971,6 +1018,15 @@ def run(args, server) -> dict:
             raise UsageError("variant_not_found",
                              f"--variant: no variant '{args.variant}' in the project "
                              f"(variants: {', '.join(names) or 'none'}).")
+    elif settings is not None and settings.default_variant:
+        wanted = settings.default_variant
+        if variant_state.get(wanted) is not None:
+            variant_state.set_variant(wanted)
+        elif variant_state.variants:
+            result["notes"].append(
+                f"The Default variant setting (ALTIUM_COPILOT_DEFAULT_VARIANT) names "
+                f"'{wanted}', which the project does not define: the project's first "
+                "variant is checked.")
     variant = variant_state.active.name if variant_state.variants else None
     result["project"]["variant"] = variant
     state = rc.design_state(project, server.head_state)

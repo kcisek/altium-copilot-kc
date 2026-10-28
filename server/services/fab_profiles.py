@@ -10,6 +10,12 @@ The assembly limits (max_unique_parts, max_placements, min_part_spacing, min_par
 min_global_fiducials, local_fiducial_pitch, min_pitch) are an assembler's: only the two
 part counts are published by Altimade, the others stay unset until someone gives them.
 
+With no profile argument and no fab_profile.json in the project folder, the user's Fab
+profile setting (ALTIUM_COPILOT_FAB_PROFILE, the extension's settings in Claude Desktop:
+a profile file anywhere on the PC, or altimade or none) is used before Altimade, chosen_by
+setting. A setting that cannot be used is an error, as a broken project file is: another
+profile is never substituted.
+
 A specific limit falls back to its generic one unless it is set or removed: the via, PTH
 and NPTH drills to min_drill, the via and PTH rings to min_annular_ring, the via and pad
 hole-to-hole distances to min_hole_to_hole, a hole wall to copper to min_spacing and a
@@ -36,16 +42,20 @@ min_pitch is not set by it.
 
 import json
 import math
+import os
 import re
 from pathlib import Path
 
 MM = 1 / 0.0254  # mil per mm
 DEFAULT_FILE = "fab_profile.json"
 BUILTIN_NAMES = ("altimade", "none")
-CHOSEN_BY = ("argument", "project_file", "default")
+CHOSEN_BY = ("argument", "project_file", "setting", "default")
+SETTING_VARIABLE = "ALTIUM_COPILOT_FAB_PROFILE"
 NAME_CHARS = 80
 SOURCE_CHARS = 200
 MAX_FILE_BYTES = 64 * 1024
+MAX_PATH_CHARS = 259  # a longer path opens on Windows only with long-path support
+WINDOWS = os.name == "nt"
 FILES_LISTED = 20
 
 # name -> kind. length: mil, keys name_mm / name_mil; size: a board size, the same
@@ -245,6 +255,12 @@ NOT_FOUND_HINT = (
     '{"min_spacing_mm": 0.1}) with profile=\'none\', or save them as <name>.json in the '
     "project folder. Never substitute another profile."
 )
+SETTING_HINT = (
+    "The user's Fab profile setting names this profile: show the user what is wrong and ask "
+    "them to fix the file or the setting (Claude Desktop: the extension's settings; "
+    f"elsewhere the {SETTING_VARIABLE} environment variable), or pass profile= for this "
+    "call. Never substitute another profile."
+)
 INVALID_PROFILE_HINT = (
     "Show the user what to fix in the file (with the line and column when given) and call "
     "again once it is fixed. Never substitute another profile: pass profile='altimade' or "
@@ -399,6 +415,8 @@ class Profile:
                     f"limit{'s' if count != 1 else ''}, profile none).")
         where = ("the project's " + self.file if self.chosen_by == "project_file"
                  else "the profile file " + self.file)
+        if self.chosen_by == "setting":
+            where += " (the user's Fab profile setting)"
         based = " (based on Altimade's published limits)" if self.based_on == "altimade" else ""
         return f"Checked against the limits in {where}{based}{extra}."
 
@@ -797,6 +815,60 @@ def _file_profile(path: Path, root_dir, chosen_by: str) -> Profile:
     return profile
 
 
+def _setting_error(error: ProfileError) -> ProfileError:
+    """error, naming the setting and with the setting's hint."""
+    details = {key: value for key, value in error.error.items() if key != "hint"}
+    return ProfileError({**details, "setting": SETTING_VARIABLE, "hint": SETTING_HINT})
+
+
+def setting_path_problem(path: Path, kind: str = "file") -> str | None:
+    """Why a path a setting names cannot be used, worded to follow "which", or None for
+    an existing file (kind "file") or folder (kind "folder")."""
+    if not path.is_absolute():
+        return "is not an absolute path"
+    try:
+        if path.is_file() if kind == "file" else path.is_dir():
+            return None
+        other = path.is_dir() if kind == "file" else path.is_file()
+    except (OSError, ValueError):
+        other = False
+    if other:
+        return "is a folder, not a file" if kind == "file" else "is a file, not a folder"
+    text = str(path)
+    if WINDOWS and len(text) > MAX_PATH_CHARS and not text.startswith("\\\\?\\"):
+        return (f"is {len(text)} characters long, more than Windows opens without long-path "
+                "support (use a shorter path)")
+    return f"is not a {kind} on this PC (moved, renamed or on a drive not connected?)"
+
+
+def setting_folder(path: Path) -> Path:
+    """The folder a setting's file really sits in: the user chose the file, so a link to
+    a file elsewhere is followed (a project's own files are never)."""
+    try:
+        return path.resolve().parent
+    except (OSError, RuntimeError, ValueError):
+        return path.parent
+
+
+def setting_profile(value: str, root_dir=None) -> Profile:
+    """The profile the Fab profile setting names (chosen_by setting): altimade or none
+    (any case), or the absolute path of a profile file, read like a project's file.
+    ProfileError (profile_not_found, invalid_profile) naming the setting otherwise."""
+    text = str(value).strip()
+    if text.lower() in BUILTIN_NAMES:
+        return builtin_profile(text.lower(), "setting")
+    shown = _clip(text, SOURCE_CHARS)
+    path = Path(text)
+    reason = setting_path_problem(path)
+    if reason:
+        raise _setting_error(_not_found(text, root_dir, (
+            f"The Fab profile setting ({SETTING_VARIABLE}) names '{shown}', which {reason}.")))
+    try:
+        return _file_profile(path, setting_folder(path), "setting")
+    except ProfileError as error:
+        raise _setting_error(error) from None
+
+
 def builtin_profile(name: str, chosen_by: str = "argument") -> Profile:
     """A built-in profile: "altimade" (Altimade's published limits) or "none" (no
     limits)."""
@@ -810,13 +882,15 @@ def builtin_profile(name: str, chosen_by: str = "argument") -> Profile:
     raise KeyError(name)
 
 
-def load_profile(profile: str | None, root_dir, limits: dict | None = None
-                 ) -> tuple[Profile | None, dict | None]:
+def load_profile(profile: str | None, root_dir, limits: dict | None = None,
+                 setting: str | None = None) -> tuple[Profile | None, dict | None]:
     """The profile check_dfm compares with, as (profile, None) or (None, error dict).
 
     profile: "altimade" or "none" (any case), or a file in root_dir named "acme" or
     "acme.json" (chosen_by argument). None or blank: root_dir/fab_profile.json when it
-    exists (chosen_by project_file), else altimade (chosen_by default). limits (same
+    exists (chosen_by project_file), else the Fab profile setting when it is given
+    (setting: a file's absolute path, altimade or none; chosen_by setting), else altimade
+    (chosen_by default). limits (same
     suffixed keys, null removes) apply on top, whatever their types: every value is
     checked here. Errors: invalid_limits, profile_not_found (builtin names, the .json
     files found, files_total and a hint), invalid_profile (file, line and column for bad
@@ -830,8 +904,12 @@ def load_profile(profile: str | None, root_dir, limits: dict | None = None
                 found = default is not None and default.is_file()
             except OSError:
                 found = False
-            result = (_file_profile(default, root_dir, "project_file") if found
-                      else builtin_profile("altimade", "default"))
+            if found:
+                result = _file_profile(default, root_dir, "project_file")
+            elif setting:
+                result = setting_profile(setting, root_dir)
+            else:
+                result = builtin_profile("altimade", "default")
         elif name.lower() in BUILTIN_NAMES:
             result = builtin_profile(name.lower(), "argument")
         else:
