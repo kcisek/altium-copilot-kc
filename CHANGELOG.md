@@ -360,6 +360,47 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
     reaching the server through the reference substitution of `@anthropic-ai/mcpb`,
     unset, empty and placeholder values, each validation message, precedence, the plugin
     switch, the check command, and unchanged results with nothing set.
+- Project dashboard (roadmap #74): `get_project_dashboard`, a new read-only tool, gives one
+  overview of the loaded project: the release verdict and gates (`check_release_readiness`),
+  board and project facts (`get_board_info`, `list_variants`) and, for each of 33 checks
+  (`run_erc`, `get_drc_report`, `get_power_tree`, `get_output_jobs`, `verify_outputs`,
+  `run_custom_checks` and the `check_*` tools), its state, its own counts over its whole
+  result, what it examined, what it left out and its first findings, as of the saved files.
+  Claude Desktop (and other MCP Apps hosts) draws it as an interactive dashboard; Claude
+  Code shows the compact JSON text.
+  - `server/services/project_dashboard.py` runs each check in-process with its default
+    arguments (the review checklist's runner, under the tools' own units) and reads its
+    first page into a card: one rule per tool family for the counts (a key missing makes
+    the card unreadable, never clean), a subject count (and, for derating, logic
+    levels, thermal, power paths and team check packs, how many of those it could judge:
+    a known voltage, dissipation or current, a rule that could be evaluated; a pack run
+    whose verdict is incomplete is never clean), the scope it left out and up to 20
+    findings worst first.
+    States: errors, warnings, notes, clean, partial, nothing_to_check, not_verified,
+    not_applicable, unavailable, failed, unreadable, not_run and stale. clean needs a
+    current result, readable counts all 0, something examined (and judged), nothing left
+    out and no limiting tag (the offline ERC, a netlist older than the sheets, read on
+    every call, a DRC report not to be trusted or stopped at its limit).
+  - A default call runs the release first, then the checks in a fixed order within a
+    20 s budget (checked before each check; the six slow ones start only before 10 s);
+    `not_run` names the checks it left out with the call that runs them. `checks=` runs
+    or reads exactly the named checks (up to 20 findings each for three or fewer; naming
+    `get_board_info` or `list_variants` returns the overview, naming
+    `check_release_readiness` the whole release block); `refresh=true` runs them again.
+    Results are cached per project (the last four) under a state key of the design
+    files, the project folder, Git, the netlist, the variant, the settings and the check
+    packs; a card from an older state comes back stale with the first part that changed
+    (and the variant it ran under), and a recomputed card keeps its previous counts. The
+    answer is at most 16,000 characters, one card per line, without what the catalogue
+    says (titles, groups, views), so a finding fits for each check with counts.
+  - The view (`server/ui/project_dashboard.html`) calls only `get_project_dashboard`,
+    one call at a time (`checks=[one]` fills the checks and facts the first call left
+    out, stopped on request, on teardown or when the files change). It opens the other
+    views by asking Claude through a `ui/message` after a click (MCP Apps spec
+    2026-01-26): fixed sentences naming read-only tools, never project data; without the
+    host's message capability, or when it is declined, the sentence is shown to copy.
+    The shared shell gains `canSendMessage` and `sendMessage`.
+  - `check_release_readiness` and `project_tour` keep their text and link no view.
 - `trace_net_across_boards`, `check_multiboard` and `get_system_connections` (roadmap
   #54): multi-board systems (`.PrjMbd`) read offline; the loaded project is never
   changed and none of the three needs its netlist.
