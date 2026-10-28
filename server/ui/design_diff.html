@@ -1,0 +1,2259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!--@csp-->
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Design diff</title>
+<style>/*@shell.css*/</style>
+<style>
+/* Design diff (roadmap #76): diff_design's changes between two revisions (or two folders)
+   as a side-by-side change list, a before (a) and an after (b) per change, with its ICT
+   hazards first, filters, a revision picker and a details pane per change. Links to the
+   board and the schematic are user-clicked messages to Claude under a strict name rule. */
+.head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 0 0 6px; }
+.head h1 { font-size: var(--fs-lg); margin: 0; font-weight: var(--fw-bold); }
+.head h1[tabindex="-1"]:focus { outline: none; }
+.head .meta { min-width: 0; overflow-wrap: anywhere; color: var(--c-text2); font-size: var(--fs-sm); }
+.head .grow { flex: 1 1 auto; }
+.argline { font-size: var(--fs-xs); color: var(--c-text3); margin: 0 0 8px; overflow-wrap: anywhere; }
+.argline code, .mono { font-family: var(--mono); }
+.sides { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 6px 8px; align-items: stretch;
+         margin: 0 0 8px; }
+.side { border: 1px solid var(--c-line); border-radius: var(--radius); padding: 6px 10px; font-size: var(--fs-sm); min-width: 0; }
+.side .tag { font-size: var(--fs-xs); color: var(--c-text3); text-transform: none; }
+.side .rev { font-weight: var(--fw-bold); overflow-wrap: anywhere; }
+.side .sub { display: block; color: var(--c-text2); overflow-wrap: anywhere; font-size: var(--fs-xs); }
+.sides .arrow { align-self: center; color: var(--c-text3); font-size: var(--fs-lg); }
+.block { border: 1px solid var(--c-line); border-radius: var(--radius); padding: 8px 12px; margin: 0 0 8px;
+         font-size: var(--fs-sm); }
+.block > summary { cursor: pointer; color: var(--c-text2); }
+.block h2 { font-size: var(--fs-md); margin: 0; display: inline; }
+.help { color: var(--c-text2); margin: 6px 0 0; overflow-wrap: anywhere; font-size: var(--fs-sm); }
+.sumline { font-size: var(--fs-sm); color: var(--c-text2); margin: 0 0 6px; overflow-wrap: anywhere; }
+.sumline .badge { margin: 0 2px; }
+.filters { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; margin: 0 0 6px; }
+.chiprow { margin: 0 0 6px; }
+.btn[aria-disabled="true"], .btn-link[aria-disabled="true"] { opacity: .5; cursor: default; }
+.picker { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: end; margin: 6px 0 0; }
+.picker label { display: flex; flex-direction: column; gap: 2px; font-size: var(--fs-xs); color: var(--c-text2); min-width: 0;
+                flex: 1 1 16em; max-width: 30em; }
+.picker select { width: 100%; min-width: 0; border: 1px solid var(--c-border); border-radius: var(--radius-sm);
+                 background: var(--c-bg); padding: 2px 4px; font-size: var(--fs-sm); }
+.picker .btn-row { margin: 0; }
+/* Kinds: a glyph and a word in each badge, so colour is never the only cue. */
+.badge.k-added { background: var(--c-success-bg); color: var(--c-success); }
+.badge.k-removed { background: var(--c-danger-bg); color: var(--c-danger); }
+.badge.k-hazard { background: var(--c-warning-bg); color: var(--c-warning); }
+.badge.k-redesignated, .badge.k-renamed, .badge.k-moved, .badge.k-connections { background: var(--c-info-bg); color: var(--c-info); }
+.kglyph { font-family: var(--mono); font-weight: var(--fw-bold); margin-right: 3px; }
+.tbl td.c-side { min-width: 9em; max-width: 26em; overflow-wrap: anywhere; }
+.tbl td.c-side.side-b { border-left: 1px solid var(--c-line); }
+.tbl td.c-subject { min-width: 6em; overflow-wrap: anywhere; }
+.tbl td.c-change { white-space: nowrap; }
+.none { color: var(--c-text3); font-style: italic; }
+.subtype { display: block; font-size: var(--fs-xs); color: var(--c-text3); }
+.hazards { margin: 0 0 8px; }
+.hazards ul { list-style: none; margin: 4px 0 0; padding: 0; }
+.hazards li { margin: 3px 0; overflow-wrap: anywhere; }
+.hazards .actions { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin: 6px 0 0; }
+.hazards.compact { padding: 4px 10px; }
+.hazards.compact .actions { margin: 0; gap: 2px 10px; }
+.hazards.compact h2 { font-size: var(--fs-sm); margin: 0; }
+/* The details pane: every field before and after. */
+.pane .summary { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
+.pane .summary .badge { white-space: normal; overflow-wrap: anywhere; }
+.pane h2[tabindex="-1"]:focus { outline: none; }
+.pane h2[tabindex="-1"]:focus-visible { outline: 2px solid var(--c-ring); outline-offset: 2px; }
+.pane dl.facts { grid-template-columns: fit-content(40%) minmax(0, 1fr); margin-top: 8px; }
+.pane dl.facts dt { min-width: 0; overflow-wrap: anywhere; }
+table.ba { width: 100%; border-collapse: collapse; font-size: var(--fs-xs); margin: 6px 0; table-layout: fixed; }
+table.ba th, table.ba td { border: 1px solid var(--c-line); padding: 3px 6px; text-align: left; vertical-align: top;
+                           overflow-wrap: anywhere; }
+table.ba th { background: var(--c-bg2); font-weight: var(--fw-bold); }
+table.ba th.f, table.ba td.f { width: 28%; color: var(--c-text2); }
+.pane .btn-row .btn { white-space: normal; overflow-wrap: anywhere; text-align: left; max-width: 100%; }
+.linkrow { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; margin: 4px 0; }
+.linkrow .name { font-family: var(--mono); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.answer { border-top: 1px solid var(--c-line); margin: 8px 0 0; padding: 6px 0 0; }
+.answer h4 { font-size: var(--fs-sm); margin: 0 0 4px; overflow-wrap: anywhere; font-weight: var(--fw-medium); }
+.answer ul.flat, .pane ul.flat { list-style: none; padding: 0; margin: 4px 0; }
+.answer ul.flat li, .pane ul.flat li { margin: 2px 0; overflow-wrap: anywhere; }
+.foot { font-size: var(--fs-xs); color: var(--c-text3); margin: 8px 0 0; overflow-wrap: anywhere; }
+.notes li { overflow-wrap: anywhere; margin: 3px 0; }
+/* A message to Claude: a button, or the sentence to copy in a read-only field. */
+.ask { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; max-width: 100%; }
+.ask label { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; max-width: 100%; min-width: 0; }
+.ask-label { font-size: var(--fs-xs); color: var(--c-text3); }
+.ask input { min-width: 0; width: 34em; max-width: 100%; border: 1px solid var(--c-border); border-radius: var(--radius-sm);
+             background: var(--c-bg2); padding: 2px 6px; font-size: var(--fs-xs); font-family: var(--mono); }
+.sent { font-size: var(--fs-xs); color: var(--c-text3); }
+/* A short host 980 px wide or less: the selected change's details take the main pane's
+   place (Close or Esc brings it back), rather than both shrinking to a few rows. */
+@media (max-width: 980px) {
+  .split.solo > .content { display: none; }
+}
+@media (max-width: 600px) {
+  .block { padding: 6px 8px; }
+  .head h1 { font-size: var(--fs-md); }
+  .head .meta { order: 5; flex-basis: 100%; }
+  .sides { grid-template-columns: minmax(0, 1fr); }
+  .sides .arrow { display: none; }
+}
+#app.short .block { padding: 4px 8px; margin-bottom: 6px; }
+#app.short .head { margin-bottom: 2px; }
+#app.short .argline { margin-bottom: 4px; }
+#app.short .sides { margin-bottom: 6px; }
+</style>
+</head>
+<body>
+<main id="app"></main>
+<script type="application/json" id="data-contract">
+{
+  "tool": "diff_design",
+  "max_pages": 60,
+  "sample": 20,
+  "recent_commits": 15,
+  "sections": {
+    "ict_hazards": "ICT hazards",
+    "project": "Project",
+    "components": "Components",
+    "variants": "Variants",
+    "bom": "BOM",
+    "nets": "Nets",
+    "placement": "Placement",
+    "rules": "Rules",
+    "classes": "Classes",
+    "diff_pairs": "Differential pairs",
+    "stackup": "Stackup",
+    "routing": "Routing"
+  },
+  "kinds": {
+    "hazard": ["!", "ICT hazard"],
+    "added": ["+", "Added"],
+    "removed": ["−", "Removed"],
+    "redesignated": ["⇄", "Re-designated"],
+    "renamed": ["✎", "Renamed"],
+    "moved": ["↔", "Moved"],
+    "connections": ["⋈", "Connections"],
+    "changed": ["~", "Changed"]
+  },
+  "changes": {
+    "ict_hazards.net_connections_changed": ["hazard", "Net kept its name, pins changed", "net"],
+    "ict_hazards.designator_reused": ["hazard", "Designator on another part", "designator"],
+    "project.sheet_added": ["added", "Sheet added", "sheet"],
+    "project.sheet_removed": ["removed", "Sheet removed", "sheet"],
+    "project.pcb_document": ["changed", "PCB document", null],
+    "project.parameters": ["changed", "Project parameters", null],
+    "components.added": ["added", "Added", "designator"],
+    "components.removed": ["removed", "Removed", "designator"],
+    "components.redesignated": ["redesignated", "Re-designated", "designator"],
+    "components.revalued": ["changed", "Comment or value", "designator"],
+    "components.footprint": ["changed", "Footprint", "designator"],
+    "components.parameters": ["changed", "Parameters", "designator"],
+    "components.properties": ["changed", "Properties", "designator"],
+    "variants.added": ["added", "Variant added", "variant"],
+    "variants.removed": ["removed", "Variant removed", "variant"],
+    "variants.fitting": ["changed", "Fitting", "designator"],
+    "variants.parameters": ["changed", "Varied parameters", "designator"],
+    "bom.line_added": ["added", "Line added", "line"],
+    "bom.line_removed": ["removed", "Line removed", "line"],
+    "bom.quantity": ["changed", "Quantity", "line"],
+    "nets.added": ["added", "Added", "net"],
+    "nets.removed": ["removed", "Removed", "net"],
+    "nets.renamed": ["renamed", "Renamed", "net"],
+    "nets.merged": ["connections", "Merged", "net"],
+    "nets.split": ["connections", "Split", "net"],
+    "nets.pin_moved": ["connections", "Pin moved", "pin"],
+    "placement.added": ["added", "Added", "designator"],
+    "placement.removed": ["removed", "Removed", "designator"],
+    "placement.redesignated": ["redesignated", "Re-designated", "designator"],
+    "placement.moved": ["moved", "Moved", "designator"],
+    "placement.rotated": ["moved", "Rotated", "designator"],
+    "placement.flipped": ["moved", "Flipped", "designator"],
+    "placement.footprint": ["changed", "Footprint", "designator"],
+    "rules.added": ["added", "Added", "rule"],
+    "rules.removed": ["removed", "Removed", "rule"],
+    "rules.changed": ["changed", "Changed", "rule"],
+    "classes.added": ["added", "Added", "name"],
+    "classes.removed": ["removed", "Removed", "name"],
+    "classes.members": ["changed", "Members", "name"],
+    "diff_pairs.added": ["added", "Added", "pair"],
+    "diff_pairs.removed": ["removed", "Removed", "pair"],
+    "diff_pairs.nets": ["changed", "Nets", "pair"],
+    "stackup.layer_added": ["added", "Layer added", "layer"],
+    "stackup.layer_removed": ["removed", "Layer removed", "layer"],
+    "stackup.reordered": ["changed", "Layer order", null],
+    "stackup.layer_changed": ["changed", "Layer changed", "layer"],
+    "stackup.thickness": ["changed", "Stack thickness", null],
+    "stackup.copper_layers": ["changed", "Copper layers", null],
+    "stackup.profile_added": ["added", "Impedance profile added", "profile"],
+    "stackup.profile_removed": ["removed", "Impedance profile removed", "profile"],
+    "stackup.profile_changed": ["changed", "Impedance profile", "profile"],
+    "routing.changed": ["changed", "Length or vias", "net"]
+  },
+  "names": {
+    "designator": "^[A-Za-z]{1,8}[0-9]{1,6}[A-Za-z0-9_]{0,10}$",
+    "net": "^[A-Za-z0-9_+.\\[\\]/-]{1,32}$",
+    "pad": "^[A-Za-z]{1,8}[0-9]{1,6}[A-Za-z0-9_]{0,10}-[A-Za-z0-9]{1,8}$",
+    "hash": "^[0-9a-f]{7,64}$",
+    "max_names": 4
+  },
+  "shapes": {
+    "result": {
+      "required": ["a", "b", "units", "total", "offset", "has_more", "changes"],
+      "optional": ["summary", "total_changes", "no_changes", "no_changes_hint", "unchanged_or_not_compared",
+                   "documents_not_read", "sheet_errors", "bom_variants_same_as_base", "routing_totals",
+                   "net_matching", "notes", "recent_commits", "recent_commits_note", "section", "next_offset"]
+    },
+    "a": {"required": ["source"], "optional": ["folder", "commit", "hash", "date_utc", "author", "subject"]},
+    "b": {"required": ["source"], "optional": ["folder", "commit", "hash", "date_utc", "author", "subject"]},
+    "recent_commits[]": {"required": ["commit", "hash", "date_utc", "author", "subject"], "optional": []},
+    "changes[]": {
+      "required": ["change", "eco", "text"],
+      "optional": ["section", "designator", "sheet", "comment", "value", "footprint", "previous_designator",
+                   "matched_by", "parameters", "properties", "variant", "from", "to", "line", "quantity",
+                   "designators_added", "designators_removed", "pcb_document", "net", "into", "merged",
+                   "previous_name", "pins", "pins_sample", "pin", "pins_added", "pins_removed",
+                   "pins_added_count", "pins_removed_count", "only_parts_added_or_removed", "x_mil", "y_mil",
+                   "dx_mil", "dy_mil", "distance_mil", "side", "rotation", "rule", "kind", "scope", "changes",
+                   "name", "members", "members_added", "members_removed", "members_added_count",
+                   "members_removed_count", "pair", "positive_net", "negative_net", "layer", "count", "order",
+                   "thickness_from_mil", "thickness_to_mil", "copper_layers", "profile", "target_ohm",
+                   "length_from_mil", "length_to_mil", "length_delta_mil", "vias", "where", "before", "after",
+                   "same_comment_and_footprint", "previous_part_now"]
+    },
+    "changes[].parameters[]": {"required": ["name", "from", "to"], "optional": []},
+    "changes[].properties[]": {"required": ["name", "from", "to"], "optional": []},
+    "changes[].changes[]": {"required": ["field"], "optional": ["from", "to", "from_mil", "to_mil"]}
+  }
+}
+</script>
+<script>/*@shell.js*/</script>
+<script>
+(() => {
+  "use strict";
+  const { el, clear } = Shell;
+  const CONTRACT = JSON.parse(document.getElementById("data-contract").textContent);
+  const app = document.getElementById("app");
+  const TOOL = CONTRACT.tool;
+
+  // The read-only tools the page calls: diff_design itself (its pages, other revisions, the
+  // recent commits), get_component and query_net for a change's part or net in the loaded
+  // project.
+  const READ_ONLY_TOOLS = new Set(["diff_design", "get_component", "query_net"]);
+  // The tools a message to Claude may name (read-only, named in fixed sentences only).
+  const MESSAGE_TOOLS = new Set(["get_board_view", "get_component", "get_sheet_context", "query_net", "diff_design"]);
+  const MAX_PAGES = CONTRACT.max_pages;
+  const SAMPLE = CONTRACT.sample;
+  const SECTIONS = CONTRACT.sections;
+  const SECTION_ORDER = Object.keys(SECTIONS);
+  const KINDS = CONTRACT.kinds;
+  const KIND_ORDER = Object.keys(KINDS);
+  const CHANGES = CONTRACT.changes;
+  // The message rule's patterns: a design name is put in a message only when it matches
+  // its pattern (no space, quote, backslash or other punctuation, a bounded length).
+  const NAME_RULES = {
+    part: new RegExp(CONTRACT.names.designator),
+    net: new RegExp(CONTRACT.names.net),
+    pad: new RegExp(CONTRACT.names.pad),
+  };
+  // A commit hash: abbreviated, or whole (SHA-1, 40 characters, or SHA-256, 64).
+  const HASH = new RegExp(CONTRACT.names.hash);
+  const FULL_HASH = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+  const MAX_NAMES = CONTRACT.names.max_names;
+  const NAME_WORDS = { part: "part", net: "net", pad: "pad" };
+  // The rule in words, per kind of name (the contract's patterns).
+  const RULE_WORDS = {
+    part: "a designator is letters, then digits, then optionally letters, digits or _ (at most 24 characters)",
+    net: "a net name is letters, digits and _ + - . [ ] / (at most 32 characters)",
+    pad: "a pad is such a designator, a hyphen and at most 8 letters or digits",
+  };
+  // The parts and nets of one change listed in its details, each with its links.
+  const MAX_LISTED = 8;
+
+  const view = {
+    args: {}, argsKnown: false,  // the tool call's arguments as the host sent them
+    data: null, resultSig: "", gen: 0, closed: false, busy: "", headError: "", noticeSig: "",
+    query: "", groupBy: "section", sectionsOn: null, kindsOn: null,
+    tables: {},          // the change list's sort and shown columns, kept across redraws
+    selected: null,      // the selected change's id
+    commits: null,       // {list, asked}: the recent commits and the call that listed them
+    pickA: "", pickB: "",
+    errorShown: null,    // {payload, asked}: an error answer drawn as a state
+    filtersOpen: null, pickerOpen: null, auto: { filters: true, picker: true },
+    sidesOpen: false, notesOpen: false,
+    messages: new Map(), // message id -> {state: pending | sent | denied, error}
+  };
+  const ui = {};
+  // Detail answers: one entry per (tool, arguments): {loading} | {text} | {error}. A
+  // failure is shown with Retry and never kept as the answer.
+  const answers = new Map();
+
+  // ---------- helpers ----------
+
+  const canCall = () => Shell.canCallTools();
+  const plural = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
+  const isObject = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  const listOf = (value) => (Array.isArray(value) ? value : []);
+  const has = (object, key) => isObject(object) && Object.prototype.hasOwnProperty.call(object, key);
+  // A table looked up by a string from the result: its own keys only, never a member of
+  // Object.prototype ("constructor", "__proto__", "toString").
+  const own = (table, key) => (has(table, key) ? table[key] : undefined);
+  const sectionTitle = (section) => own(SECTIONS, section) || String(section || "?").replace(/_/g, " ");
+  const sectionRank = (section) => {
+    const at = SECTION_ORDER.indexOf(section);
+    return at < 0 ? SECTION_ORDER.length : at;
+  };
+  const kindInfo = (kind) => {
+    const spec = own(KINDS, kind);
+    return spec ? { glyph: spec[0], label: spec[1] } : { glyph: "~", label: String(kind || "changed") };
+  };
+  const kindRank = (kind) => {
+    const at = KIND_ORDER.indexOf(kind);
+    return at < 0 ? KIND_ORDER.length : at;
+  };
+  const narrowHost = () => window.innerWidth <= 600;
+
+  /** The height the page may take: the host's (fixed or maximum), else in full screen the
+   *  window's own (a host may give no dimensions there); 0 for no limit. */
+  function hostHeight() {
+    const dims = Shell.context().containerDimensions || {};
+    const limit = Number(dims.height || dims.maxHeight) || 0;
+    return limit || (Shell.context().displayMode === "fullscreen" ? window.innerHeight : 0);
+  }
+
+  /** True when the host gives the page at least this height, or sets no limit (full screen
+   *  counts its own height too). */
+  function tall(height) {
+    const limit = hostHeight();
+    return !limit || limit >= height;
+  }
+
+  /** A short or narrow host: the picker, the filters and the notes wait behind disclosures. */
+  const short = () => !Shell.roomy() || !tall(800);
+
+  /** A host under 520 px of height: the call's line and the sides wait in one disclosure,
+   *  and the hazards' question in the notes, so the list keeps a few rows. */
+  const cramped = () => {
+    const limit = hostHeight();
+    return limit > 0 && limit < 520;
+  };
+
+  /** A host 980 px wide or less and too short for the list and the details stacked (under
+   *  1100 px): a selected change's details take the list's place there. */
+  const compactHost = () => window.innerWidth <= 980 && !tall(1100);
+
+  // ---------- arguments ----------
+
+  const ARG_ORDER = ["rev_a", "rev_b", "project_dir_a", "project_dir_b", "section", "units"];
+
+  /** A call's arguments as text: diff_design(rev_a="…", section="nets"), offset left out
+   *  unless given; a whole commit hash (SHA-1 or SHA-256) shortened to 12 characters. */
+  function argText(args) {
+    const shown = (key) => (/^rev_/.test(key) && FULL_HASH.test(String(args[key])) ? `${String(args[key]).slice(0, 12)}…` : args[key]);
+    const parts = ARG_ORDER.filter((key) => args[key]).map((key) => `${key}="${shown(key)}"`);
+    if (args.offset) parts.push(`offset=${args.offset}`);
+    return `${TOOL}(${parts.join(", ")})`;
+  }
+
+  /** The arguments the view keeps and asks with (offset is set per call). */
+  function cleanArgs(args) {
+    const out = {};
+    for (const key of ["rev_a", "rev_b", "project_dir_a", "project_dir_b"]) {
+      if (args && typeof args[key] === "string" && args[key].trim()) out[key] = args[key].trim();
+    }
+    if (args && SECTION_ORDER.includes(args.section)) out.section = args.section;
+    if (args && (args.units === "mil" || args.units === "mm")) out.units = args.units;
+    return out;
+  }
+
+  /** Arguments that give this result again when the host did not send the call's: the
+   *  revisions (hashes, or working) or folders the result names, its section and units. A
+   *  result that lists recent commits was asked without revisions. */
+  function inferredArgs(first) {
+    const args = {};
+    const a = isObject(first.a) ? first.a : {};
+    const b = isObject(first.b) ? first.b : {};
+    if (a.source === "folder" || b.source === "folder") {
+      if (a.folder) args.project_dir_a = String(a.folder);
+      if (b.folder) args.project_dir_b = String(b.folder);
+    } else if (!Array.isArray(first.recent_commits)) {
+      if (a.source === "git" && a.hash) args.rev_a = String(a.hash);
+      else if (a.source === "working") args.rev_a = "working";
+      if (b.source === "git" && b.hash) args.rev_b = String(b.hash);
+      else if (b.source === "working") args.rev_b = "working";
+    }
+    if (SECTION_ORDER.includes(first.section)) args.section = first.section;
+    if (first.units === "mil" || first.units === "mm") args.units = first.units;
+    return args;
+  }
+
+  const sameArgs = (a, b) => JSON.stringify(cleanArgs(a)) === JSON.stringify(cleanArgs(b));
+  const gitMode = (args) => !args.project_dir_a && !args.project_dir_b;
+
+  /** One side as the tool reports it, short: a commit, the files on disk, or a folder by
+   *  its last name (the side cards and the arguments give the whole path). */
+  function sideText(side) {
+    if (!isObject(side)) return "?";
+    if (side.source === "git") return `commit ${side.commit || String(side.hash || "?").slice(0, 7)}`;
+    if (side.source === "working") return "the files on disk";
+    if (side.source === "folder") return `folder ${String(side.folder || "?").replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "?"}`;
+    return String(side.source || "?");
+  }
+
+  const dateText = (iso) => (iso ? String(iso).replace("T", " ").replace(/:\d\d(\+00:00|Z)$/, " UTC") : "");
+
+  // ---------- data contract ----------
+
+  function rowsAt(data, path) {
+    if (path === "result") return [data];
+    let rows = [data];
+    for (const part of path.split(".")) {
+      const key = part.replace(/\[\]$/, "");
+      rows = rows.flatMap((row) => {
+        const value = row && typeof row === "object" ? row[key] : undefined;
+        if (part.endsWith("[]")) return Array.isArray(value) ? value : [];
+        return value === undefined || value === null ? [] : [value];
+      });
+    }
+    return rows;
+  }
+
+  function checkContract(data) {
+    const problems = [];
+    for (const [path, shape] of Object.entries(CONTRACT.shapes)) {
+      for (const key of shape.required) {
+        // A row that is not an object lacks every key (and never reaches the "in" operator).
+        const missing = rowsAt(data, path).filter((row) => !has(row, key)).length;
+        if (missing) problems.push(`${path}: ${key} missing in ${missing} row(s)`);
+      }
+    }
+    return problems;
+  }
+
+  // ---------- tool calls: one at a time ----------
+
+  // Teardown rejects every call still waiting: the closed view waits for no answer.
+  let closeCalls = () => {};
+  const whenClosed = new Promise((resolve, reject) => {
+    closeCalls = () => reject(new Error("the view was closed"));
+  });
+  whenClosed.catch(() => {});
+  let queue = Promise.resolve();
+
+  /** Call one of the page's read-only tools through the shell (which checks serverTools).
+   *  Calls run one at a time: each waits for the one before it to be answered. */
+  function call(tool, args) {
+    if (!READ_ONLY_TOOLS.has(tool)) return Promise.reject(new Error(`The view does not call ${tool}.`));
+    if (view.closed) return Promise.reject(new Error("the view was closed"));
+    if (!canCall()) return Promise.reject(new Error(`this host does not let the view call ${tool}`));
+    const run = queue.then(() => {
+      if (view.closed) throw new Error("the view was closed");
+      return Promise.race([Shell.callTool(tool, args), whenClosed]);
+    });
+    queue = run.catch(() => {});
+    return run;
+  }
+
+  const answerKey = (tool, args) => `${tool} ${JSON.stringify(args)}`;
+
+  /** Ask a read-only tool for a change's part or net, once: an answer is kept, a failure is
+   *  asked again (Retry). */
+  async function askDetail(tool, args) {
+    if (!READ_ONLY_TOOLS.has(tool)) return;
+    const key = answerKey(tool, args);
+    const entry = answers.get(key);
+    if ((entry && !entry.error) || view.closed || !canCall()) {
+      renderPane();
+      return;
+    }
+    answers.set(key, { loading: true });
+    renderPane();
+    try {
+      const result = await call(tool, args);
+      answers.set(key, { text: Shell.resultText(result) });
+      Shell.announce(`${tool} answered`);
+    } catch (error) {
+      answers.set(key, { error: view.closed ? "the view was closed" : error.message });
+      if (!view.closed) Shell.announce(`${tool} failed`);
+    }
+    renderPane();
+  }
+
+  function askAgain(tool, args) {
+    const key = answerKey(tool, args);
+    const entry = answers.get(key);
+    if (entry && entry.loading) return;
+    answers.delete(key);
+    askDetail(tool, args);
+  }
+
+  function parsedAnswer(entry) {
+    try {
+      return { json: JSON.parse(entry.text), text: entry.text };
+    } catch (error) {
+      return { json: null, text: entry.text };
+    }
+  }
+
+  // ---------- messages to Claude ----------
+
+  /** True when a design name may go into a message: its pattern holds (a designator, a
+   *  net name or a pad), and it is a string. */
+  function validName(type, name) {
+    const rule = own(NAME_RULES, type);
+    return Boolean(rule) && typeof name === "string" && rule.test(name);
+  }
+
+  /** The revisions a message may name, as diff_design's arguments: commit hashes (12
+   *  characters) or working; none for two folders (the call named them); null otherwise. */
+  function revisionArgs(revs) {
+    if (!revs) return null;
+    if (revs.folders) return [];
+    const word = (rev) => (rev === "working" ? "working" : typeof rev === "string" && HASH.test(rev) ? rev.slice(0, 12) : null);
+    const a = word(revs.a);
+    const b = word(revs.b);
+    return a && b ? [`rev_a "${a}"`, `rev_b "${b}"`] : null;
+  }
+
+  /**
+   * The fixed sentence a link sends to the conversation. Its only variable parts are design
+   * names that pass validName (designators, net names, pads), at most MAX_NAMES of them, and
+   * commit hashes (or working), each quoted; a name that fails makes no sentence (""). No
+   * other field of the result (comments, values, footprints, parameters, descriptions,
+   * sheets, variants, rules, layers, commit messages, authors, branches, tags, folders) is
+   * ever put in one: those stay on the page, to read and copy.
+   */
+  function sentence(kind, names = [], revs = null) {
+    if (names.length > MAX_NAMES || !names.every((item) => validName(item.type, item.name))) return "";
+    const quoted = (list) => list.map((item) => `"${item.name}"`).join(", ");
+    const parts = names.filter((item) => item.type === "part");
+    const nets = names.filter((item) => item.type === "net");
+    const pads = names.filter((item) => item.type === "pad");
+    const revArgs = revisionArgs(revs);
+    const withArgs = (extra) => {
+      const list = [...(revArgs || []), ...extra];
+      const joined = list.length > 1 ? `${list.slice(0, -1).join(", ")} and ${list[list.length - 1]}` : list.join("");
+      const words = joined ? ` with ${joined}` : "";
+      return revs && revs.folders ? `${words} on the two folders it compared` : words;
+    };
+    switch (kind) {
+      case "board": {
+        if (!names.length) return "";
+        const what = [parts.length ? `${parts.length === 1 ? "part" : "parts"} ${quoted(parts)}` : "",
+                      pads.length ? `${pads.length === 1 ? "pad" : "pads"} ${quoted(pads)}` : "",
+                      nets.length ? `${nets.length === 1 ? "net" : "nets"} ${quoted(nets)}` : ""].filter(Boolean).join(" and ");
+        const asked = [parts.length || pads.length ? `parts="${[...parts, ...pads].map((item) => item.name).join(",")}"` : "",
+                       nets.length ? `nets="${nets.map((item) => item.name).join(",")}"` : ""].filter(Boolean).join(" and ");
+        return `Show ${what} on the board view (call get_board_view with ${asked}).`;
+      }
+      case "schematic_part":
+        if (parts.length !== 1 || names.length !== 1) return "";
+        return `Show part ${quoted(parts)} on its schematic sheet: call get_component with refdes ${quoted(parts)}, then get_sheet_context for its sheet.`;
+      case "schematic_net":
+        if (nets.length !== 1 || names.length !== 1) return "";
+        return `Show net ${quoted(nets)} on the schematic: call query_net for ${quoted(nets)}, then get_sheet_context for the sheets it is on.`;
+      case "hazards":
+        if (names.length || revArgs === null) return "";
+        return `Explain the ICT hazards in this design diff and what to update in the test fixtures and programs (call diff_design${withArgs(['section "ict_hazards"'])}).`;
+      case "notes":
+        if (names.length || revArgs === null) return "";
+        return `Write release notes from this design diff (call diff_design${withArgs([])}).`;
+      case "folders":
+        if (names.length) return "";
+        return "Compare this project with an earlier copy of it in another folder (call diff_design with project_dir_a); ask me for the folder.";
+      default:
+        return "";
+    }
+  }
+
+  /** Send a sentence into the conversation; called from click handlers only. A denial
+   *  or a host without messages leaves the sentence to copy, in a read-only field. */
+  async function askClaude(id, text) {
+    if (!text || view.closed) return;
+    const entry = view.messages.get(id);
+    if (entry && entry.state === "pending") return;
+    if (!Shell.canSendMessage()) {
+      view.messages.set(id, { state: "denied", error: "This host does not let the view send a message." });
+      redrawMessages(id);
+      return;
+    }
+    view.messages.set(id, { state: "pending" });
+    redrawMessages(id);
+    Shell.announce("Sending to the conversation");
+    try {
+      await Shell.sendMessage(text);
+      view.messages.set(id, { state: "sent" });
+      Shell.announce("Sent to the conversation");
+    } catch (error) {
+      view.messages.set(id, { state: "denied", error: error.message });
+      Shell.announce("The message was not sent: the sentence is there to ask Claude yourself");
+    }
+    redrawMessages(id);
+  }
+
+  /** A read-only field with the sentence, labelled with its purpose ("Ask Claude: release
+   *  notes"; its label wraps it, so a click on the label focuses it; selected on focus). */
+  function askField(text, note, id = null, purpose = "Ask Claude") {
+    const input = el("input", { type: "text", readonly: true, value: text, data: id ? { message: id } : null });
+    input.addEventListener("focus", () => input.select());
+    return el("span", { class: "ask" }, el("label", {}, el("span", { class: "ask-label", text: purpose }), input),
+      note ? el("span", { class: "muted", text: note }) : null);
+  }
+
+  /** A link to a view or a question: a button that sends its sentence, or the sentence to
+   *  copy when the host takes no message (or did not deliver it), labelled with its purpose.
+   *  While the message is pending the button is marked disabled but keeps keyboard focus. */
+  function messageControl(id, label, text, title = null, purpose = null) {
+    if (!text) return null;
+    const field = purpose || `Ask Claude: ${label.replace(/^Ask Claude (about|for|to) /, "").replace(/^./, (first) => first.toLowerCase())}`;
+    if (view.closed) return askField(text, "The view was closed: ask Claude with this sentence.", id, field);
+    const entry = view.messages.get(id);
+    if (!Shell.canSendMessage()) return askField(text, null, id, field);
+    if (entry && entry.state === "denied") {
+      const why = entry.error && !/did not deliver/.test(entry.error) ? ` (${entry.error})` : "";
+      return askField(text, `The host did not deliver the message${why}: ask Claude with this sentence.`, id, field);
+    }
+    const pending = entry && entry.state === "pending";
+    const button = el("button", { type: "button", class: "btn", text: label,
+                                  title: title || `Sends to the conversation: ${text}`,
+                                  "aria-disabled": pending ? "true" : null, data: { message: id },
+                                  on: { click: () => askClaude(id, text) } });
+    return el("span", { class: "ask" }, button,
+      pending ? el("span", { class: "sent", text: "Sending to the conversation…" })
+        : entry && entry.state === "sent" ? el("span", { class: "sent", text: "Sent to the conversation" }) : null);
+  }
+
+  /** Redraw what shows a message's state; keyboard focus stays on its control (the
+   *  button, or the sentence that replaced it). */
+  function redrawMessages(id) {
+    const active = document.activeElement;
+    const had = Boolean(active && active.dataset && active.dataset.message === id);
+    if (view.data && ui.header) renderHeadBlocks();
+    else if (view.errorShown) showError(view.errorShown.payload, view.errorShown.asked);
+    renderPane();
+    if (!had) return;
+    const target = [...app.querySelectorAll("[data-message]")].find((node) => node.dataset.message === id);
+    if (target && document.activeElement !== target) target.focus();
+  }
+
+  // ---------- reading the diff ----------
+
+  function showState(kind, title, detail) {
+    view.errorShown = null;
+    clear(app).appendChild(Shell.state(kind, title, detail));
+  }
+
+  const ERROR_TITLES = {
+    no_project: "No project is loaded",
+    folders_required: "Two folders are needed",
+    not_a_git_repository: "The project folder is not in a Git clone",
+    git_not_found: "git is not installed",
+    git_failed: "git could not read the clone",
+    invalid_revision: "That is not a revision",
+    revision_not_found: "No such revision in the clone",
+    no_design_commits: "No commit changed the design files",
+    no_parent_commit: "That commit has no parent",
+    project_not_in_revision: "The project is not in that revision",
+    unsafe_path: "The revision stores the project outside the repository",
+    missing_object: "A file is missing from the clone's object store",
+    temp_inside_clone: "The temporary folder is inside the clone",
+    folder_not_found: "Folder not found",
+    no_prjpcb: "No .PrjPcb in the folder",
+    diff_failed: "The comparison failed",
+  };
+  const INFO_ERRORS = new Set(["no_project", "folders_required", "not_a_git_repository", "invalid_revision",
+                               "revision_not_found", "no_design_commits", "no_parent_commit",
+                               "project_not_in_revision", "folder_not_found", "no_prjpcb"]);
+  // Errors a revision picked from the recent commits may mend.
+  const PICKER_ERRORS = new Set(["invalid_revision", "revision_not_found", "no_parent_commit", "project_not_in_revision"]);
+
+  function showError(payload, asked) {
+    view.errorShown = { payload, asked };
+    const kind = INFO_ERRORS.has(payload.error) ? "info" : "error";
+    const mark = Shell.focusMark(app);
+    clear(app);
+    Shell.append(app, [
+      Shell.state(kind, own(ERROR_TITLES, payload.error) || `${TOOL} answered with an error`, payload.message || payload.error),
+      asked ? el("p", { class: "argline", text: `Asked: ${argText(asked)}.` }) : null,
+      view.headError ? Shell.notice("error", view.headError) : null,
+      view.closed ? Shell.notice("info", "The view was closed: it sends no more requests.") : null,
+    ]);
+    if (payload.error === "not_a_git_repository" || payload.error === "git_not_found") {
+      app.appendChild(el("div", { class: "block" },
+        el("p", { class: "help", text: "Two folders can be compared instead: an earlier copy of the project (an archived release) as a, and the loaded project as b." }),
+        el("div", { class: "btn-row" }, messageControl("folders", "Ask Claude to compare with a folder", sentence("folders")))));
+    }
+    // While the view asks again from here, the error and its picker stay (with the busy
+    // line), so keyboard focus stays on the control that asked.
+    if (PICKER_ERRORS.has(payload.error) && (!asked || gitMode(asked))) {
+      app.appendChild(pickerBlock(asked || {}, true));
+    } else if (view.busy) {
+      app.appendChild(el("p", { class: "muted small", text: view.busy }));
+    }
+    if (mark) Shell.refocus(app, mark, () => app.querySelector("button, select") || null);
+  }
+
+  const pageNext = (page) => (page.has_more && page.next_offset !== undefined && page.next_offset !== null ? page.next_offset : null);
+
+  /** What makes a page one of this comparison: its two sides, units, section and total. */
+  const pageSig = (page) => JSON.stringify([page.a || null, page.b || null, page.units || null, page.section || null, page.total]);
+
+  async function diffPage(args, offset, expect) {
+    const page = Shell.resultJson(await call("diff_design", { ...args, offset }));
+    if (page && page.error) throw new Error(page.message || page.error);
+    if (!page || !Array.isArray(page.changes)) throw new Error("it is not a design diff");
+    // A page of another comparison (other sides, another total: the files or a branch
+    // moved between two pages) is not merged.
+    if (expect && pageSig(page) !== pageSig(expect)) {
+      const error = new Error(`it is not a page of this comparison (${sideText(page.a)} to ${sideText(page.b)}, ${plural(page.total || 0, "change")}): the files or the revisions changed while the view read the pages`);
+      error.changed = true;
+      throw error;
+    }
+    return page;
+  }
+
+  function progress(text) {
+    if (view.data && ui.header) {
+      view.busy = text;
+      renderHeadBlocks();
+    } else if (view.errorShown) {
+      // Asked again from an error drawn as a state: it stays until the answer is drawn.
+      view.busy = text;
+      redrawPicker();
+    } else {
+      showState("loading", "Reading the design diff", text);
+    }
+  }
+
+  async function loadResult(result) {
+    // A result the host marks as an error is drawn as one, never as a diff.
+    if (result && result.isError) {
+      showState("error", `${TOOL} failed`, Shell.resultText(result).slice(0, 400) || "The host marked the result as an error.");
+      return;
+    }
+    const text = Shell.resultText(result);
+    // The same result again (a host may send it twice, even while the first is still being
+    // read): what is drawn, or being read, stays; it is read once.
+    if (text && text === view.resultSig) return;
+    let first;
+    try {
+      first = Shell.resultJson(result);
+    } catch (error) {
+      showState("error", "The design diff could not be read", error.message);
+      return;
+    }
+    view.resultSig = text;
+    const asked = view.argsKnown ? { ...cleanArgs(view.args), offset: Number(view.args.offset) || 0 } : null;
+    try {
+      await loadFrom(first, asked, "claude");
+    } catch (error) {
+      // Never left on "Reading": a result this view cannot draw says so.
+      view.busy = "";
+      showState("error", "The design diff could not be read", error.message);
+    }
+  }
+
+  /** The changes of a page, each with its section and its place in the tool's list. */
+  function tagged(page) {
+    return listOf(page.changes).map((entry, index) => ({
+      entry, index: (Number(page.offset) || 0) + index, section: (isObject(entry) && entry.section) || page.section || "?",
+    }));
+  }
+
+  /**
+   * Read a diff_design result: from offset 0 when it is a later page, then every page after
+   * it with the same arguments. asked: the call's arguments, or null when the host did not
+   * send them (then the revisions or folders the result names). origin: "claude" or "view".
+   * gen: this read's turn; a later read (another result, the view asking again) makes it
+   * stop and draw nothing.
+   */
+  async function loadFrom(first, asked, origin, gen = ++view.gen) {
+    const current = () => gen === view.gen;
+    if (!first || typeof first !== "object") {
+      showState("error", "The design diff could not be read", "The result is not a design diff.");
+      return;
+    }
+    if (first.error) {
+      if (view.data && origin === "view") throw new Error(first.message || first.error);
+      view.data = null;
+      view.busy = "";
+      view.headError = "";
+      showError(first, asked ? cleanArgs(asked) : null);
+      return;
+    }
+    // An error drawn as a state stays (with its picker) until finish() draws this read.
+    const args = asked ? cleanArgs(asked) : inferredArgs(first);
+    const notes = [];
+    const reasons = [];
+    let again = false;  // what is read cannot be read on from: Read again asks from offset 0
+    let reread = false;  // a later page as the result, read again from offset 0
+    if (!asked) notes.push(`The host did not send the call's arguments: the view reads with ${argText(args)}, the sides this result names.`);
+    if (first.offset > 0 && canCall() && !view.closed) {
+      // A later page: the summary, the notes and the earlier changes come with the first.
+      progress(`Asking ${TOOL} for its first page.`);
+      try {
+        const later = first.offset;
+        first = await diffPage(args, 0, first);
+        reread = true;
+        notes.push(`The result was a later page (offset ${later}): the view read the comparison again from offset 0.`);
+      } catch (error) {
+        reasons.push(`its first page could not be read: ${error.message}`);
+      }
+      if (!current()) return;
+    }
+    if (first.offset > 0) {
+      reasons.unshift(`this result starts at offset ${first.offset}, so its first ${plural(first.offset, "change")}, the summary and the notes are not in it`);
+      again = true;
+    }
+    if (Array.isArray(first.recent_commits)) {
+      view.commits = { list: first.recent_commits, asked: argText({ ...args, offset: 0 }) };
+    }
+    const state = { first, last: first, items: tagged(first), warnings: checkContract(first), pages: 1, args, asked,
+                    origin, notes, reasons, again, reread, stop: "" };
+    // The first page counts: a stop says "at most 60 pages" after 60 pages read.
+    await readRest(state, gen, Shell.pageBudget(MAX_PAGES, 1));
+    if (!current()) return;
+    finish(state);
+  }
+
+  /** Read the pages after state.last, at most budget's pages. A failed page stops the
+   *  reading with its reason (Read the rest goes on from it); a page of another comparison
+   *  stops it too, and only a new read from offset 0 goes on. */
+  async function readRest(state, gen, budget) {
+    let failed = null;
+    const { pages, stopped } = await Shell.readPages({
+      first: state.last, tool: TOOL, budget, closed: () => view.closed || gen !== view.gen,
+      pageOffset: pageNext,
+      getPage: async (offset) => {
+        try {
+          return await diffPage(state.args, offset, state.first);
+        } catch (error) {
+          failed = error;
+          throw error;
+        }
+      },
+      onPage: (page) => {
+        state.items.push(...tagged(page));
+        state.warnings.push(...checkContract(page));
+        state.last = page;
+      },
+      progress: (page, offset) => progress(`${TOOL} pages its changes: page ${state.pages + page - 1} (offset ${offset}).`),
+    });
+    // readPages counts the page it starts from, which is already counted here, and names a
+    // failed page by that count: pages are numbered from offset 0 here.
+    const read = state.pages + pages - 1;
+    state.pages = read;
+    if (failed && failed.changed) state.again = true;
+    // A page the closed view stopped waiting for: the reason is the closing.
+    state.stop = !stopped ? "" : view.closed ? "the view was closed" : stopped.replace(/^page \d+ of/, `page ${read + 1} of`);
+  }
+
+  /** Draw what a read gave: the model, the selection kept when it is the same comparison. */
+  function finish(state) {
+    const previous = view.data;
+    view.data = buildModel(state.first, state.items, {
+      args: state.args, asked: state.asked, origin: state.origin, notes: state.notes, pages: state.pages,
+      warnings: [...new Set(state.warnings)], read: state, reread: Boolean(state.reread),
+      stopReason: [...state.reasons, state.stop].filter(Boolean).join("; ").replace(/[.\s]+$/, ""),
+    });
+    view.busy = "";
+    view.headError = "";
+    view.errorShown = null;
+    const same = previous && pageSig(previous.first) === pageSig(view.data.first) && sameArgs(previous.args, view.data.args);
+    if (!same) {
+      // Another comparison: its selection, filters, picks and messages do not carry over.
+      view.selected = null;
+      view.sectionsOn = null;
+      view.kindsOn = null;
+      view.pickA = "";
+      view.pickB = "";
+      view.messages.clear();
+    } else if (view.selected && !view.data.byId.has(view.selected)) {
+      view.selected = null;
+    }
+    renderAll();
+    const data = view.data;
+    const hazards = data.hazards.length ? `, ${plural(data.hazards.length, "ICT hazard")}` : "";
+    // A read that stopped says how many of the changes it read, not that they are all.
+    Shell.announce(data.noChanges ? "No design change between a and b"
+      : data.stopReason ? `Design diff: ${data.rows.length} of ${plural(data.total, "change")} read${hazards}; the reading stopped, the notice says why`
+        : `Design diff: ${plural(data.rows.length, "change")}${hazards}`);
+  }
+
+  /** Read on from where the reading stopped (a failed page, the page budget), or read the
+   *  comparison again from offset 0 when what was read cannot be read on from. */
+  async function resumeRead() {
+    const data = view.data;
+    if (!data || !data.read || view.busy || view.closed || !canCall()) return;
+    const next = pageNext(data.read.last);
+    if (data.read.again || next === null) {
+      reask(data.args, "the comparison again from offset 0");
+      return;
+    }
+    const gen = ++view.gen;
+    const mark = Shell.focusMark(app);
+    const state = { ...data.read, items: [...data.read.items], warnings: [...data.read.warnings], stop: "" };
+    view.busy = `Reading the rest of the changes from offset ${next}…`;
+    view.headError = "";
+    renderHeadBlocks();
+    Shell.announce(view.busy);
+    await readRest(state, gen, Shell.pageBudget(MAX_PAGES));
+    if (gen !== view.gen) return;
+    finish(state);
+    if (mark) Shell.refocus(app, mark, () => ui.headline || null);
+  }
+
+  /** Ask diff_design again with these arguments (another pair of revisions, every
+   *  section): what is drawn stays until the answer arrives, and stays when the call fails. */
+  async function reask(args, what) {
+    if (view.busy || view.closed || !canCall()) return;
+    const asked = cleanArgs(args);
+    const gen = ++view.gen;
+    const mark = Shell.focusMark(app);
+    view.headError = "";
+    if (view.data && ui.header) {
+      view.busy = `Asking ${argText(asked)} for ${what}…`;
+      renderHeadBlocks();
+    } else if (view.errorShown) {
+      // Asked from an error drawn as a state (an unknown revision's picker): the error and
+      // the picker stay, the button marked busy, so keyboard focus stays on it.
+      view.busy = `Asking ${argText(asked)} for ${what}…`;
+      redrawPicker();
+    } else {
+      showState("loading", "Reading the design diff", `Asking ${argText(asked)} for ${what}.`);
+    }
+    Shell.announce(`Asking ${TOOL} for ${what}`);
+    try {
+      const first = Shell.resultJson(await call("diff_design", { ...asked, offset: 0 }));
+      if (gen !== view.gen) return;
+      await loadFrom(first, asked, "view", gen);
+    } catch (error) {
+      if (gen !== view.gen) return;
+      view.busy = "";
+      if (view.data && ui.header) {
+        // After teardown the page only says the view was closed.
+        if (!view.closed) view.headError = `${argText(asked)} failed: ${error.message}`;
+        renderHeadBlocks();
+        if (!view.closed) Shell.announce(view.headError);
+      } else if (view.errorShown) {
+        if (!view.closed) view.headError = `${argText(asked)} failed: ${error.message}`;
+        redrawPicker();
+        if (!view.closed) Shell.announce(view.headError);
+      } else {
+        showState(view.closed ? "info" : "error", view.closed ? "The view was closed" : "The design diff could not be read",
+                  view.closed ? "It asks the server nothing more." : error.message);
+      }
+    }
+    if (mark) Shell.refocus(app, mark, () => ui.headline || app.querySelector("button, select") || null);
+  }
+
+  /** The recent commits for the picker when the answer has none (it was asked with
+   *  revisions): diff_design without revisions lists them; section ict_hazards keeps that
+   *  answer short. Its comparison is not drawn: only its list is kept, labelled with it. */
+  async function listCommits(base) {
+    if (view.busy || view.closed || !canCall()) return;
+    const args = cleanArgs({ units: base.units, section: "ict_hazards" });
+    const mark = Shell.focusMark(app);
+    view.busy = `Asking ${argText(args)} for the recent commits…`;
+    view.headError = "";
+    redrawPicker();
+    Shell.announce(view.busy);
+    try {
+      const answer = Shell.resultJson(await call("diff_design", { ...args, offset: 0 }));
+      if (answer && answer.error) throw new Error(answer.message || answer.error);
+      if (!answer || !Array.isArray(answer.recent_commits)) throw new Error("the answer lists no recent commits");
+      view.commits = { list: answer.recent_commits, asked: argText(args) };
+      Shell.announce(`${plural(answer.recent_commits.length, "recent commit")} listed`);
+    } catch (error) {
+      if (!view.closed) view.headError = `${argText(args)} failed: ${error.message}`;
+    }
+    view.busy = "";
+    redrawPicker();
+    if (mark) Shell.refocus(app, mark, () => app.querySelector(".picker select") || ui.headline || null);
+  }
+
+  function redrawPicker() {
+    if (view.data && ui.header) renderHeadBlocks();
+    else if (view.errorShown) showError(view.errorShown.payload, view.errorShown.asked);
+  }
+
+  // ---------- the model ----------
+
+  /** A change's kind, label and subject key, by its section and change (own keys only). */
+  function changeSpec(section, change) {
+    const spec = own(CHANGES, `${section}.${change}`);
+    if (spec) return { kind: spec[0], label: spec[1], subjectKey: spec[2] };
+    const word = String(change || "changed");
+    const kind = /added/.test(word) ? "added" : /removed/.test(word) ? "removed" : "changed";
+    return { kind, label: word.replace(/_/g, " "), subjectKey: null, unknown: true };
+  }
+
+  const SUBJECT_KEYS = ["designator", "net", "pin", "rule", "name", "pair", "layer", "profile", "line", "variant", "sheet"];
+  const SUBJECT_TYPES = { designator: "part", net: "net", pin: "pin", rule: "rule", name: "class", pair: "pair",
+                          layer: "layer", profile: "profile", line: "BOM line", variant: "variant", sheet: "sheet" };
+
+  function subjectOf(entry, spec, section) {
+    const key = spec.subjectKey || SUBJECT_KEYS.find((name) => typeof entry[name] === "string" && entry[name]);
+    if (key && entry[key] !== undefined && entry[key] !== null && entry[key] !== "") {
+      return { text: String(entry[key]), type: own(SUBJECT_TYPES, key) || key };
+    }
+    return { text: spec.label, type: sectionTitle(section).toLowerCase() };
+  }
+
+  const LABELS = {
+    comment: "Comment", value: "Value", footprint: "Footprint", rotation: "Rotation", side: "Side",
+    quantity: "Quantity", pcb_document: "PCB document", copper_layers: "Copper layers", vias: "Vias",
+    positive_net: "Positive net", negative_net: "Negative net", sheet: "Sheet", pins: "Pins",
+    pins_sample: "Pins (sample)", scope: "Scope", kind: "Kind", members: "Members", target_ohm: "Target (ohm)",
+    count: "Count", matched_by: "Matched by", where: "Where", designator: "Designator", net: "Net", pin: "Pin",
+    variant: "Variant", rule: "Rule", name: "Name", pair: "Pair", layer: "Layer", profile: "Profile",
+    line: "BOM line", previous_part_now: "The previous part is now", same_comment_and_footprint: "Same comment and footprint",
+    only_parts_added_or_removed: "Only parts added or removed",
+  };
+  const label = (key) => own(LABELS, key) || String(key).replace(/_/g, " ");
+  // Fields that name what a change is about: facts, never a side.
+  const CONTEXT = new Set(["designator", "net", "pin", "variant", "rule", "name", "pair", "layer", "profile", "line",
+                           "matched_by", "where", "previous_part_now", "same_comment_and_footprint",
+                           "only_parts_added_or_removed", "kind"]);
+
+  /** Any value as text: a list joined, an object's entries, yes or no, else the value. */
+  function fmt(value) {
+    if (value === null || value === undefined || value === "") return "";
+    if (Array.isArray(value)) return value.map(fmt).filter(Boolean).join(", ");
+    if (typeof value === "object") return Object.entries(value).map(([key, item]) => `${key} ${fmt(item) || "–"}`).join(", ");
+    if (typeof value === "boolean") return value ? "yes" : "no";
+    return String(value);
+  }
+
+  /** A list the tool caps at SAMPLE names, with its count: "R1, R2", "… (the first 20 of 31)". */
+  function sampled(list, count, noun) {
+    const names = listOf(list).map(String);
+    const total = typeof count === "number" ? count : null;
+    if (!names.length) return total ? `${plural(total, noun)} (none listed)` : "";
+    if (total !== null && total > names.length) return `${names.join(", ")} (the first ${names.length} of ${total})`;
+    if (total === null && names.length >= SAMPLE) return `${names.join(", ")} (at least ${names.length}: the tool lists ${SAMPLE})`;
+    return names.join(", ");
+  }
+
+  /**
+   * Every field of a change as rows before (a) and after (b), and the facts that name it.
+   * {from, to} objects and from/to pairs are a row each; parameters, properties and a rule's
+   * or layer's changes a row per item; positions, lengths and thicknesses in the result's
+   * units; what an added item has goes to b, what a removed one had to a.
+   */
+  function fieldRows(entry, spec, section, units) {
+    const diff = [];
+    const facts = [];
+    const used = new Set(["section", "change", "eco", "text"]);
+    const take = (...keys) => keys.forEach((key) => used.add(key));
+    const here = (key) => has(entry, key);
+    const uk = (base) => `${base}_${units}`;
+    const len = (value) => (typeof value === "number" ? `${value} ${units}` : fmt(value));
+    const signed = (value) => (typeof value === "number" ? `${value > 0 ? "+" : ""}${value} ${units}` : fmt(value));
+    const side = spec.kind === "added" ? "b" : spec.kind === "removed" ? "a" : null;
+    // sides: the labels of the list's before and after cells when one label holds both
+    // meanings ("Pins left" in a, "Pins joined" in b).
+    const push = (name, a, b, sides = null) => diff.push({
+      label: name, a: a === undefined || a === null ? "" : String(a), b: b === undefined || b === null ? "" : String(b),
+      la: sides ? sides[0] : "", lb: sides ? sides[1] : "",
+    });
+    const fieldText = (key, value) => (key === "rotation" && typeof value === "number" ? `${value}°` : fmt(value));
+    if (here("previous_designator")) {
+      push("Designator", entry.previous_designator, entry.designator);
+      take("previous_designator");
+    }
+    if (here("previous_name")) {
+      push("Net name", entry.previous_name, entry.net);
+      take("previous_name");
+    }
+    if (Array.isArray(entry.merged)) {
+      push("Nets", entry.merged.join(", "), entry.net);
+      take("merged", "net");
+    }
+    if (Array.isArray(entry.into)) {
+      push("Nets", entry.net, entry.into.join(", "));
+      take("into", "net");
+    }
+    if (here("from") || here("to")) {
+      push(section === "nets" ? "Net" : section === "variants" ? "Fitting" : "Value", fmt(entry.from), fmt(entry.to));
+      take("from", "to");
+    }
+    if (here(uk("dx"))) {
+      const x = entry[uk("x")];
+      const y = entry[uk("y")];
+      const dx = entry[uk("dx")];
+      const dy = entry[uk("dy")];
+      const round = (value) => Math.round(value * 10000) / 10000;
+      const before = [x, y, dx, dy].every((value) => typeof value === "number") ? `(${len(round(x - dx))}, ${len(round(y - dy))})` : "";
+      push("Position", before, `(${len(x)}, ${len(y)})`);
+      facts.push(["Moved by", `${signed(dx)}, ${signed(dy)}${here(uk("distance")) ? ` (${len(entry[uk("distance")])})` : ""}`]);
+      take(uk("x"), uk("y"), uk("dx"), uk("dy"), uk("distance"));
+    } else if (here(uk("x")) || here(uk("y"))) {
+      const at = `(${len(entry[uk("x")])}, ${len(entry[uk("y")])})`;
+      if (side === "a") push("Position", at, "");
+      else push("Position", "", at);
+      take(uk("x"), uk("y"));
+    }
+    if (here(uk("length_from")) || here(uk("length_to"))) {
+      push("Routed length", len(entry[uk("length_from")]), len(entry[uk("length_to")]));
+      if (here(uk("length_delta"))) facts.push(["Length change", signed(entry[uk("length_delta")])]);
+      take(uk("length_from"), uk("length_to"), uk("length_delta"));
+    }
+    if (here(uk("thickness_from")) || here(uk("thickness_to"))) {
+      push("Stack thickness", len(entry[uk("thickness_from")]), len(entry[uk("thickness_to")]));
+      take(uk("thickness_from"), uk("thickness_to"));
+    }
+    if (here("pins_removed") || here("pins_added")) {
+      push("Pins (left in a, joined in b)", sampled(entry.pins_removed, entry.pins_removed_count, "pin"),
+           sampled(entry.pins_added, entry.pins_added_count, "pin"), ["Pins left", "Pins joined"]);
+      take("pins_removed", "pins_added", "pins_removed_count", "pins_added_count");
+    }
+    if (here("designators_removed") || here("designators_added")) {
+      push("Designators (left, joined)", sampled(entry.designators_removed, null, "part"), sampled(entry.designators_added, null, "part"),
+           ["Designators left", "Designators joined"]);
+      take("designators_removed", "designators_added");
+    }
+    if (here("members_removed") || here("members_added")) {
+      push("Members (left, joined)", sampled(entry.members_removed, entry.members_removed_count, "member"),
+           sampled(entry.members_added, entry.members_added_count, "member"), ["Members left", "Members joined"]);
+      take("members_removed", "members_added", "members_removed_count", "members_added_count");
+    }
+    if (isObject(entry.before) || isObject(entry.after)) {
+      const before = isObject(entry.before) ? entry.before : {};
+      const after = isObject(entry.after) ? entry.after : {};
+      for (const key of [...new Set([...Object.keys(before), ...Object.keys(after)])]) push(label(key), fmt(own(before, key)), fmt(own(after, key)));
+      take("before", "after");
+    }
+    if (Array.isArray(entry.order)) {
+      push("Layer order", "", entry.order.join(" / "));
+      take("order");
+    }
+    for (const key of ["parameters", "properties"]) {
+      if (!Array.isArray(entry[key])) continue;
+      for (const item of entry[key]) {
+        if (isObject(item)) push(`${key === "parameters" ? "Parameter" : "Property"} ${fmt(item.name)}`, fmt(item.from), fmt(item.to));
+      }
+      take(key);
+    }
+    if (Array.isArray(entry.changes)) {
+      for (const item of entry.changes) {
+        if (!isObject(item)) continue;
+        const inUnits = has(item, uk("from")) || has(item, uk("to"));
+        push(fmt(item.field), inUnits ? len(item[uk("from")]) : fmt(item.from), inUnits ? len(item[uk("to")]) : fmt(item.to));
+      }
+      take("changes");
+    }
+    // The rest: {from, to} objects; else what an added or removed item has; else a fact.
+    for (const [key, value] of Object.entries(entry)) {
+      if (used.has(key)) continue;
+      if (isObject(value) && (has(value, "from") || has(value, "to"))) {
+        push(label(key), fieldText(key, value.from), fieldText(key, value.to));
+      } else if (key === spec.subjectKey) {
+        continue;  // the pane's "About" names it
+      } else if (CONTEXT.has(key)) {
+        facts.push([label(key), fmt(value)]);
+      } else if (side === "a") {
+        push(label(key), fieldText(key, value), "");
+      } else if (side === "b") {
+        push(label(key), "", fieldText(key, value));
+      } else {
+        facts.push([label(key), fmt(value)]);
+      }
+    }
+    return { diff, facts };
+  }
+
+  // A lone row whose value says what it is: a designator, a net name, a position.
+  const BARE_LABELS = new Set(["designator", "net name", "position"]);
+
+  /** The before and after cells of the list: the rows' a and b, each named by its field
+   *  ("priority: 2", "Parameter Revision: A", "Pins left: C2-2"), except a lone row the
+   *  change's own label already names (a footprint, the PCB document) or whose value says
+   *  what it is (a designator, a net name, a position). */
+  function sideTexts(diff, spec, subject) {
+    if (!diff.length) {
+      if (spec.kind === "added") return { a: "", b: subject.text };
+      if (spec.kind === "removed") return { a: subject.text, b: "" };
+      return { a: "", b: "" };
+    }
+    const bare = (row) => diff.length === 1 &&
+      (row.label.toLowerCase() === String(spec.label).toLowerCase() || BARE_LABELS.has(row.label.toLowerCase()));
+    const join = (key) => diff.filter((row) => row[key] !== "")
+      .map((row) => (bare(row) ? row[key] : `${(key === "a" ? row.la : row.lb) || row.label}: ${row[key]}`)).join("; ");
+    return { a: join("a"), b: join("b") };
+  }
+
+  /**
+   * The parts, nets and pads a change names, per side: a (before) and b (after). A removed
+   * item is in a only, an added one in b only; an old designator or net name is in a, the
+   * new one in b; a pin moved names its pad and the net it left (a) and joined (b).
+   */
+  function namesOf(entry, spec, section) {
+    const out = { a: [], b: [] };
+    const add = (sides, type, name) => {
+      if (typeof name !== "string" || !name) return;
+      for (const side of sides) if (!out[side].some((item) => item.type === type && item.name === name)) out[side].push({ type, name });
+    };
+    const A = ["a"];
+    const B = ["b"];
+    const itsSides = spec.kind === "added" ? B : spec.kind === "removed" ? A : ["a", "b"];
+    if (typeof entry.previous_designator === "string") {
+      add(A, "part", entry.previous_designator);
+      add(B, "part", entry.designator);
+    } else if (typeof entry.designator === "string") {
+      add(itsSides, "part", entry.designator);
+    }
+    add(B, "part", entry.previous_part_now);
+    for (const name of listOf(entry.designators_removed)) add(A, "part", name);
+    for (const name of listOf(entry.designators_added)) add(B, "part", name);
+    if (typeof entry.previous_name === "string") {
+      add(A, "net", entry.previous_name);
+      add(B, "net", entry.net);
+    } else if (Array.isArray(entry.merged)) {
+      for (const name of entry.merged) add(A, "net", name);
+      add(B, "net", entry.net);
+    } else if (Array.isArray(entry.into)) {
+      add(A, "net", entry.net);
+      for (const name of entry.into) add(B, "net", name);
+    } else if (typeof entry.net === "string") {
+      add(itsSides, "net", entry.net);
+    }
+    if (section === "nets" && entry.change === "pin_moved") {
+      add(["a", "b"], "pad", entry.pin);
+      add(A, "net", entry.from);
+      add(B, "net", entry.to);
+    }
+    for (const key of ["positive_net", "negative_net"]) {
+      const value = entry[key];
+      if (typeof value === "string") add(itsSides, "net", value);
+      else if (isObject(value)) {
+        add(A, "net", value.from);
+        add(B, "net", value.to);
+      }
+    }
+    return out;
+  }
+
+  function describe(entry, section, index, units) {
+    const spec = changeSpec(section, entry.change);
+    const subject = subjectOf(entry, spec, section);
+    const { diff, facts } = fieldRows(entry, spec, section, units);
+    const sides = sideTexts(diff, spec, subject);
+    // The variant a BOM line or a fitting belongs to, shown with its subject: the same line
+    // changed in two variants is two rows that must not look the same.
+    const variant = spec.subjectKey !== "variant" && typeof entry.variant === "string" ? entry.variant : "";
+    return {
+      _id: `${section}:${index}`, _index: index, section, change: String(entry.change || ""), kind: spec.kind, label: spec.label,
+      unknown: Boolean(spec.unknown), subject: subject.text, subjectType: subject.type, variant, a: sides.a, b: sides.b,
+      eco: String(entry.eco || ""), text: String(entry.text || ""), entry, diff, facts, names: namesOf(entry, spec, section),
+    };
+  }
+
+  function buildModel(first, items, meta) {
+    const units = first.units === "mm" ? "mm" : "mil";
+    const rows = [];
+    const byId = new Map();
+    let doubles = 0;
+    for (const item of items) {
+      if (!isObject(item.entry)) continue;
+      const row = describe(item.entry, item.section, item.index, units);
+      if (byId.has(row._id)) {
+        doubles += 1;
+        continue;
+      }
+      rows.push(row);
+      byId.set(row._id, row);
+    }
+    // Counted by the result's own section and change names: objects without a prototype,
+    // so a name such as "__proto__" or "constructor" is an ordinary key.
+    const counted = Object.create(null);
+    for (const row of rows) {
+      if (!has(counted, row.section)) counted[row.section] = Object.create(null);
+      const bySection = counted[row.section];
+      bySection[row.change] = (has(bySection, row.change) ? bySection[row.change] : 0) + 1;
+    }
+    const summary = isObject(first.summary) ? first.summary : counted;
+    return {
+      ...meta, first, units, rows, byId, doubles, a: first.a, b: first.b, total: Number(first.total) || 0,
+      totalChanges: typeof first.total_changes === "number" ? first.total_changes : null,
+      summaryFromTool: isObject(first.summary), summary, section: first.section || null,
+      hazards: rows.filter((row) => row.kind === "hazard"),
+      notesFromTool: listOf(first.notes), noChanges: Boolean(first.no_changes), noChangesHint: first.no_changes_hint || "",
+      unchanged: isObject(first.unchanged_or_not_compared) ? first.unchanged_or_not_compared : {},
+      notRead: isObject(first.documents_not_read) ? first.documents_not_read : {},
+      sheetErrors: isObject(first.sheet_errors) ? first.sheet_errors : null,
+      sameAsBase: listOf(first.bom_variants_same_as_base), routing: isObject(first.routing_totals) ? first.routing_totals : null,
+      netMatching: isObject(first.net_matching) ? first.net_matching : {},
+      recentNote: first.recent_commits_note || "",
+    };
+  }
+
+  /** The side whose files the server has loaded (the links and answers show it): b for the
+   *  files on disk, a when the call put them there, b for a folder pair the call left b of
+   *  (the loaded project's folder); else null (they may differ from both). */
+  function loadedSide(data) {
+    if (isObject(data.b) && data.b.source === "working") return "b";
+    if (isObject(data.a) && data.a.source === "working") return "a";
+    if (isObject(data.b) && data.b.source === "folder" && data.asked && !data.args.project_dir_b) return "b";
+    return null;
+  }
+
+  /** The revisions a message names for this comparison: the sides' hashes (or working), or
+   *  the folders as "the same two folders"; null when a side is neither. */
+  function messageRevs(data) {
+    const word = (side) => (!isObject(side) ? null : side.source === "working" ? "working" : side.source === "git" ? String(side.hash || "") : null);
+    if (isObject(data.a) && data.a.source === "folder") return { folders: true };
+    const a = word(data.a);
+    const b = word(data.b);
+    return a && b ? { a, b } : null;
+  }
+
+  // ---------- filters ----------
+
+  const sectionOk = (row) => !view.sectionsOn || view.sectionsOn.has(row.section);
+  const kindOk = (row) => !view.kindsOn || view.kindsOn.has(row.kind);
+  const rowOk = (row) => sectionOk(row) && kindOk(row);
+  const rowText = (row) => [sectionTitle(row.section), row.label, kindInfo(row.kind).label, row.subject, row.variant, row.a, row.b, row.eco, row.text].join(" ");
+
+  // ---------- the page ----------
+
+  function renderAll() {
+    const data = view.data;
+    ui.header = el("div", {});
+    ui.sides = el("div", {});
+    ui.hazards = el("div", {});
+    ui.notices = el("div", {});
+    ui.picker = el("div", {});
+    ui.sumline = el("div", {});
+    view.noticeSig = "";  // a new, empty notices box
+    app.classList.toggle("short", short());
+    clear(app).append(ui.header, ui.sides, ui.hazards, ui.notices, ui.picker, ui.sumline);
+    if (data.noChanges || (!data.rows.length && !data.stopReason)) {
+      ui.panel = null;
+      ui.pane = null;
+      ui.split = null;
+      ui.table = null;
+      ui.filters = null;
+      renderHeadBlocks();
+      return;
+    }
+    ui.filters = el("div", {});
+    ui.panel = el("div", { class: "content" });
+    ui.pane = el("aside", { class: "pane", "aria-label": "Details" });
+    ui.split = el("div", { class: "split" }, ui.panel, ui.pane);
+    app.append(ui.filters, ui.split);
+    renderHeadBlocks();
+    renderFilters();
+    renderList();
+    renderPane();
+    wasLayout = layoutSig();
+  }
+
+  /** Where keyboard focus goes when its control is gone: the first control left in the
+   *  same box, else the page's heading. */
+  const nearby = (box) => () => box.querySelector("button:not([disabled]), input, summary, select") || ui.headline || null;
+
+  function renderHeadBlocks() {
+    if (!view.data || !ui.header) return;
+    for (const [box, draw] of [[ui.header, renderHeader], [ui.sides, renderSides], [ui.hazards, renderHazards],
+                               [ui.notices, renderNotices], [ui.picker, renderPicker], [ui.sumline, renderSummary]]) {
+      Shell.keepFocus(box, draw, nearby(box));
+    }
+  }
+
+  function originText(data) {
+    if (data.origin === "view") return "asked by the view";
+    return data.asked ? "Claude's call" : "Claude's call (its arguments not sent by the host)";
+  }
+
+  /** The sides compared, in a few words: "commit 1a2b3c4 to the files on disk". */
+  const sidesLine = (data) => `${sideText(data.a)} to ${sideText(data.b)}${data.section ? ` · ${sectionTitle(data.section)} only` : ""}`;
+
+  /** The answer's arguments and who asked; for a later page given as the result, how it
+   *  was read: again from offset 0 only when that page was really read. */
+  function argLine(data) {
+    const asked = data.asked && data.origin === "claude" ? { ...data.asked } : { ...data.args };
+    const later = data.origin === "claude" && data.asked && data.asked.offset;
+    return el("p", { class: "argline" }, "Answer: ", el("code", { text: argText(asked) }), `, ${originText(data)}`,
+      later ? (data.reread ? `; read with ${argText(data.args)} from offset 0` : "; its first page could not be read") : "",
+      `. Lengths in ${data.units}.`);
+  }
+
+  function renderHeader() {
+    const data = view.data;
+    const box = ui.header;
+    clear(box);
+    ui.displayButton = ui.displayButton || Shell.displayModeButton((error) => ui.notices && ui.notices.prepend(Shell.notice("error", error.message)));
+    ui.headline = el("h1", { text: "Design diff", tabindex: "-1" });
+    const revs = messageRevs(data);
+    // A cramped host: the sides and the call's line wait in the sides' disclosure.
+    const tight = cramped();
+    Shell.append(box, [
+      el("div", { class: "head" }, ui.headline,
+        tight ? null : el("span", { class: "meta", text: sidesLine(data) }),
+        el("span", { class: "grow" }),
+        // A short host: the release notes button waits in the notes.
+        data.rows.length && revs && !short() ? messageControl("notes", "Ask Claude for release notes", sentence("notes", [], revs)) : null,
+        ui.displayButton),
+      tight ? null : argLine(data),
+      view.busy ? el("p", { class: "muted small", text: view.busy }) : null,
+    ]);
+  }
+
+  function sideCard(tag, side) {
+    const card = el("div", { class: "side" }, el("span", { class: "tag", text: tag }), " ");
+    if (!isObject(side)) return Shell.append(card, [el("span", { class: "rev", text: "?" })]);
+    if (side.source === "git") {
+      return Shell.append(card, [
+        el("span", { class: "rev mono", text: `commit ${side.commit || String(side.hash || "").slice(0, 7)}` }),
+        el("span", { class: "sub", text: [dateText(side.date_utc), side.author || ""].filter(Boolean).join(" · ") }),
+        side.subject ? el("span", { class: "sub", text: side.subject }) : null,
+      ]);
+    }
+    if (side.source === "working") {
+      return Shell.append(card, [el("span", { class: "rev", text: "working: the files on disk" }),
+        side.folder ? el("span", { class: "sub", text: String(side.folder) }) : null]);
+    }
+    return Shell.append(card, [el("span", { class: "rev", text: side.source === "folder" ? "folder" : String(side.source || "?") }),
+      side.folder ? el("span", { class: "sub", text: String(side.folder) }) : null]);
+  }
+
+  /** The two sides: cards with each revision's date, author and message (or folder); on a
+   *  short host behind a disclosure, the heading naming them already. */
+  function renderSides() {
+    const data = view.data;
+    const cards = el("div", { class: "sides", role: "group", "aria-label": "The two sides compared" },
+      sideCard("a (before)", data.a), el("span", { class: "arrow", "aria-hidden": "true", text: "→" }), sideCard("b (after)", data.b));
+    clear(ui.sides);
+    if (!short()) {
+      ui.sides.appendChild(cards);
+      return;
+    }
+    // A cramped host: the disclosure names the sides and holds the call's line too.
+    const tight = cramped();
+    const box = el("details", { class: "more", open: view.sidesOpen },
+      el("summary", { text: tight ? `${sidesLine(data)}: the call, dates, authors` : "The two sides: dates, authors and messages" }),
+      tight ? argLine(data) : null, cards);
+    box.addEventListener("toggle", () => { view.sidesOpen = box.open; });
+    ui.sides.appendChild(box);
+  }
+
+  /** The ICT hazards first and prominent: a banner listing them, each selecting its change. */
+  function renderHazards() {
+    const data = view.data;
+    const box = ui.hazards;
+    clear(box);
+    const counted = sectionCount(data.summary, "ict_hazards");
+    if (!data.hazards.length && !counted) return;
+    // A short host: the banner keeps its heading and buttons, the list shows the hazards;
+    // under 1100 px of height it names three, else six.
+    const shown = short() ? [] : data.hazards.slice(0, tall(1100) ? 6 : 3);
+    const revs = messageRevs(data);
+    const missing = counted > data.hazards.length;
+    const items = shown.map((row) => el("li", {},
+      el("span", { class: "badge k-hazard" }, el("span", { class: "kglyph", "aria-hidden": "true", text: "!" }), row.label), " ",
+      el("button", { type: "button", class: "btn-link", text: hazardText(row), title: row.text,
+                     on: { click: () => selectRow(row._id, { from: "list" }) } })));
+    const narrowed = data.section && data.section !== "ict_hazards";
+    const why = "a test fixture or program made for a may no longer match b";
+    const compact = short();
+    const heading = el("h2", { text: `${plural(counted || data.hazards.length, "ICT hazard")}${compact ? "" : `: ${why}`}` });
+    box.appendChild(el("section", { class: `banner warning hazards${compact ? " compact" : ""}`, "aria-label": "ICT hazards", title: compact ? why : null },
+      compact ? null : heading,
+      shown.length ? el("ul", {}, items) : null,
+      narrowed ? el("p", { class: "help", text: `The call was narrowed to ${sectionTitle(data.section)}: the summary counts the hazards, the list does not hold them.` }) : null,
+      // A short host: the heading and the buttons on one line.
+      el("div", { class: "actions" }, compact ? heading : null,
+        data.hazards.length > shown.length ? el("button", { type: "button", class: "btn-link",
+          text: shown.length ? `Show all ${data.hazards.length} in the list` : `Show ${data.hazards.length === 1 ? "it" : `the ${data.hazards.length}`} in the list`,
+          on: { click: () => onlySection("ict_hazards") } }) : null,
+        narrowed && canCall() && !view.closed ? el("button", { type: "button", class: "btn", text: "Show every section",
+          "aria-disabled": view.busy ? "true" : null, title: `${argText({ ...data.args, section: undefined })}: every section`,
+          on: { click: () => { if (!view.busy) reask({ ...data.args, section: undefined }, "every section"); } } }) : null,
+        !narrowed && missing ? el("span", { class: "muted", text: `${data.hazards.length} of ${counted} read (${data.stopReason || "the paging stopped"}).` }) : null,
+        // A cramped host: the question waits in the notes' disclosure.
+        revs && !cramped() ? hazardsQuestion(revs) : null)));
+  }
+
+  const hazardsQuestion = (revs) => messageControl("hazards", "Ask Claude about the hazards", sentence("hazards", [], revs));
+
+  function hazardText(row) {
+    const entry = row.entry;
+    if (row.change === "net_connections_changed") {
+      return `Net ${row.subject}: ${plural(Number(entry.pins_added_count) || 0, "pin")} joined, ${Number(entry.pins_removed_count) || 0} left${entry.only_parts_added_or_removed ? " (only parts added or removed)" : ""}`;
+    }
+    if (row.change === "designator_reused") {
+      return `${row.subject} is another part${listOf(entry.where).length ? ` (${listOf(entry.where).join(", ")})` : ""}${entry.same_comment_and_footprint ? ": same comment and footprint" : ""}`;
+    }
+    return `${row.subject}: ${row.label}`;
+  }
+
+  function sectionCount(summary, section) {
+    const counts = own(summary, section);
+    return isObject(counts) ? Object.values(counts).reduce((sum, count) => sum + (Number(count) || 0), 0) : 0;
+  }
+
+  /** The notices, redrawn only when what they say changes (a notice is a status region). */
+  function renderNotices() {
+    const data = view.data;
+    const list = [];
+    if (view.headError) list.push(["error", view.headError]);
+    if (data.stopReason) {
+      // Read the rest goes on from the page that stopped the reading; Read again starts from
+      // offset 0 when the pages read cannot be read on from (another comparison, a later page).
+      const fresh = !data.read || data.read.again || pageNext(data.read.last) === null;
+      const action = canCall() && !view.closed && data.read ? (fresh ? "Read again" : "Read the rest") : "";
+      list.push(["warning", `Showing ${data.rows.length} of ${plural(data.total, "change")}: ${data.stopReason}.`, action, action && view.busy ? "busy" : ""]);
+    } else if (data.rows.length + data.doubles < data.total) {
+      list.push(["warning", `The pages gave ${data.rows.length} of ${plural(data.total, "change")}.`]);
+    }
+    if (data.doubles) list.push(["warning", `${plural(data.doubles, "change")} came twice in the pages and ${data.doubles === 1 ? "is" : "are"} shown once.`]);
+    // The files on disk are read again for each page, and a page carries nothing that would
+    // show they were saved in between with the same number of changes: say so.
+    const onDisk = [data.a, data.b].some((side) => isObject(side) && side.source === "working");
+    if (onDisk && data.pages > 1) {
+      const action = !data.stopReason && canCall() && !view.closed && data.read ? "Read again" : "";
+      list.push(["info", `The files on disk were read again for each of the ${data.pages} pages: if they were saved while the view read them, the pages may mix the two states (the pages cannot show it).${action ? " Read again to be sure." : ""}`,
+                 action, action && view.busy ? "busy" : ""]);
+    }
+    if (view.closed) list.push(["info", "The view was closed: it sends no more requests, and its server buttons are gone."]);
+    else if (!canCall()) list.push(["info", "This host does not let the view call tools: the first page is drawn, and other revisions, the other pages and the details need Claude."]);
+    const notRead = Object.entries(data.notRead);
+    if (notRead.length) {
+      list.push(["warning", `Documents not read: ${notRead.map(([side, files]) => `${side}: ${Object.entries(isObject(files) ? files : {}).map(([file, why]) => `${file} (${why})`).join(", ")}`).join("; ")}.`]);
+    }
+    if (data.sheetErrors) {
+      const errors = Object.entries(data.sheetErrors).map(([side, rows]) => `${side}: ${listOf(rows).map((row) => fmt(row)).join("; ")}`).filter((text) => !/: $/.test(text));
+      if (errors.length) list.push(["warning", `Sheets that could not be read: ${errors.join("; ")}.`]);
+    }
+    if (data.warnings.length) list.push(["warning", `The result is not quite the shape this view reads: ${data.warnings.slice(0, 3).join("; ")}.`]);
+    const sig = JSON.stringify(list);
+    if (sig === view.noticeSig) return;
+    view.noticeSig = sig;
+    clear(ui.notices);
+    for (const [kind, text, action, busy] of list) {
+      const box = Shell.notice(kind, text);
+      if (action) {
+        const fresh = action === "Read again";
+        box.insertBefore(el("button", { type: "button", class: "btn-link", text: action, "aria-disabled": busy ? "true" : null,
+          title: fresh ? `${argText(data.args)}: the whole comparison again, from offset 0` : `${argText(data.args)}: the pages from offset ${pageNext(data.read.last)} on`,
+          on: { click: () => { if (!view.busy) resumeRead(); } } }), box.lastChild);
+      }
+      ui.notices.appendChild(box);
+    }
+  }
+
+  /** The revision picker (git mode): a and b from the recent commits (or working), asking
+   *  diff_design again; or a button that lists the commits. Never anything that writes. */
+  function renderPicker() {
+    const data = view.data;
+    clear(ui.picker);
+    if (!gitMode(data.args)) {
+      if (!short()) ui.picker.appendChild(el("p", { class: "help", text: "Two folders are compared: ask Claude to compare other folders or revisions." }));
+      return;
+    }
+    ui.picker.appendChild(pickerBlock(data.args, data.noChanges));
+  }
+
+  function commitOption(commit, prefix = "") {
+    const subject = String(commit.subject || "");
+    const text = `${prefix}${commit.commit || String(commit.hash || "").slice(0, 7)} · ${dateText(commit.date_utc).slice(0, 10)} · ${subject.length > 60 ? `${subject.slice(0, 59)}…` : subject}`;
+    return el("option", { value: String(commit.hash || ""), text });
+  }
+
+  /** The picker block: open when it is the way on (no change, an unknown revision), or on a
+   *  roomy host; folded otherwise. */
+  function pickerBlock(args, needed) {
+    const data = view.data;
+    const list = view.commits ? listOf(view.commits.list).filter((commit) => isObject(commit) && HASH.test(String(commit.hash || ""))) : [];
+    const canAsk = canCall() && !view.closed;
+    const body = [];
+    if (list.length) {
+      // The sides compared now, when they are commits the list does not hold.
+      const extra = [];
+      for (const side of data ? [data.a, data.b] : []) {
+        if (isObject(side) && side.source === "git" && HASH.test(String(side.hash || "")) &&
+            !list.some((commit) => commit.hash === side.hash) && !extra.some((commit) => commit.hash === side.hash)) extra.push(side);
+      }
+      const current = (side) => (isObject(side) ? (side.source === "working" ? "working" : side.source === "git" ? String(side.hash || "") : "") : "");
+      if (!view.pickA) view.pickA = (data && current(data.a)) || (list[0] ? String(list[0].hash) : "");
+      if (!view.pickB) view.pickB = (data && current(data.b)) || "working";
+      const select = (which) => {
+        const box = el("select", {},
+          el("option", { value: "working", text: "working: the files on disk" }),
+          list.map((commit) => commitOption(commit)), extra.map((side) => commitOption(side, "compared now: ")));
+        box.value = which === "a" ? view.pickA : view.pickB;
+        box.addEventListener("change", () => {
+          if (which === "a") view.pickA = box.value;
+          else view.pickB = box.value;
+          redrawPicker();
+        });
+        return box;
+      };
+      const picked = { rev_a: view.pickA, rev_b: view.pickB, units: args.units };
+      const same = view.pickA === view.pickB;
+      const isCurrent = data && current(data.a) === view.pickA && current(data.b) === view.pickB && !data.section;
+      const parentArgs = { rev_b: view.pickB, units: args.units };
+      body.push(el("div", { class: "picker" },
+        el("label", {}, "a (before)", select("a")),
+        el("label", {}, "b (after)", select("b")),
+        canAsk ? el("div", { class: "btn-row" },
+          el("button", { type: "button", class: "btn", text: "Compare a with b", "aria-disabled": view.busy || same || isCurrent ? "true" : null,
+                         title: same ? "a and b are the same revision" : isCurrent ? "This is the comparison shown" : `${argText(picked)}: every section`,
+                         on: { click: () => { if (!view.busy && !same && !isCurrent) reask(picked, "the revisions picked"); } } }),
+          view.pickB !== "working" ? el("button", { type: "button", class: "btn", text: "What b changed", "aria-disabled": view.busy ? "true" : null,
+                         title: `${argText(parentArgs)}: b against its parent commit`,
+                         on: { click: () => { if (!view.busy) reask(parentArgs, "what the commit changed"); } } }) : null) : null));
+      body.push(el("p", { class: "help", text: `The ${plural(list.length, "commit")} that changed the design files, newest first, from ${view.commits.asked}${list.length >= CONTRACT.recent_commits ? ` (the tool lists the ${CONTRACT.recent_commits} most recent)` : ""}. Comparing asks ${TOOL} again; it reads revisions with read-only git commands and writes nothing.` }));
+    } else if (canAsk) {
+      body.push(el("div", { class: "btn-row" }, el("button", { type: "button", class: "btn", text: "List recent commits",
+        "aria-disabled": view.busy ? "true" : null,
+        title: `${argText({ units: args.units, section: "ict_hazards" })}: without revisions the tool lists the commits that changed the design files`,
+        on: { click: () => { if (!view.busy) listCommits(args); } } })));
+      body.push(el("p", { class: "help", text: `${TOOL} lists the recent commits when asked without revisions; the view asks it so (its comparison of the last design commit with the files on disk is not drawn).` }));
+    } else {
+      body.push(el("p", { class: "help", text: view.closed ? "The view was closed: it asks the server nothing more." : "This host does not let the view ask for other revisions: ask Claude for diff_design with rev_a and rev_b." }));
+    }
+    if (view.busy && !(data && ui.header)) body.push(el("p", { class: "muted small", text: view.busy }));
+    if (view.pickerOpen === null) view.pickerOpen = Boolean(needed) || !short();
+    const disclosure = el("details", { class: "block", open: view.pickerOpen },
+      el("summary", {}, el("h2", { text: list.length ? `Revisions (${plural(list.length, "recent commit")})` : "Revisions" })), body);
+    disclosure.addEventListener("toggle", () => {
+      if (disclosure.open === view.pickerOpen) return;
+      view.pickerOpen = disclosure.open;
+      view.auto.picker = false;
+    });
+    return disclosure;
+  }
+
+  function renderSummary() {
+    const data = view.data;
+    const box = ui.sumline;
+    clear(box);
+    if (data.noChanges) {
+      const why = Object.entries(data.unchanged).map(([part, reason]) => `${part}: ${reason}`).join("; ");
+      box.appendChild(Shell.state("info", "No design change between a and b",
+        [data.noChangesHint, why ? `Not compared or unchanged: ${why}.` : ""].filter(Boolean).join(" ") || "The two sides hold the same design data."));
+      if (notesList().length) box.appendChild(notesBlock(notesList()));
+      return;
+    }
+    const sections = SECTION_ORDER.filter((section) => sectionCount(data.summary, section))
+      .concat(Object.keys(data.summary).filter((section) => !SECTION_ORDER.includes(section) && sectionCount(data.summary, section)));
+    const total = data.totalChanges ?? data.total;
+    const parts = sections.map((section) => `${sectionTitle(section)} ${sectionCount(data.summary, section)}`);
+    // Without the tool's summary (its first page was not read) the counts are of the changes
+    // read, said apart from the total.
+    const counts = data.summaryFromTool ? `${plural(total, "change")}`
+      : data.rows.length === total ? `${plural(total, "change")} (counted from the changes read)`
+        : `${plural(total, "change")}; of the ${data.rows.length} read`;
+    const full = `${counts}: ${parts.join(", ") || "none"}.` +
+      (data.section ? ` The list holds ${sectionTitle(data.section)} only (${plural(data.total, "change")}).` : "");
+    // A short host: the count heads the notes' disclosure, which holds the whole summary.
+    if (!short()) box.appendChild(el("p", { class: "sumline", text: full }));
+    if (!data.rows.length && !data.stopReason) {
+      // A call narrowed to a section with no change in it.
+      const others = Math.max(0, total - data.total);
+      box.appendChild(Shell.state("info", data.section ? `No change in ${sectionTitle(data.section)}` : "No change listed",
+        data.section ? `The other sections hold ${plural(others, "change")}.` : "The result lists no change."));
+      if (data.section && others && canCall() && !view.closed) {
+        box.appendChild(el("div", { class: "btn-row" }, el("button", { type: "button", class: "btn", text: "Show every section",
+          "aria-disabled": view.busy ? "true" : null, title: `${argText({ ...data.args, section: undefined })}: every section`,
+          on: { click: () => { if (!view.busy) reask({ ...data.args, section: undefined }, "every section"); } } })));
+      }
+    }
+    const notes = [...(short() ? [full] : []), ...notesList()];
+    const revs = messageRevs(data);
+    // A short host: the release notes question waits here; a cramped one, the hazards' too.
+    const asks = [];
+    if (short() && data.rows.length && revs) asks.push(["release notes", messageControl("notes", "Ask Claude for release notes", sentence("notes", [], revs))]);
+    if (cramped() && revs && (data.hazards.length || sectionCount(data.summary, "ict_hazards"))) asks.push(["the hazards", hazardsQuestion(revs)]);
+    const heading = !short() ? ""
+      : data.summaryFromTool ? `${plural(total, "change")} in ${plural(sections.length, "section")}: summary, notes`
+        : `${data.rows.length} of ${plural(total, "change")} read: summary, notes`;
+    if (notes.length || asks.length) box.appendChild(notesBlock(notes, asks.filter(([, control]) => control), heading));
+  }
+
+  /** The tool's notes and what it did not compare, with the view's own notes. */
+  function notesList() {
+    const data = view.data;
+    const out = [...data.notes];
+    for (const [part, reason] of Object.entries(data.unchanged)) out.push(`Not compared or unchanged, ${part}: ${reason}.`);
+    if (data.sameAsBase.length) out.push(`BOM variants whose line changes equal the base BOM's (listed under it): ${data.sameAsBase.join(", ")}.`);
+    if (data.routing) {
+      const delta = own(data.routing, `length_delta_${data.units}`);
+      out.push(`Routing totals over the nets listed: length ${typeof delta === "number" ? `${delta > 0 ? "+" : ""}${delta} ${data.units}` : "?"}, vias ${data.routing.via_delta > 0 ? "+" : ""}${data.routing.via_delta ?? "?"}.`);
+    }
+    const matching = Object.entries(data.netMatching);
+    if (matching.length) out.push(`Net matching options from the project: ${matching.map(([key, value]) => `${key.replace(/_/g, " ")} ${fmt(value)}`).join(", ")}.`);
+    if (data.recentNote) out.push(data.recentNote);
+    out.push(...data.notesFromTool);
+    return out;
+  }
+
+  /** The notes' disclosure; asks: [[word, control]], the questions for Claude it holds (one
+   *  named by its word, two as "ask Claude", so the heading keeps to one line). */
+  function notesBlock(notes, asks = [], heading = "") {
+    const more = asks.length === 1 ? `, ${asks[0][0]}` : asks.length ? ", ask Claude" : "";
+    const box = el("details", { class: "more", open: view.notesOpen },
+      el("summary", { text: heading ? `${heading}${more}` : `Notes (${notes.length}) and what is not compared${more}` }),
+      asks.length ? el("div", { class: "btn-row" }, asks.map(([, control]) => control)) : null,
+      el("ul", { class: "notes small" }, notes.map((note) => el("li", { text: note }))));
+    box.addEventListener("toggle", () => { view.notesOpen = box.open; });
+    return box;
+  }
+
+  // ---------- the change list ----------
+
+  function kindBadge(kind, text = null) {
+    const info = kindInfo(kind);
+    return el("span", { class: `badge k-${own(KINDS, kind) ? kind : "changed"}` },
+      el("span", { class: "kglyph", "aria-hidden": "true", text: info.glyph }), text || info.label);
+  }
+
+  function renderFilters() {
+    const box = ui.filters;
+    if (!box) return;
+    const mark = Shell.focusMark(box);
+    clear(box);
+    const filter = Shell.filterBox({
+      placeholder: "Filter changes", label: "Filter the changes", value: view.query,
+      onInput: (text) => {
+        view.query = text;
+        if (ui.table) ui.table.setQuery(text);
+      },
+    });
+    const switcher = Shell.segmented({ label: "Group by", items: [
+      { id: "section", label: "Section" }, { id: "kind", label: "Kind" }, { id: "subject", label: "Part or net" }, { id: "none", label: "None" }],
+    current: view.groupBy, onChange: (id) => {
+      view.groupBy = id;
+      // Drawn again, not only regrouped: the Section column shows exactly when the list is
+      // not grouped by section (the column chooser's own choices are kept).
+      renderList();
+    } });
+    const sectionCounts = counts((row) => row.section, sectionRank);
+    const kindCounts = counts((row) => row.kind, kindRank);
+    const sectionChips = sectionCounts.length > 1 ? Shell.chips({
+      label: "Sections", items: sectionCounts.map(([section, count]) => ({ id: section, label: sectionTitle(section), count })),
+      selected: view.sectionsOn || sectionCounts.map(([section]) => section),
+      onChange: (on) => {
+        view.sectionsOn = on.size === sectionCounts.length ? null : on;
+        applyFilter();
+      } }).el : null;
+    const kindChips = kindCounts.length > 1 ? Shell.chips({
+      label: "Kinds", items: kindCounts.map(([kind, count]) => ({ id: kind, label: `${kindInfo(kind).glyph} ${kindInfo(kind).label}`, count })),
+      selected: view.kindsOn || kindCounts.map(([kind]) => kind),
+      onChange: (on) => {
+        view.kindsOn = on.size === kindCounts.length ? null : on;
+        applyFilter();
+      } }).el : null;
+    if (view.filtersOpen === null) view.filtersOpen = !short();
+    ui.filteredBadge = el("span", { class: "badge info", text: "filtered", hidden: !view.sectionsOn && !view.kindsOn });
+    const details = el("details", { class: "filters-box", open: view.filtersOpen },
+      el("summary", { text: "Filter, group, sections and kinds" }, ui.filteredBadge),
+      el("div", { class: "filters" }, filter, switcher.el),
+      sectionChips ? el("div", { class: "chiprow" }, sectionChips) : null,
+      kindChips ? el("div", { class: "chiprow" }, kindChips) : null);
+    details.addEventListener("toggle", () => {
+      if (details.open === view.filtersOpen) return;
+      view.filtersOpen = details.open;
+      view.auto.filters = false;
+    });
+    box.appendChild(details);
+    if (mark) Shell.refocus(box, mark, null);
+  }
+
+  function counts(key, rank) {
+    const map = new Map();
+    for (const row of view.data.rows) map.set(key(row), (map.get(key(row)) || 0) + 1);
+    return [...map.entries()].sort((a, b) => rank(a[0]) - rank(b[0]) || Shell.naturally(a[0], b[0]));
+  }
+
+  function applyFilter() {
+    if (ui.table) ui.table.setFilter(rowOk);
+    if (ui.filteredBadge) ui.filteredBadge.hidden = !view.sectionsOn && !view.kindsOn;
+  }
+
+  /** Only one section in the list (the hazards banner's "show all"): its chip alone on. */
+  function onlySection(section) {
+    view.sectionsOn = new Set([section]);
+    view.kindsOn = null;
+    view.query = "";
+    view.filtersOpen = true;
+    renderFilters();
+    renderList();
+    if (ui.table) ui.table.focus(null);
+  }
+
+  /** A side's cell: its text, shortened past 160 characters (the details hold it all), or
+   *  "none" in words for a side that has nothing. */
+  function sideCell(row, side) {
+    const text = row[side];
+    if (!text) {
+      const why = row.kind === "added" && side === "a" ? "not in a" : row.kind === "removed" && side === "b" ? "not in b" : "–";
+      return el("span", { class: "none", text: why });
+    }
+    return text.length > 160 ? el("span", { title: text, text: `${text.slice(0, 159)}…` }) : text;
+  }
+
+  function columns() {
+    const narrow = narrowHost();
+    return [
+      { key: "index", label: "#", numeric: true, hidden: true, value: (row) => row._index + 1 },
+      { key: "section", label: "Section", hidden: narrow || view.groupBy === "section", value: (row) => `${String(sectionRank(row.section)).padStart(2, "0")} ${sectionTitle(row.section)}`,
+        text: (row) => sectionTitle(row.section), render: (row) => sectionTitle(row.section) },
+      // data-id: the row's change, so keyboard focus finds its row again after a redraw.
+      { key: "change", label: "Change", cls: "c-change", value: (row) => `${String(kindRank(row.kind)).padStart(2, "0")} ${row.label}`,
+        text: (row) => `${kindInfo(row.kind).label} ${row.label}`,
+        render: (row) => el("span", { data: { id: row._id } }, kindBadge(row.kind, row.label)) },
+      // The subject with its kind, and the variant a BOM line or a fitting belongs to (shown
+      // on a narrow host too: two variants' rows would look the same without it).
+      { key: "subject", label: "Part, net or item", cls: "c-subject", value: (row) => row.subject,
+        text: (row) => (row.variant ? `${row.subject} variant ${row.variant}` : row.subject),
+        render: (row) => el("span", {}, row.subject,
+          narrow ? (row.variant ? el("span", { class: "subtype", text: `variant ${row.variant}` }) : null)
+            : el("span", { class: "subtype", text: row.variant ? `${row.subjectType} · variant ${row.variant}` : row.subjectType })) },
+      { key: "a", label: "Before (a)", cls: "c-side side-a", value: (row) => row.a, render: (row) => sideCell(row, "a") },
+      { key: "b", label: "After (b)", cls: "c-side side-b", value: (row) => row.b, render: (row) => sideCell(row, "b") },
+      { key: "eco", label: "ECO", hidden: true, cls: "c-name" },
+      { key: "text", label: "The tool's text", hidden: true, cls: "c-msg" },
+    ];
+  }
+
+  function groupSpec() {
+    if (view.groupBy === "none") return null;
+    const badge = (rows) => el("span", { class: "badge", text: plural(rows.length, "change") });
+    if (view.groupBy === "kind") {
+      return { key: (row) => row.kind, label: (key) => kindBadge(key), count: (key, rows) => badge(rows),
+               order: (a, b) => kindRank(a) - kindRank(b) || Shell.naturally(a, b) };
+    }
+    if (view.groupBy === "subject") {
+      return { key: (row) => `${row.subjectType}\u0001${row.subject}`,
+               label: (key) => { const [type, name] = key.split("\u0001"); return el("span", {}, el("span", { class: "muted", text: `${type} ` }), name); },
+               count: (key, rows) => badge(rows),
+               order: (a, b) => Shell.naturally(a, b) };
+    }
+    return {
+      key: (row) => row.section,
+      label: (key) => sectionTitle(key),
+      // Each section's count by kind, in words with the kind's glyph.
+      count: (key, rows) => {
+        const byKind = new Map();
+        for (const row of rows) byKind.set(row.kind, (byKind.get(row.kind) || 0) + 1);
+        return [...byKind.entries()].sort((a, b) => kindRank(a[0]) - kindRank(b[0]))
+          .map(([kind, count]) => kindBadge(kind, kind === "hazard" ? plural(count, "ICT hazard") : `${count} ${kindInfo(kind).label.toLowerCase()}`));
+      },
+      order: (a, b) => sectionRank(a) - sectionRank(b) || Shell.naturally(a, b),
+    };
+  }
+
+  /** The list's sort and shown columns as the user left them, read from its header and its
+   *  column chooser, so a list drawn again (another layout, another answer) keeps them. */
+  function keepTable() {
+    const table = ui.table;
+    const cols = ui.tableColumns;
+    if (!table || !cols) return;
+    const th = table.el.querySelector('thead th[aria-sort="ascending"], thead th[aria-sort="descending"]');
+    const button = th ? th.querySelector("button[data-col]") : null;
+    const boxes = [...table.el.querySelectorAll(".colchooser input[type=checkbox]")];
+    const kept = view.tables.list || { added: new Set(), removed: new Set() };
+    // What the user showed or hid against the defaults (which follow the host's width),
+    // gathered over redraws: a column hidden on a wide host stays hidden after a narrow one.
+    if (boxes.length === cols.length) {
+      cols.forEach((column, index) => {
+        const shown = boxes[index].checked;
+        if (shown && column.hidden) kept.added.add(column.key);
+        if (!shown && !column.hidden) kept.removed.add(column.key);
+        if (shown) kept.removed.delete(column.key);
+        else kept.added.delete(column.key);
+      });
+    }
+    kept.sort = button ? { key: button.dataset.col, dir: th.getAttribute("aria-sort") === "descending" ? -1 : 1 } : null;
+    view.tables.list = kept;
+  }
+
+  /** Today's default columns (they follow the host's width) with those the user showed or hid. */
+  function tableSpec(cols) {
+    ui.tableColumns = cols;
+    const kept = view.tables.list;
+    if (!kept) return { columns: cols, sort: null };
+    const visible = cols.filter((column) => (!column.hidden || kept.added.has(column.key)) && !kept.removed.has(column.key));
+    return {
+      // At least one column stays, as the column chooser keeps one.
+      columns: visible.length ? cols.map((column) => ({ ...column, hidden: !visible.includes(column) })) : cols,
+      sort: kept.sort && cols.some((column) => column.key === kept.sort.key) ? kept.sort : null,
+    };
+  }
+
+  /** The tables announce nothing themselves (the page has one live region). */
+  function quiet(table) {
+    for (const node of table.el.querySelectorAll("[aria-live]")) node.setAttribute("aria-live", "off");
+    return table;
+  }
+
+  function renderList() {
+    if (!ui.panel) return;
+    const mark = Shell.focusMark(ui.panel);
+    const spot = focusSpot();
+    keepTable();
+    clear(ui.panel);
+    const data = view.data;
+    const spec = tableSpec(columns());
+    ui.table = quiet(Shell.table({
+      label: "Changes", ownFilter: false, rows: data.rows, columns: spec.columns, group: groupSpec(), filter: rowOk,
+      rowKey: (row) => row._id, onActivate: (row) => selectRow(row._id), sort: spec.sort,
+      empty: data.stopReason ? `No change read: ${data.stopReason}.` : "No change in this comparison.",
+    }));
+    ui.table.setQuery(view.query);
+    if (view.selected) ui.table.select((row) => row._id === view.selected);
+    ui.panel.appendChild(ui.table.el);
+    if (spot && ui.table.focus((row) => row._id === spot)) return;
+    if (mark) Shell.refocus(ui.panel, mark, null);
+  }
+
+  /** The change whose row has keyboard focus, to find it again after a redraw. */
+  function focusSpot() {
+    const active = document.activeElement;
+    if (!active || active.tagName !== "TR" || !ui.panel || !ui.panel.contains(active)) return null;
+    const ref = active.querySelector("[data-id]");
+    return ref ? ref.dataset.id : null;
+  }
+
+  // ---------- selection and the details pane ----------
+
+  function selectRow(id, { from = "" } = {}) {
+    if (!view.data || !view.data.byId.has(id)) return;
+    const fromTable = Boolean(ui.table && ui.table.el.contains(document.activeElement));
+    view.selected = id;
+    if (ui.table) ui.table.select((row) => row._id === id);
+    renderPane();
+    // The details took the list's place (a short, narrow host): focus goes to them.
+    if ((fromTable || from) && ui.split && ui.split.classList.contains("solo") && ui.closeButton) ui.closeButton.focus();
+    else if (from && ui.pane) {
+      const heading = ui.pane.querySelector("h2");
+      if (heading) heading.focus();
+    }
+    const row = view.data.byId.get(id);
+    Shell.announce(`Details: ${row.label}, ${row.subject}`);
+  }
+
+  /** Close the details (Close, or Esc): focus goes back to the change's row. */
+  function closeDetails() {
+    const selected = view.selected;
+    const inPane = ui.pane && ui.pane.contains(document.activeElement);
+    view.selected = null;
+    if (ui.table) ui.table.select(() => false);
+    renderPane();
+    if (!inPane && document.activeElement && document.activeElement !== document.body) return;
+    if (selected && ui.table && ui.table.focus((row) => row._id === selected)) return;
+    if (ui.headline) ui.headline.focus();
+  }
+
+  /** The change in the list: the filters that would hide it are cleared, its row focused. */
+  function showInList(id) {
+    const row = view.data.byId.get(id);
+    if (!row) return;
+    let redraw = false;
+    if (view.sectionsOn && !view.sectionsOn.has(row.section)) { view.sectionsOn = null; redraw = true; }
+    if (view.kindsOn && !view.kindsOn.has(row.kind)) { view.kindsOn = null; redraw = true; }
+    if (view.query && !Shell.matches(rowText(row), view.query)) { view.query = ""; redraw = true; }
+    if (redraw) {
+      renderFilters();
+      renderList();
+    }
+    if (ui.table && !ui.table.focus((item) => item._id === id) && view.groupBy !== "none") {
+      ui.table.setGroup(groupSpec());  // its group was collapsed: the groups open again
+      ui.table.select((item) => item._id === id);
+      ui.table.focus((item) => item._id === id);
+    }
+  }
+
+  /** Focus for a pane button that is gone (Ask becoming "Asking…"): the pane's heading. */
+  const paneHeading = () => (ui.pane ? ui.pane.querySelector("h2") : null);
+
+  function renderPane() {
+    if (!ui.pane) return;
+    const top = ui.pane.scrollTop;
+    const before = ui.paneShows;
+    Shell.keepFocus(ui.pane, drawPane, paneHeading);
+    if (before && before === ui.paneShows) ui.pane.scrollTop = top;
+  }
+
+  function drawPane() {
+    clear(ui.pane);
+    ui.closeButton = null;
+    const row = view.selected && view.data ? view.data.byId.get(view.selected) : null;
+    ui.paneShows = row ? row._id : "";
+    ui.pane.classList.toggle("idle", !row);
+    if (ui.split) ui.split.classList.toggle("solo", Boolean(row) && compactHost());
+    if (row) {
+      Shell.append(ui.pane, changePane(row));
+      return;
+    }
+    Shell.append(ui.pane, [
+      el("h2", { text: "Select a change", tabindex: "-1" }),
+      el("p", { class: "help", text: "Click a change in the list (or move to it and press Enter) for every field before and after, and links to the board view and the schematic." }),
+      el("p", { class: "help", text: "Keys: Up and Down move between rows and group headers, Enter selects or opens and closes a group, Left and Right close and open a group, Esc closes the details." }),
+    ]);
+  }
+
+  function closeRow(title) {
+    ui.closeButton = el("button", { type: "button", class: "btn", text: "Close", on: { click: closeDetails } });
+    return el("div", { class: "row" }, el("h2", { text: title, tabindex: "-1" }), ui.closeButton);
+  }
+
+  function changePane(row) {
+    const data = view.data;
+    const out = [
+      closeRow(`${row.label}: ${row.subject}`),
+      el("div", { class: "summary" }, el("span", { class: "badge", text: sectionTitle(row.section) }), kindBadge(row.kind),
+        row.eco ? el("span", { class: "badge muted", text: `ECO: ${row.eco}` }) : null,
+        row.unknown ? el("span", { class: "badge muted", text: `change ${row.change}` }) : null),
+      el("p", { class: "help", text: row.text }),
+      Shell.facts([["About", `${row.subject} (${row.subjectType})`], ...row.facts.filter(([, value]) => value !== "")]),
+    ];
+    if (row.diff.length) {
+      out.push(el("table", { class: "ba", "aria-label": "Every field before and after" },
+        el("thead", {}, el("tr", {}, el("th", { class: "f", scope: "col", text: "Field" }),
+          el("th", { scope: "col", text: "Before (a)" }), el("th", { scope: "col", text: "After (b)" }))),
+        el("tbody", {}, row.diff.map((item) => el("tr", {},
+          el("th", { class: "f", scope: "row", text: item.label }),
+          el("td", {}, item.a || el("span", { class: "none", text: "–" })),
+          el("td", {}, item.b || el("span", { class: "none", text: "–" })))))));
+    }
+    out.push(el("p", { class: "foot", text: `Sides: a is ${sideText(data.a)}, b is ${sideText(data.b)}. Lengths in ${data.units}.` }));
+    out.push(el("div", { class: "btn-row" }, el("button", { type: "button", class: "btn", text: "Show in the list", on: { click: () => showInList(row._id) } })));
+    out.push(...linkSection(row));
+    return out;
+  }
+
+  /**
+   * Links for the change's parts and nets on the side the server has loaded: to the board
+   * view and the schematic, as messages to Claude (fixed words, names under the rule), and
+   * get_component and query_net asked in place for any name (a call from the view puts
+   * nothing in the conversation; its answer is drawn as text). Names on the other side
+   * only, or outside the rule, are said so and never sent in a message.
+   */
+  function linkSection(row) {
+    const data = view.data;
+    const loaded = loadedSide(data);
+    const side = loaded || "b";
+    const names = row.names[side];
+    const other = row.names[side === "a" ? "b" : "a"].filter((item) => !names.some((name) => name.type === item.type && name.name === item.name));
+    const valid = names.filter((item) => validName(item.type, item.name));
+    const refused = names.filter((item) => !validName(item.type, item.name));
+    const out = [el("h3", { text: "On the board and the schematic" })];
+    if (!names.length && !other.length) {
+      out.push(el("p", { class: "muted", text: "This change names no part or net to show." }));
+      return out;
+    }
+    const where = loaded ? `The board view and the server's answers show the loaded project: the files on disk, side ${loaded} here.`
+      : `Side b is ${sideText(data.b)}: the board view and the server's answers show the loaded project (the files on disk), which may differ from it.`;
+    out.push(el("p", { class: "help", text: where }));
+    if (valid.length) {
+      const board = valid.slice(0, MAX_NAMES);
+      const text = sentence("board", board);
+      const what = board.length === 1 ? NAME_WORDS[board[0].type] : "them";
+      out.push(el("div", { class: "linkrow" }, messageControl(`board:${row._id}`, `Show ${what} on the board view`, text, null,
+        `Ask Claude: show ${board.length === 1 ? `${what} ${board[0].name}` : what} on the board view`),
+        valid.length > board.length ? el("span", { class: "muted", text: `the first ${board.length} of ${plural(valid.length, "name")}` }) : null));
+    }
+    // Each part and net: the schematic link (a message, for a name under the rule) and the
+    // details asked in place (for any name).
+    const each = names.filter((item) => item.type !== "pad");
+    const listed = each.slice(0, MAX_LISTED);
+    for (const item of listed) {
+      const ok = validName(item.type, item.name);
+      const kind = item.type === "part" ? "schematic_part" : "schematic_net";
+      const tool = item.type === "part" ? "get_component" : "query_net";
+      const args = item.type === "part" ? { refdes: item.name } : { pattern: Shell.exactPattern(item.name) };
+      const entry = answers.get(answerKey(tool, args));
+      const loading = Boolean(entry && entry.loading);
+      out.push(el("div", { class: "linkrow" },
+        el("span", { class: "name", text: `${NAME_WORDS[item.type]} ${item.name}` }),
+        ok ? messageControl(`${kind}:${row._id}:${item.name}`, "On the schematic", sentence(kind, [item]),
+          `Sends to the conversation: ${sentence(kind, [item])} (there is no schematic view yet: Claude answers in text)`,
+          `Ask Claude: ${NAME_WORDS[item.type]} ${item.name} on the schematic`)
+          : el("span", { class: "muted", text: "not sent in a message" }),
+        canCall() && !view.closed ? el("button", { type: "button", class: "btn", text: loading ? "Asking…" : `${tool} here`,
+          "aria-disabled": loading ? "true" : null, title: `${tool}(${callArgs(args)}): the loaded project now, in this pane`,
+          on: { click: () => askDetail(tool, args) } }) : null));
+      if (entry) out.push(answerBlock(tool, args, entry));
+    }
+    if (each.length > listed.length) {
+      // More than MAX_LISTED, so never one.
+      out.push(el("p", { class: "muted", text: `Links for the first ${listed.length} of ${each.length} parts and nets; the fields above name the others.` }));
+    }
+    if (refused.length) {
+      const rules = [...new Set(refused.map((item) => item.type))].map((type) => own(RULE_WORDS, type)).filter(Boolean);
+      out.push(el("p", { class: "help", text: `Not sent in a message (${refused.map((item) => `${NAME_WORDS[item.type]} ${item.name}`).join(", ")}): a message carries a name only in its plain form: ${rules.join("; ")}. Copy the name from here to ask Claude yourself.` }));
+    }
+    if (other.length) {
+      out.push(el("p", { class: "help", text: `In ${side === "a" ? "b" : "a"} only: ${other.map((item) => `${NAME_WORDS[item.type]} ${item.name}`).join(", ")}. The loaded project may not have ${other.length === 1 ? "it" : "them"}, so no link is offered.` }));
+    }
+    if (!canCall() && !view.closed) out.push(el("p", { class: "muted", text: "This host does not let the view call tools: ask Claude for get_component or query_net." }));
+    return out;
+  }
+
+  const callArgs = (args) => Object.entries(args).map(([key, value]) => `${key}="${value}"`).join(", ");
+
+  function answerBlock(tool, args, entry) {
+    const head = el("h4", { text: `${tool}(${callArgs(args)}) · the loaded project now` });
+    if (entry.loading) return el("div", { class: "answer" }, head, el("p", { class: "muted", text: "Asking…" }));
+    if (entry.error) {
+      return el("div", { class: "answer" }, head, el("div", { class: "notice error" }, el("span", { class: "grow", text: entry.error }),
+        canCall() && !view.closed ? el("button", { type: "button", class: "btn-link", text: "Retry", on: { click: () => askDetail(tool, args) } }) : null));
+    }
+    const { json, text } = parsedAnswer(entry);
+    const again = canCall() && !view.closed ? el("button", { type: "button", class: "btn-link", text: "Ask again",
+      title: "The files may have changed: ask again", on: { click: () => askAgain(tool, args) } }) : null;
+    if (!json) return el("div", { class: "answer" }, head, el("pre", { class: "text", text: String(text).slice(0, 4000) }), again);
+    if (json.error) return el("div", { class: "answer" }, head, el("div", { class: "notice warning", text: json.message || json.error }), again);
+    if (tool === "query_net") {
+      // Several nets when names differ only in case (query_net ignores case): the one named
+      // exactly, else each.
+      const all = Array.isArray(json.nets) ? json.nets.filter(isObject) : [json];
+      const exact = all.filter((net) => typeof net.net === "string" && Shell.exactPattern(net.net) === args.pattern);
+      return el("div", { class: "answer" }, head, (exact.length ? exact : all).map((net) => {
+        const pins = listOf(net.pins).length ? net.pins : listOf(net.pins_sample);
+        return el("div", {},
+          Shell.facts([["Net", net.net], ["Pins", net.pin_count === undefined ? null : String(net.pin_count)], ["Note", net.message || null]]),
+          el("ul", { class: "flat" }, pins.slice(0, 40).map((pin) => el("li", { text: `${isObject(pin) ? pin.refdes : "?"}.${isObject(pin) ? pin.pin : "?"}` })),
+            pins.length > 40 ? el("li", { class: "muted", text: `and ${pins.length - 40} more` }) : null));
+      }), again);
+    }
+    const pins = Object.keys(isObject(json.pins) ? json.pins : {}).length;
+    return el("div", { class: "answer" }, head,
+      el("p", { class: "help small", text: "As the active variant shows it when asked." }),
+      Shell.facts([
+        ["Fitted", json.dnp ? "no: Not Fitted in the active variant" : "yes"],
+        ["Value", json.value], ["Description", json.description], ["MPN", json.mpn], ["Sheet", json.sheet],
+        ["Pins", pins ? String(pins) : null],
+      ]), again);
+  }
+
+  // ---------- host ----------
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && view.selected && !event.defaultPrevented) closeDetails();
+  });
+  Shell.on("toolInput", (args) => {
+    view.args = args || {};
+    view.argsKnown = true;
+    if (!view.data) showState("loading", "Reading the design diff", `${argText(cleanArgs(view.args))} is comparing the two sides.`);
+  });
+  Shell.on("toolInputPartial", () => {
+    if (!view.data) showState("loading", "Reading the design diff", "Waiting for the tool's arguments.");
+  });
+  Shell.on("toolResult", (result) => loadResult(result));
+  Shell.on("toolCancelled", (reason) => {
+    if (!view.data) showState("info", `The ${TOOL} call was cancelled`, reason || "No result to show.");
+  });
+  Shell.on("teardown", () => {
+    view.closed = true;
+    closeCalls();
+    view.busy = "";
+    Shell.announce("The view was closed: it asks the server nothing more");
+    if (view.data && ui.header) {
+      renderHeadBlocks();
+      renderPane();
+    } else if (view.errorShown) {
+      showError(view.errorShown.payload, view.errorShown.asked);
+    } else {
+      showState("info", "The view was closed", "It asks the server nothing more, and no design diff was read before it closed.");
+    }
+  });
+  // The host's size or display mode changed: the narrow and short layouts may too; the
+  // disclosures the user has not set open or fold again.
+  const layoutSig = () => `${narrowHost()}|${Shell.context().displayMode}|${short()}|${cramped()}|${compactHost()}`;
+  let wasLayout = layoutSig();
+  function onLayoutChange() {
+    if (!view.data || !ui.header) return;
+    if (layoutSig() === wasLayout) return;
+    wasLayout = layoutSig();
+    if (view.auto.filters) view.filtersOpen = null;
+    if (view.auto.picker) view.pickerOpen = null;
+    // Focus goes back to the control or the row it was on.
+    const mark = Shell.focusMark(app);
+    const spot = focusSpot();
+    renderAll();
+    if (spot && ui.table && ui.table.focus((row) => row._id === spot)) return;
+    if (mark) Shell.refocus(app, mark, () => ui.headline || null);
+  }
+  Shell.on("context", () => {
+    onLayoutChange();
+    queueOwnFit();
+  });
+  window.addEventListener("resize", () => {
+    onLayoutChange();
+    queueOwnFit();
+  });
+
+  // Full screen with no height from the host: the shell then fits no pane (it has no
+  // limit), so the page fits its panes to the window's own height, on #app (the shell sets
+  // the root's --pane-height only from a height the host gives).
+  let ownFit = "";
+  let ownQueued = false;
+  function fitOwnHeight() {
+    ownQueued = false;
+    const dims = Shell.context().containerDimensions || {};
+    const mine = Shell.context().displayMode === "fullscreen" && !(Number(dims.height || dims.maxHeight) > 0);
+    const limit = window.innerHeight;
+    if (!mine || !limit) {
+      if (ownFit) app.style.removeProperty("--pane-height");
+      ownFit = "";
+      return;
+    }
+    const html = document.documentElement;
+    // The page's height with its scrollbar shown, as the shell measures it.
+    const height = () => {
+      const saved = [html.style.height, html.style.overflowY];
+      html.style.height = "max-content";
+      html.style.overflowY = "scroll";
+      const value = Math.ceil(html.getBoundingClientRect().height);
+      [html.style.height, html.style.overflowY] = saved;
+      return value;
+    };
+    const set = (px) => app.style.setProperty("--pane-height", `${px}px`);
+    const state = () => `${limit}|${window.innerWidth}|${app.style.getPropertyValue("--pane-height")}|${height()}`;
+    let current = parseInt(app.style.getPropertyValue("--pane-height"), 10);
+    if (!Number.isFinite(current)) {
+      current = limit;
+      set(current);
+    }
+    if (state() === ownFit) return;
+    // Up from the current height only, unless the page is too tall (pane scroll positions stay).
+    let low = current;
+    let high = limit;
+    if (current > limit || height() > limit) {
+      low = 64;
+      high = Math.min(current, limit);
+    }
+    while (high - low > 4) {
+      const middle = Math.floor((low + high) / 2);
+      set(middle);
+      if (height() <= limit) low = middle;
+      else high = middle;
+    }
+    set(high);
+    if (height() > limit) set(low);
+    ownFit = state();
+  }
+  function queueOwnFit() {
+    if (ownQueued) return;
+    ownQueued = true;
+    setTimeout(fitOwnHeight, 30);
+  }
+  if (typeof ResizeObserver === "function") new ResizeObserver(queueOwnFit).observe(document.body);
+
+  showState("loading", "Connecting to the host", "");
+  Shell.connect({ name: "altium-copilot-kc Design diff", version: "1.0.0" })
+    .then(() => {
+      if (!view.data && !view.errorShown) showState("loading", `Waiting for ${TOOL}`, "The changes appear when the tool's result arrives.");
+    })
+    .catch((error) => showState("error", "This view needs a host that shows MCP Apps", error.message));
+})();
+</script>
+</body>
+</html>

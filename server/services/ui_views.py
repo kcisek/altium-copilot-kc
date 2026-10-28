@@ -96,6 +96,29 @@ it draws the pad centres get_component_placement (read-only, model-facing) gives
 It calls get_firmware_pin_map, query_net, get_component and get_component_placement, one
 call at a time. No app-only tool is needed: the pages are the tool's own, and placement
 and details are tools the model uses too.
+
+The design diff (#76) is linked from diff_design only. The page reads every page of the
+sections the result covers (from offset 0 when the result is a later page; a page whose
+sides, units, section or total differ is of another comparison and is not merged), and its
+revision picker asks diff_design again with rev_a and rev_b from the recent commits a call
+without revisions lists (asked so, with section ict_hazards, when the answer has none; that
+answer's comparison is not drawn). In place it asks get_component and query_net for a
+change's parts and nets in the loaded project, labelled so, whatever their names (a call
+from the view puts nothing in the conversation). Links to the board view and the
+schematic are messages to Claude (ui/message, the spec defers view-to-view links), sent only
+on a click and only with hostCapabilities.message.text, under one rule, so that a message is
+never a channel for text from the design: fixed words naming read-only tools, and as the
+only variable parts designators (letters, then digits, then optionally letters, digits or
+_, at most 24 characters), net names (letters, digits and _ + - . [ ] /, at most 32
+characters) and pads (a designator, a hyphen, at most 8 letters or digits), the patterns
+the page's data contract holds, and commit hashes (SHA-1 or SHA-256, cut to 12
+characters, or working), each quoted, at most four names; never a comment, value,
+footprint, parameter, description, sheet, variant, rule, layer, commit message, author,
+branch, tag or folder. A name outside the rule is shown on the page to copy, not sent;
+where the host takes no message the sentence is shown to copy. There is no schematic view
+yet (#77): the schematic link asks Claude for get_component or query_net and
+get_sheet_context. No app-only tool and no structuredContent: diff_design's text is the
+view's data.
 """
 
 from __future__ import annotations
@@ -283,6 +306,24 @@ VIEWS = (
             "the checks' findings linked to their pins, a candidate picker, the tool's own "
             "CSV, C header and devicetree text, and a details pane per pin with query_net "
             "and get_component."
+        ),
+    ),
+    View(
+        name="design-diff",
+        tool="diff_design",
+        file="design_diff.html",
+        title="Design diff",
+        description=(
+            "HTML page (MCP Apps view) that hosts showing MCP Apps draw next to "
+            "diff_design's result; not for reading as text. The two revisions (or folders) "
+            "compared, the summary per section and the notes, the ICT hazards first, and one "
+            "row per change with its before (a) and after (b) side by side, grouped by "
+            "section, kind or part and net with counts, sortable and filterable with section "
+            "and kind chips and a column chooser; a revision picker filled from the recent "
+            "commits that asks diff_design again; and a details pane per change with every "
+            "field before and after, get_component and query_net for its part or net, and "
+            "buttons that ask Claude, through a message in the conversation, to show it on the "
+            "board view or the schematic."
         ),
     ),
 )
