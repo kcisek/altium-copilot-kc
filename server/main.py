@@ -7277,7 +7277,8 @@ FIRMWARE_PAGE_LIMITS = {"table": (100, 50, 25, 10, 5), "text": (400, 200, 100, 5
 @mcp.tool(
     title="Get Firmware Pin Map",
     annotations=ToolAnnotations(readOnlyHint=True),
-    meta={"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS},
+    meta=ui_views.link_meta("get_firmware_pin_map",
+                            {"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS}),
 )
 def get_firmware_pin_map(
     mcu: str | None = None,

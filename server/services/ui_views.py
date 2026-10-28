@@ -80,6 +80,22 @@ call at a time.
 It opens the other views by asking the model through ui/message after a click (the spec
 defers view-to-view links, so only a tool call by the model makes the host draw a view);
 the message names tools only, never project data. The registry stays one tool per view.
+
+The firmware pin map (#75) is linked from get_firmware_pin_map only. package_for_xfn,
+which writes the same rows into its snapshot, changes files and links none. The page reads
+every page of the table (from offset 0 when the result is a later page, and as the table
+when the call asked for csv, c_header or devicetree), asks the tool again with another
+mcu= from its candidates, and asks the tool itself for csv, c_header and devicetree with
+the map's arguments, showing each page's text unchanged in a read-only text area: the
+formats come from the tool, never from the page. Its package diagram is a layout by pin
+number, labelled so: a grid when ball names (A1, B12) name the pins, numbers 1..N around
+four sides (QFP and QFN order) or two, else a list; every pin is placed once or listed as
+not on the layout, a read that stopped short of a part's pins draws no layout by number,
+and nothing is drawn for a footprint the files do not give. On request
+it draws the pad centres get_component_placement (read-only, model-facing) gives instead.
+It calls get_firmware_pin_map, query_net, get_component and get_component_placement, one
+call at a time. No app-only tool is needed: the pages are the tool's own, and placement
+and details are tools the model uses too.
 """
 
 from __future__ import annotations
@@ -249,6 +265,24 @@ VIEWS = (
             "when the files change); a details pane per check with its findings; and "
             "buttons that ask Claude, through a message in the conversation, to open a "
             "check's own view or explain its findings."
+        ),
+    ),
+    View(
+        name="firmware-pin-map",
+        tool="get_firmware_pin_map",
+        file="firmware_pins.html",
+        title="Firmware pin map",
+        description=(
+            "HTML page (MCP Apps view) that hosts showing MCP Apps draw next to "
+            "get_firmware_pin_map's result; not for reading as text. The processor's pins "
+            "as a sortable, filterable table (number, name and alternates, port and bit, "
+            "type, net, function with its basis, pull, the parts reached) grouped by "
+            "function or port with function chips and a column chooser, the power and "
+            "ground pins per net, a package diagram coloured by function (a layout by pin "
+            "number or ball name, or the board's pad centres from get_component_placement), "
+            "the checks' findings linked to their pins, a candidate picker, the tool's own "
+            "CSV, C header and devicetree text, and a details pane per pin with query_net "
+            "and get_component."
         ),
     ),
 )
