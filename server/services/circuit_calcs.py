@@ -95,7 +95,7 @@ try:
     from services.bom import natural_key
     from services.decoupling import designator_prefix, farads_text, first_function, pin_role
     from services.derating import (
-        Part, load_policy, merged_params, net_voltages, read_parts, resistor_limits,
+        Part, merged_params, net_voltages, policy_or_defaults, read_parts, resistor_limits,
     )
     from services.firmware_pins import (
         SIGNAL_BUS_FUNCTIONS, PinMap, alternatives, auto_net, classify, pin_rows,
@@ -113,7 +113,7 @@ except ImportError:
     from server.services.bom import natural_key
     from server.services.decoupling import designator_prefix, farads_text, first_function, pin_role
     from server.services.derating import (
-        Part, load_policy, merged_params, net_voltages, read_parts, resistor_limits,
+        Part, merged_params, net_voltages, policy_or_defaults, read_parts, resistor_limits,
     )
     from server.services.firmware_pins import (
         SIGNAL_BUS_FUNCTIONS, PinMap, alternatives, auto_net, classify, pin_rows,
@@ -2326,20 +2326,21 @@ def prepare_circuit_calculations(
     vf: dict[str, float] | None = None,
     vth: dict[str, float] | float | None = None,
     root_dir=None,
+    policy_setting: str | None = None,
 ) -> dict:
     """Read the board once and compute every calculation; render_circuit_calculations
-    pages the result. An {"error": ...} dict for an unknown kind, part or net."""
+    pages the result. An {"error": ...} dict for an unknown kind, part or net.
+    policy_setting: the Derating policy setting's file (resistor power limits), under the
+    project's derating_policy.json."""
     requested = [kind.strip().lower() for kind in kinds or [] if kind.strip()]
     if invalid := [kind for kind in requested if kind not in KINDS]:
         return {"error": "invalid_kinds",
                 "message": f"Unknown kinds {invalid}; use {list(KINDS)}."}
     wanted_kinds = set(requested or KINDS)
     notes: list[str] = []
-    policy_info, error = load_policy(root_dir)
-    if error:
-        policy_info, _ = load_policy(None)
-        notes.append(f"{error.get('file') or 'derating_policy.json'} could not be read "
-                     f"({error['message']}): the default resistor power limits apply.")
+    policy_info, policy_notes = policy_or_defaults(root_dir, policy_setting,
+                                                   "the default resistor power limits")
+    notes.extend(policy_notes)
     board = Board(netlist, plan, project_params, rails, vref, policy_info["values"])
     tree = board.tree
     wanted_parts, unknown_parts = resolve_names(parts, tree.design.part_pins)

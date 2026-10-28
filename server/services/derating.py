@@ -35,8 +35,9 @@ conflict. A capacitor of no stated technology on a chip footprint (or with a cer
 dielectric) is taken for a ceramic. A resistor array's elements pair pins 1 and N, 2 and
 N-1; an array whose power sources disagree takes the lowest, per element.
 
-Checks (thresholds from DEFAULT_POLICY, which derating_policy.json in the project folder
-and the policy argument override): over_rated (more than the rating across a part:
+Checks (thresholds from DEFAULT_POLICY, which the user's Derating policy setting (a policy
+file anywhere on the PC, ALTIUM_COPILOT_DERATING_POLICY), derating_policy.json in the
+project folder and the policy argument override, in that order): over_rated (more than the rating across a part:
 warning), ceramic_voltage (above 75% of rated, or 50% on a ripple net: warning; C0G the
 same), tantalum_voltage (above 80% for MnO2 and polymer tantalums: warning),
 electrolytic_voltage (above 80%: warning), capacitor_voltage (a capacitor whose
@@ -72,7 +73,9 @@ try:
     from services.bom import natural_key
     from services.bom_checks import IPC_SIZE, METRIC_SIZE
     from services.decoupling import capacitance, designator_prefix, farads_text, net_kind
-    from services.fab_profiles import ProfileError, read_project_json
+    from services.fab_profiles import (
+        ProfileError, read_project_json, setting_folder, setting_path_problem,
+    )
     from services.power_tree import (
         FILTER_OHMS, LINK_OHMS, SWITCHING_KINDS, build_tree, tree_data,
     )
@@ -83,7 +86,9 @@ except ImportError:
     from server.services.bom import natural_key
     from server.services.bom_checks import IPC_SIZE, METRIC_SIZE
     from server.services.decoupling import capacitance, designator_prefix, farads_text, net_kind
-    from server.services.fab_profiles import ProfileError, read_project_json
+    from server.services.fab_profiles import (
+        ProfileError, read_project_json, setting_folder, setting_path_problem,
+    )
     from server.services.power_tree import (
         FILTER_OHMS, LINK_OHMS, SWITCHING_KINDS, build_tree, tree_data,
     )
@@ -102,6 +107,7 @@ PAGE_LIMIT = 100
 UNKNOWN_LISTED = 100  # designators listed in the unknown_rating row
 RAILS_LISTED = 12  # rails without a known voltage listed, most capacitors first
 POLICY_FILE = "derating_policy.json"
+SETTING_VARIABLE = "ALTIUM_COPILOT_DERATING_POLICY"
 
 HEURISTIC = (
     "A heuristic from names and part text: net voltages are nominal (from rails=, net "
@@ -239,14 +245,78 @@ def _apply_policy(policy: dict, raw, origin: str, file: str | None = None
     return applied, None
 
 
-def load_policy(root_dir, override=None) -> tuple[dict | None, dict | None]:
-    """The effective policy, as (info, None) or (None, error): the defaults, then
+def _with_extra(error: dict, extra: dict) -> dict:
+    """error with extra keys before its hint."""
+    if not extra:
+        return error
+    details = {key: value for key, value in error.items() if key != "hint"}
+    return {**details, **extra, "hint": error["hint"]}
+
+
+def _policy_file_layer(policy: dict, path: Path, root, label: str, file: str,
+                       extra: dict | None = None) -> tuple[dict | None, list[str], dict | None]:
+    """Apply a policy file (read like a fab profile: a JSON object with name, source,
+    comment and policy) onto policy in place: (data, keys set, None) or (None, [], error).
+    label starts the error messages; extra keys go into an error (before its hint)."""
+    extra = extra or {}
+    try:
+        data = read_project_json(path, root)
+    except ProfileError as error:
+        details = {key: value for key, value in error.error.items()
+                   if key in ("line", "column")}
+        return None, [], _policy_error(error.error["message"], file, **details, **extra)
+    for key in data:
+        if not key.startswith("_") and key not in _POLICY_FILE_KEYS:
+            return None, [], _policy_error(
+                f"{label}: unknown key '{key[:60]}'.", file,
+                valid_keys=list(_POLICY_FILE_KEYS), **extra)
+    keys, error = _apply_policy(policy, data.get("policy"), label, file)
+    if error:
+        return None, [], _with_extra(error, extra)
+    return data, keys, None
+
+
+def _file_names(info: dict, data: dict) -> None:
+    for key in ("name", "source"):
+        if isinstance(data.get(key), str) and data[key].strip():
+            info[key] = " ".join(data[key].split())[:120]
+
+
+def setting_layer(policy: dict, setting: str) -> tuple[dict | None, list[str], dict | None]:
+    """Apply the Derating policy setting's file (an absolute path) onto policy:
+    (data, keys set, None) or (None, [], an invalid_policy error naming the setting)."""
+    text = str(setting).strip()
+    path = Path(text)
+    extra = {"setting": SETTING_VARIABLE}
+    reason = setting_path_problem(path)
+    if reason:
+        return None, [], _policy_error(
+            f"The Derating policy setting ({SETTING_VARIABLE}) names '{text[:200]}', which "
+            f"{reason}. Ask the user to fix the setting (Claude Desktop: the extension's "
+            "settings).", path.name or None, **extra)
+    label = f"{path.name} (the Derating policy setting)"
+    return _policy_file_layer(policy, path, setting_folder(path), label, path.name, extra)
+
+
+def load_policy(root_dir, override=None, setting: str | None = None
+                ) -> tuple[dict | None, dict | None]:
+    """The effective policy, as (info, None) or (None, error): the defaults, then the
+    Derating policy setting's file (setting: its absolute path), then
     derating_policy.json in the project folder (read like a fab profile: a JSON object
-    with name, source, comment and policy), then the override argument. info holds the
-    values, which file was read and which keys each layer set."""
+    with name, source, comment and policy), then the override argument; each sets single
+    keys over the one before. info holds the values, which files were read and which keys
+    each layer set; chosen_by joins the layers that applied (default when none)."""
     policy = {key: (dict(value) if isinstance(value, dict) else value)
               for key, value in DEFAULT_POLICY.items()}
     info: dict = {"chosen_by": "default"}
+    layers: list[str] = []
+    if setting:
+        data, keys, error = setting_layer(policy, setting)
+        if error:
+            return None, error
+        info.update({"setting_file": Path(str(setting).strip()).name, "set_by_setting": keys})
+        _file_names(info, data)
+        layers.append("setting")
     if root_dir is not None:
         path = Path(root_dir) / POLICY_FILE
         try:
@@ -254,34 +324,47 @@ def load_policy(root_dir, override=None) -> tuple[dict | None, dict | None]:
         except OSError:
             found = False
         if found:
-            try:
-                data = read_project_json(path, root_dir)
-            except ProfileError as error:
-                details = {key: value for key, value in error.error.items()
-                           if key in ("line", "column")}
-                return None, _policy_error(error.error["message"], POLICY_FILE, **details)
-            for key in data:
-                if not key.startswith("_") and key not in _POLICY_FILE_KEYS:
-                    return None, _policy_error(
-                        f"{POLICY_FILE}: unknown key '{key[:60]}'.", POLICY_FILE,
-                        valid_keys=list(_POLICY_FILE_KEYS))
-            keys, error = _apply_policy(policy, data.get("policy"), POLICY_FILE, POLICY_FILE)
+            data, keys, error = _policy_file_layer(policy, path, root_dir, POLICY_FILE,
+                                                   POLICY_FILE)
             if error:
                 return None, error
-            info.update({"chosen_by": "project_file", "file": POLICY_FILE,
-                         "set_by_file": keys})
-            for key in ("name", "source"):
-                if isinstance(data.get(key), str) and data[key].strip():
-                    info[key] = " ".join(data[key].split())[:120]
+            info.update({"file": POLICY_FILE, "set_by_file": keys})
+            _file_names(info, data)
+            layers.append("project_file")
     keys, error = _apply_policy(policy, override, "policy argument")
     if error:
         return None, error
     if keys:
         info["set_by_argument"] = keys
-        info["chosen_by"] = ("project_file+argument" if info["chosen_by"] == "project_file"
-                             else "argument")
+        layers.append("argument")
+    info["chosen_by"] = "+".join(layers) or "default"
     info["values"] = policy
     return info, None
+
+
+def policy_or_defaults(root_dir, setting: str | None, limits: str) -> tuple[dict, list[str]]:
+    """load_policy for the tools that read only the resistor limits and never answer a
+    policy error (get_circuit_calculations, check_thermal): (info, notes). A Derating
+    policy setting whose file cannot be read is left out, with a note naming it: the
+    project's derating_policy.json still applies over the defaults. A project file that
+    cannot be read leaves the defaults. limits names what the defaults give, for the
+    notes ("the default resistor power limits")."""
+    notes: list[str] = []
+    info, error = load_policy(root_dir, setting=setting)
+    if error and setting and error.get("setting"):
+        message = " ".join(str(error.get("message", "")).split())
+        info, error = load_policy(root_dir)
+        if error is None:
+            rest = (f"{POLICY_FILE} in the project folder applies over the defaults"
+                    if info.get("file") else f"{limits} apply")
+            notes.append(f"{message} The setting is left out here: {rest}.")
+        else:
+            notes.append(f"{message} The setting is left out here.")
+    if error:
+        info, _ = load_policy(None)
+        notes.append(f"{error.get('file') or POLICY_FILE} could not be read "
+                     f"({error['message']}): {limits} apply.")
+    return info, notes
 
 
 # ---------- reading values ----------

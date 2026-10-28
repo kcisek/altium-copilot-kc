@@ -1,4 +1,5 @@
 # server/main.py
+import functools
 import json
 import logging
 import math
@@ -170,6 +171,7 @@ try:
     from services import multiboard
     from services import board_view
     from services import ui_views
+    from services import settings as app_settings
     from parsers.pin_table import PinTableError, parse_pin_file, parse_pin_text
     from services.pin_table import (
         check_pins as check_pin_rows, page as page_pin_table, placed_pins, symbol_pins,
@@ -345,6 +347,7 @@ except ImportError:
     from server.services import multiboard
     from server.services import board_view
     from server.services import ui_views
+    from server.services import settings as app_settings
     from server.parsers.pin_table import PinTableError, parse_pin_file, parse_pin_text
     from server.services.pin_table import (
         check_pins as check_pin_rows, page as page_pin_table, placed_pins, symbol_pins,
@@ -389,6 +392,17 @@ def _read_version() -> str:
 STATE_PATH = Path(
     os.environ.get("USERPROFILE") or str(Path.home())
 ) / ".ee-in-a-box" / "altium-copilot-kc-state.json"
+
+
+def _runs_as_extension() -> bool:
+    """True for the executable Claude Desktop starts from an installed extension (.mcpb):
+    the extension's manifest.json sits two folders above it (server/dist/)."""
+    if not getattr(sys, "frozen", False):
+        return False
+    try:
+        return (Path(sys.executable).resolve().parents[2] / "manifest.json").is_file()
+    except (OSError, IndexError, RuntimeError, ValueError):
+        return False
 
 
 def _is_newer(latest: str, current: str) -> bool:
@@ -726,7 +740,8 @@ never invent a mating.
   not_evaluated say what was missing (netlist, PCB, a voltage or rating): say so, never
   count them as passed. Python plugins (check_packs/plugins) run repository code: pass
   allow_plugins=true only when the user asks for them, and they run only if the user also
-  started the server with ALTIUM_COPILOT_ALLOW_PLUGINS=1. A pack problem
+  started the server with ALTIUM_COPILOT_ALLOW_PLUGINS=1 (in Claude Desktop: the
+  extension's "Allow check-pack Python plugins" setting, off by default). A pack problem
   (invalid_check_pack) names the file and the place to fix.
 
 ## Project Tour
@@ -1534,9 +1549,37 @@ def _detect_altium_project_impl(info: dict, registry: dict) -> dict:
     }
 
 
+def _settings_report(settings) -> dict:
+    """detect_altium_project's settings and project_folders blocks; empty with no
+    setting set and none failing."""
+    out: dict = {}
+    summary = settings.summary()
+    if summary is not None:
+        out["settings"] = summary
+    if settings.project_folders:
+        found = app_settings.find_projects(settings.project_folders)
+        block: dict = {"folders": list(settings.project_folders),
+                       "projects": found["projects"]}
+        if not found["complete"]:
+            block["projects_complete"] = False
+        block["note"] = (
+            "Projects in the user's Project folders setting. When Altium is not running, "
+            "offer these with the registry's projects and load the one the user picks with "
+            "set_project_dir(dir); when no project is found, ask for the folder as usual."
+            + ("" if found["complete"] else " The list stopped at the search limits: ask "
+               "the user for the folder when their project is not in it.")
+        )
+        out["project_folders"] = block
+    return out
+
+
 @mcp.tool(title="Detect Altium Project", annotations=ToolAnnotations(readOnlyHint=True))
 def detect_altium_project() -> str:
-    """Detect whether Altium Designer is running, which project is open, and known projects."""
+    """Detect whether Altium Designer is running, which project is open, and known projects.
+    With the user's settings set (Claude Desktop: the extension's settings), also what they
+    apply and any that could not be applied (settings), and the projects found in their
+    Project folders (project_folders)."""
+    settings = app_settings.current()
     info = _altium.get_status()
     registry = read_registry()
     result = _detect_altium_project_impl(info, registry)
@@ -1544,9 +1587,21 @@ def detect_altium_project() -> str:
     result["server_version"] = current
     state = _read_state()
     update_available = state.get("update_available")
-    if update_available and _is_newer(update_available, current):
+    if settings.check_updates and update_available and _is_newer(update_available, current):
         result["update_available"] = update_available
-        result["update_command"] = "irm https://raw.githubusercontent.com/kcisek/altium-copilot-kc/main/install.ps1 | iex"
+        if _runs_as_extension():
+            # install.ps1 would register a second copy beside the extension, without the
+            # extension's settings.
+            result["update_note"] = (
+                "This copy runs as a Claude Desktop extension: the user updates it by "
+                "installing a newer .mcpb (built from the release's source with "
+                ".github/pack.ps1) under Settings > Extensions, which keeps the extension's "
+                "settings. Do not suggest install.ps1: it adds a second copy beside the "
+                "extension."
+            )
+        else:
+            result["update_command"] = "irm https://raw.githubusercontent.com/kcisek/altium-copilot-kc/main/install.ps1 | iex"
+    result.update(_settings_report(settings))
     return json.dumps(result, indent=2)
 
 
@@ -1846,7 +1901,57 @@ def set_project_dir(project_dir: str) -> str:
     (load_mode offline_netlist, netlist_source offline_compiler, with compile_warnings):
     every tool works. Only when that compile fails or there are no sheets does it load
     without a netlist (partial: true): the tools listed in netlist_required_tools then
-    answer netlist_required."""
+    answer netlist_required. When the user's Default variant setting names a variant the
+    project defines, that variant is active after the load (default_variant_note says
+    so); settings_problems lists settings that could not be applied."""
+    return _apply_load_settings(_set_project_dir_impl(project_dir))
+
+
+def _apply_load_settings(rendered: str) -> str:
+    """set_project_dir's result with the user's settings applied: the Default variant
+    made active when the loaded project defines it, and the settings that could not be
+    applied. Unchanged with no such setting."""
+    settings = app_settings.current()
+    problems = settings.problems_now()  # the profile and policy files as they are now
+    if not settings.default_variant and not problems:
+        return rendered
+    try:
+        result = json.loads(rendered)
+    except ValueError:
+        return rendered
+    if not isinstance(result, dict):
+        return rendered
+    wanted = settings.default_variant
+    if wanted and result.get("loaded") and _variant_state is not None:
+        names = [variant.name for variant in _variant_state.variants]
+        if _variant_state.get(wanted) is not None:
+            _variant_state.set_variant(wanted)
+            active = _variant_state.active.name
+            result["active_variant"] = active
+            result["default_variant_note"] = (
+                f"'{active}' is active: the user's Default variant setting picks it. Say so "
+                "when you list the variants, and switch (set_active_variant) only if the "
+                "user wants another."
+            )
+        elif names:
+            result["default_variant_note"] = (
+                f"The user's Default variant setting names '{wanted}', which this project "
+                f"does not define; '{_variant_state.active.name}' (the project's first) is "
+                "active. Ask the user which variant to work in, then call set_active_variant."
+            )
+        else:
+            result["default_variant_note"] = (
+                f"The user's Default variant setting names '{wanted}', but this project "
+                "defines no variants: every part is fitted."
+            )
+    if problems:
+        result["settings_problems"] = problems
+    return json.dumps(result, indent=2 if "\n" in rendered else None)
+
+
+def _set_project_dir_impl(project_dir: str) -> str:
+    """set_project_dir without the settings (refresh_netlist reloads through it, keeping
+    the variant the user works in)."""
     global _project, _variant_state, _netlist_last_updated
 
     # Find .PrjPcb upfront — needed by both the cache shortcut and the Altium flow.
@@ -2125,7 +2230,7 @@ def _reload_partial(project: dict, variant_state: VariantState) -> str:
     Altium has it open. The active variant stays; if the full load fails after it
     cleared the state, the partial load is restored."""
     active = variant_state.active.name
-    result = json.loads(set_project_dir(project["root_dir"]))
+    result = json.loads(_set_project_dir_impl(project["root_dir"]))
     if "error" in result and _project is None:
         if _load_netlist_free(project["root_dir"], project["prj_pcb_path"], False).get("loaded"):
             result["partial_load_kept"] = True
@@ -3279,6 +3384,7 @@ def get_board_info(units: PcbUnits | None = None) -> str:
     units controls returned coordinates and lengths; it defaults to the
     board's display unit.
     """
+    units = app_settings.units_or_setting(units)
     try:
         project, netlist, _ = _require_project(netlist=False)
     except ProjectNotReady as error:
@@ -3440,6 +3546,7 @@ def get_net_pcb(net: str, units: PcbUnits | None = None) -> str:
     pours lists the net's polygon pours with their names (several may share
     one), shelved ones (no copper) with shelved true.
     """
+    units = app_settings.units_or_setting(units)
     index, error = _pcb_index_or_error()
     if error:
         return json.dumps(error)
@@ -3558,6 +3665,7 @@ def get_net_neighbors(
     An explicit distance is expressed in units (default: board display unit).
     Omitting distance uses a physical default of 10 mil.
     """
+    units = app_settings.units_or_setting(units)
     index, error = _pcb_index_or_error()
     if error:
         return json.dumps(error)
@@ -3627,6 +3735,7 @@ def query_pcb_region(
     x, y, and an explicit radius are expressed in units (default: board
     display unit). Omitting radius uses a physical default of 50 mil.
     """
+    units = app_settings.units_or_setting(units)
     index, error = _pcb_index_or_error()
     if error:
         return json.dumps(error)
@@ -3682,6 +3791,7 @@ def get_component_placement(
     refdes is the designator on the PCB or the netlist refdes; a schematic
     sheet's logical refdes is accepted when neither matches.
     """
+    units = app_settings.units_or_setting(units)
     index, error = _pcb_index_or_error()
     if error:
         return json.dumps(error)
@@ -3772,6 +3882,7 @@ def get_board_view(
     them, pad-to-pad distances for decoupling and TVS findings, the board third each
     lies in, and what was not found, with suggestions. MCP Apps hosts also draw the
     board, with the highlights, zoom, layer toggles and details."""
+    units = app_settings.units_or_setting(units)
     try:
         project, netlist, _ = _require_project(netlist=False)
     except ProjectNotReady as error:
@@ -4030,6 +4141,7 @@ def get_design_rules(
     including the object-to-object matrix, per-layer values for the board's signal layers.
     stale_references lists scope names that match no net, class, pair or room. Lengths use
     units (default: board display unit). Paginated: pass offset from next_offset."""
+    units = app_settings.units_or_setting(units)
     index, error = _pcb_index_or_error()
     if error:
         return json.dumps(error)
@@ -4234,6 +4346,7 @@ def get_rules_for_net(
     name gets its Length and MatchedLengths rules and its member nets.
     kinds narrows the kinds (default: routing-related kinds; ['all'] for every kind).
     Lengths use units (default: board display unit)."""
+    units = app_settings.units_or_setting(units)
     index, error = _pcb_index_or_error()
     if error:
         return json.dumps(error)
@@ -4464,6 +4577,7 @@ def list_diff_pairs(
 
     pattern is a case-insensitive regex on the pair or net names. Lengths use units
     (default: board display unit). Paginated: pass offset from next_offset."""
+    units = app_settings.units_or_setting(units)
     index, error = _pcb_index_or_error()
     if error:
         return json.dumps(error)
@@ -4527,6 +4641,7 @@ def check_rule_compliance(
     checked_by_batch_drc says whether the board's own batch DRC checks that kind.
     Lengths use units (default: board display unit). This reads the saved file, not
     Altium's DRC report."""
+    units = app_settings.units_or_setting(units)
     index, error = _pcb_index_or_error()
     if error:
         return json.dumps(error)
@@ -4586,6 +4701,7 @@ def check_lengths(
     conditional members and approximations are reported. Paginated per rule: pass
     offset from members_page.next_offset. Lengths use units (default: board display
     unit)."""
+    units = app_settings.units_or_setting(units)
     index, error = _pcb_index_or_error()
     if error:
         return json.dumps(error)
@@ -4629,6 +4745,7 @@ def get_signal_length(
     stored on the end pads is added to pad-to-pad paths and at an xSignal's end pins,
     like Altium's Signal Length; routed copper of multi-pad nets has none, like Routed
     Length. Lengths use units (default: board display unit)."""
+    units = app_settings.units_or_setting(units)
     index, error = _pcb_index_or_error()
     if error:
         return json.dumps(error)
@@ -4672,6 +4789,7 @@ def check_diff_pairs(
     pattern is a regex on pair or net names; checks narrows to naming, polarity, series,
     skew. Findings are paginated (offset from next_offset), warnings first. Lengths use
     units (default: board display unit)."""
+    units = app_settings.units_or_setting(units)
     index, error = _pcb_index_or_error()
     if error:
         return json.dumps(error)
@@ -5044,6 +5162,7 @@ def get_constraints_brief(
     fit. The plan is never cut: whole on the first page, or a pointer to
     sections=['plan'] when the page cannot hold it (a plan too long alone pages by class,
     each rule beside its class). Lengths in units, default mm."""
+    units = app_settings.units_or_setting(units)
     try:
         project, netlist, variant_state = _require_project()
     except ProjectNotReady as error:
@@ -5164,6 +5283,7 @@ def generate_rule_file(
     existing file kept and the new one numbered (-2); nothing is written without it: the
     texts come inline (cut at a line when long). formats picks rul, csv, steps (default
     all); units is the plan's units when it gives none (default mm)."""
+    units = app_settings.units_or_setting(units)
     if isinstance(plan, str):
         try:
             plan = json.loads(plan)
@@ -5339,6 +5459,7 @@ def diff_design(
     board is not seen (check_sch_pcb_sync). Lengths in units (default: the board's).
     Paginated: section= narrows to one section, offset from next_offset; summary and
     notes come with the first page."""
+    units = app_settings.units_or_setting(units)
     try:
         if project_dir_a or project_dir_b:
             loaded = _project or {}
@@ -5407,6 +5528,7 @@ def check_decoupling(
     rail take comma-separated names; checks narrows to the names in summary. Findings
     are paginated (offset from next_offset), warnings first. max_distance and every
     distance are in units, default mm (max_distance default 5 mm)."""
+    units = app_settings.units_or_setting(units)
     try:
         project, netlist, variant_state = _require_project()
     except ProjectNotReady as error:
@@ -5537,6 +5659,7 @@ def check_thermal(
     there); checks narrows to the names in checks_run. Hot parts (hottest first) and
     findings (warnings first) page together (offset from next_offset). max_distance and
     every distance are in units, default mm."""
+    units = app_settings.units_or_setting(units)
     try:
         project, netlist, variant_state = _require_project()
     except ProjectNotReady as error:
@@ -5589,7 +5712,8 @@ def check_thermal(
         netlist, plan, project.get("parameters") or {}, index=index,
         pcb_unavailable=pcb_unavailable, parts=_split_names(part), checks=checks,
         rails=user_rails, vref=vrefs, inputs=inputs, max_distance_mil=max_mil,
-        units=resolved, root_dir=project.get("root_dir"))
+        units=resolved, root_dir=project.get("root_dir"),
+        policy_setting=app_settings.current().derating_policy)
     if "error" in prepared:
         return json.dumps(prepared)
     context: dict = {"netlist_updated_utc": _netlist_last_updated}
@@ -5676,6 +5800,7 @@ def check_hv_clearance(
     one copper layer, checks to the names in checks_run. Findings and pairs page together
     (offset from next_offset; the result is kept for paging). Distances in units, default
     mm."""
+    units = app_settings.units_or_setting(units)
     try:
         project, netlist, variant_state = _require_project()
     except ProjectNotReady as error:
@@ -5860,6 +5985,7 @@ def check_power_paths(
     narrow it; checks to names in checks_run. Findings and rails page together (offset from
     next_offset). Lengths in
     units, default mm."""
+    units = app_settings.units_or_setting(units)
     try:
         project, netlist, variant_state = _require_project()
     except ProjectNotReady as error:
@@ -6028,6 +6154,7 @@ def check_return_path(
     checks_run (aliases layers, splits, voids, edges, plane_splits, stitching).
     edge_distance and stitch_radius use units (default: board display unit). Findings are
     paginated (offset from next_offset)."""
+    units = app_settings.units_or_setting(units)
     index, error = _pcb_index_or_error()
     if error:
         return json.dumps(error)
@@ -6138,6 +6265,7 @@ def check_diff_pair_geometry(
     paginated (offset from next_offset), and the pairs rows apart (pairs_offset from
     next_pairs_offset; pairs_total says when fewer pairs are listed; an offset past the
     findings leaves room for more pairs), or name the pairs with pair=."""
+    units = app_settings.units_or_setting(units)
     index, error = _pcb_index_or_error()
     if error:
         return json.dumps(error)
@@ -6346,6 +6474,7 @@ def check_mechanical_fit(
     findings, parts and connectors to one side. Lengths in units (default: board display
     unit), locations relative to origin_mil. Findings page with offset (next_offset), part
     rows (tallest first) with parts_offset (next_parts_offset)."""
+    units = app_settings.units_or_setting(units)
     index, error = _pcb_index_or_error()
     if error:
         return json.dumps(error)
@@ -6417,6 +6546,7 @@ def get_mechanical_handoff(
     one numbered (-mechanical-2.dxf).
     Coordinates are relative to the board origin (origin_mil), viewed from the top. Plan
     view only: not a STEP or IDF / IDX replacement."""
+    units = app_settings.units_or_setting(units)
     index, error = _pcb_index_or_error()
     if error:
         return json.dumps(error)
@@ -6587,6 +6717,7 @@ def check_interfaces(
     given when they fit); checks narrows to the names in summary. Findings are paginated
     (offset from next_offset), warnings first. Distances, in the fields and the text, are
     in units, default mm."""
+    units = app_settings.units_or_setting(units)
     try:
         project, netlist, variant_state = _require_project()
     except ProjectNotReady as error:
@@ -6864,9 +6995,9 @@ def check_derating(
     supply resistors and resistors from a rail to a net of unknown voltage whose power
     cannot be bounded: info saying what to get from the datasheet; ask the user for the
     current) and unknown_rating (one info row listing the capacitors with a known voltage
-    but no rating read). Thresholds come from a policy: the defaults, then
-    derating_policy.json in the project folder, then policy (e.g.
-    {"ceramic_max_ratio": 0.6}); policy in the result says which applied.
+    but no rating read). Thresholds come from a policy: the defaults, then the user's
+    Derating policy setting's file, then derating_policy.json in the project folder, then
+    policy (e.g. {"ceramic_max_ratio": 0.6}); policy in the result says which applied.
 
     It is a heuristic, not a simulation: voltages are nominal (no tolerance, transients
     or ripple peaks), ratings are read from text and can be wrong, and resistor limits are
@@ -6889,7 +7020,8 @@ def check_derating(
     user_rails, error = parse_rail_map(rails)
     if error:
         return json.dumps(error)
-    policy_info, error = load_derating_policy(project.get("root_dir"), policy)
+    policy_info, error = load_derating_policy(
+        project.get("root_dir"), policy, setting=app_settings.current().derating_policy)
     if error:
         return json.dumps(error)
     plan, _, _ = _bom_plan(netlist, variant_state, None)
@@ -7110,7 +7242,8 @@ def get_circuit_calculations(
     prepared = prepare_circuit_calculations(
         netlist, plan, project.get("parameters") or {}, kinds=kinds,
         parts=_split_names(part), nets=_split_names(net), rails=user_rails, vref=vrefs,
-        vf=forward, vth=thresholds, root_dir=project.get("root_dir"))
+        vf=forward, vth=thresholds, root_dir=project.get("root_dir"),
+        policy_setting=app_settings.current().derating_policy)
     if "error" in prepared:
         return json.dumps(prepared)
     for step in CIRCUIT_CALC_STEPS:
@@ -7399,6 +7532,7 @@ def check_vias(
     net narrows to comma-separated nets, pairs or net classes; checks narrows the
     findings, paginated (offset from next_offset). min_annular_ring, max_stub and
     lengths use units (default: board display unit). Plugging and filling are not read."""
+    units = app_settings.units_or_setting(units)
     index, error = _pcb_index_or_error()
     if error:
         return json.dumps(error)
@@ -7509,6 +7643,7 @@ def check_testpoints(
     nets names critical nets, pairs or classes (comma-separated) that must have access.
     checks narrows the findings, paginated (offset from next_offset). Lengths use units
     (default: board display unit); at_mil locations are relative to origin_mil."""
+    units = app_settings.units_or_setting(units)
     index, error = _pcb_index_or_error()
     if error:
         return json.dumps(error)
@@ -7587,6 +7722,7 @@ def check_connectivity(
     unrouted, isolated, antennae, weak (weak is listed by default only when the option
     is or may be on; the summary always counts it). Findings are paginated (offset from
     next_offset). Lengths use units (default: board display unit)."""
+    units = app_settings.units_or_setting(units)
     index, error = _pcb_index_or_error()
     if error:
         return json.dumps(error)
@@ -7690,6 +7826,7 @@ def check_pcb_health(
     errors first; many objects in one check become one finding listing them.
     Coordinates are relative to the board origin, in units (default: board display
     unit)."""
+    units = app_settings.units_or_setting(units)
     index, error = _pcb_index_or_error()
     if error:
         return json.dumps(error)
@@ -7808,7 +7945,8 @@ def check_dfm(
     profile: "altimade" (built in: Altium's Altimade ordering service, its published
     limits), "none" (only limits apply) or a .json file in the project folder ("acme"
     for acme.json). Default: the project's fab_profile.json (chosen_by project_file),
-    else altimade (chosen_by default). limits sets single values on top, with the keys
+    else the user's Fab profile setting (chosen_by setting), else altimade (chosen_by
+    default). limits sets single values on top, with the keys
     of the file and of the echoed profile: lengths end in _mm or _mil
     ({"min_spacing_mm": 0.1}), ratios and counts take no suffix ({"max_aspect_ratio": 8,
     "layer_counts": [2, 4]}); a value is a number or a list of numbers, never text, and
@@ -7853,6 +7991,7 @@ def check_dfm(
     Example locations (at_mil) are relative to the board origin: add origin_mil for
     query_pcb_region. Lengths use units (default: board display unit); limits carry
     their own unit suffix."""
+    units = app_settings.units_or_setting(units)
     index, error = _pcb_index_or_error()
     if error:
         return json.dumps(error)
@@ -7860,7 +7999,8 @@ def check_dfm(
     if units_error:
         return json.dumps(units_error)
     project, netlist, variant_state = _require_project(netlist=False)
-    fab_profile, error = load_profile(profile, project.get("root_dir"), limits)
+    fab_profile, error = load_profile(profile, project.get("root_dir"), limits,
+                                      setting=app_settings.current().fab_profile)
     if error:
         return json.dumps(error)
     # Cached on the index per (checks, units, profile, variant): paging and repeat calls
@@ -8436,6 +8576,7 @@ def get_assembly_guide(
     with every column. side narrows to top or bottom. Rows are paginated (offset from
     next_offset). Coordinates and heights use units (default: board display unit). Not:
     the pick-and-place data check (check_dfm pick_and_place); the parts list (get_bom)."""
+    units = app_settings.units_or_setting(units)
     index, error = _pcb_index_or_error()
     if error:
         return json.dumps(error)
@@ -8515,6 +8656,7 @@ def get_drc_report(
     paginated (offset from next_offset). location_* is absolute (board origin in
     origin_*, the frame query_pcb_region takes); a message's own coordinates are relative
     to the origin. Locations use units (default: board display unit)."""
+    units = app_settings.units_or_setting(units)
     try:
         project, netlist, _ = _require_project(netlist=False)
     except ProjectNotReady as error:
@@ -8709,6 +8851,7 @@ def verify_outputs(
     file and ask the user to save in Altium and generate again. Quote not_checked
     (Gerber and ODB++ contents, Board Stack Reports, .xls). Positions (at_mil) are
     relative to the board origin."""
+    units = app_settings.units_or_setting(units)
     try:
         project, netlist, variant_state = _require_project(netlist=False)
     except ProjectNotReady as error:
@@ -8867,6 +9010,7 @@ def get_library_part(
     together (offset from next_offset); lengths in units (default the board's display
     unit). Workspace (Altium 365) and database-library parts are not readable offline:
     not_available_offline says so (get_db_part reads a database part's record)."""
+    units = app_settings.units_or_setting(units)
     try:
         project, netlist, _ = _require_project(netlist=False)
     except ProjectNotReady as error:
@@ -8980,8 +9124,9 @@ def check_libraries(
     library's does, as an update from the library would);
     height_3d (per placed part: a 3D model, an extruded body, only the footprint's
     Height, or neither); where_used (where_used='<symbol or footprint name>': the
-    registered projects, and the projects under folders=, that place it, with counts
-    and designators; with library=, only parts placed from that library).
+    registered projects, and the projects under folders= (default: the user's Project
+    folders setting), that place it, with counts and designators; with library=, only
+    parts placed from that library).
     part= (comma-separated designators, library references or footprint names) narrows
     every check; library= (a library file name or path) runs symbol_rules,
     footprint_rules, net_ties and height_3d on every item of that library instead.
@@ -8991,6 +9136,7 @@ def check_libraries(
     365) parts and DbLib parts are not readable offline: not_available_offline and
     not_readable_offline_parts say so (check_db_parameters checks DbLib parts against
     their database)."""
+    units = app_settings.units_or_setting(units)
     try:
         project, netlist, _ = _require_project(netlist=False)
     except ProjectNotReady as error:
@@ -9004,8 +9150,11 @@ def check_libraries(
         return json.dumps(error)
     projects: list[str] = []
     if where_used or (checks and "where_used" in checks):
+        # The folders argument, else the user's Project folders setting.
+        searched = folders if folders is not None else list(
+            app_settings.current().project_folders)
         projects = list(dict.fromkeys([*registry_projects(read_registry()),
-                                       *project_files(folders or [])]))
+                                       *project_files(searched or [])]))
     try:
         model = run_library_checks(LibraryCheckInputs(
             libraries, netlist, index.pcb if index is not None else None, sch_refdes,
@@ -9818,6 +9967,7 @@ def check_release_readiness(offset: int = 0) -> str:
         clone_status=clone_status,
         offline_erc=lambda: _offline_erc_summary(project),
         verify_outputs=lambda: _verify_outputs_model(project, netlist, variant_state)[0],
+        fab_profile_setting=app_settings.current().fab_profile,
     )
     model = build_release_readiness(inputs)
     for limit in (len(model["gates"]) or 1, 12, 6, 3, 1):
@@ -9853,12 +10003,23 @@ def _checklists_bundled() -> dict:
     return _bundled_checklists
 
 
+def _with_tool_defaults(tool):
+    """tool run inside app_settings.tool_defaults(): the user's Units setting does not
+    apply, so a pack or checklist reads the same numbers for every user."""
+    @functools.wraps(tool)
+    def run(*args, **kwargs):
+        with app_settings.tool_defaults():
+            return tool(*args, **kwargs)
+    return run
+
+
 def _review_tools() -> dict:
     """The evidence tools, as the MCP tool functions themselves: a checklist item gets
-    exactly what a direct call with its arguments returns; run_custom_checks answers the
-    custom items (check-pack rules)."""
-    tools = {name: globals()[name] for name in REVIEW_EVIDENCE_TOOLS}
-    tools["run_custom_checks"] = run_custom_checks
+    exactly what a direct call with its arguments returns (the user's Units setting
+    aside: each tool's own default unit); run_custom_checks answers the custom items
+    (check-pack rules)."""
+    tools = {name: _with_tool_defaults(globals()[name]) for name in REVIEW_EVIDENCE_TOOLS}
+    tools["run_custom_checks"] = _with_tool_defaults(run_custom_checks)
     return tools
 
 
@@ -9866,14 +10027,15 @@ def _review_model(project: dict, netlist: dict | None, variant: str | None, chec
                   sections: list[str] | None, items: list[str] | None, state: dict) -> dict:
     """The checklist run, reused for REVIEW_CACHE_SECONDS while the design state, every
     file under the project folder (OutJobs, DRC reports, outputs, fab profile), the
-    netlist, the variant and the checklist are the same (format='markdown' right after
+    netlist, the variant, the checklist and the files of the user's Fab profile and
+    Derating policy settings are the same (format='markdown' right after
     the JSON call does not run the tools again). A folder of more than
     FOLDER_SIGNATURE_FILES files is not cached."""
     folder = folder_signature(project.get("root_dir") or ".")
     key = (project.get("prj_pcb_path"), json.dumps(checklist, sort_keys=True),
            tuple(sections or ()), tuple(items or ()), state.get("id"),
            state.get("fingerprint"), folder, variant, id(netlist), _netlist_last_updated,
-           pack_signature(project.get("root_dir")))
+           pack_signature(project.get("root_dir")), app_settings.file_signature())
     now = datetime.now(timezone.utc).timestamp()
     for old in [k for k, (stamp, _) in _review_cache.items()
                 if now - stamp > REVIEW_CACHE_SECONDS]:
@@ -10030,8 +10192,9 @@ _custom_cache: dict = {}  # key -> (time, model)
 
 
 def _custom_tools() -> dict:
-    """The tools a pack's tool rule may run, as the MCP tool functions themselves."""
-    return {name: globals()[name] for name in TOOL_RULE_TOOLS}
+    """The tools a pack's tool rule may run, as the MCP tool functions themselves (the
+    user's Units setting aside: a rule's numbers keep each tool's own default unit)."""
+    return {name: _with_tool_defaults(globals()[name]) for name in TOOL_RULE_TOOLS}
 
 
 def _custom_model(key: tuple | None, build) -> dict:
@@ -10109,7 +10272,8 @@ def _custom_run(pack: str | None, rules: list[str] | None, path: str | None,
     variant = variant_state.active.name if variant_state.variants else None
     key = None if folder is None else (
         project.get("prj_pcb_path"), id(netlist), _netlist_last_updated, variant, folder,
-        pack_signature(root, path), path, pack, json.dumps(rules), run_plugins)
+        pack_signature(root, path), path, pack, json.dumps(rules), run_plugins,
+        plugin_reason, app_settings.file_signature())
     model = _custom_model(key, build)
     header: dict = {
         "project": project.get("name"),
@@ -10162,9 +10326,10 @@ def run_custom_checks(
     with arguments and test its findings or summary with the review checklists'
     conditions (fail, pass, na), so any check becomes a pass/fail gate with the team's
     severity. Python plugins (check_packs/plugins/*.py next to the project) run only with
-    allow_plugins=true AND ALTIUM_COPILOT_ALLOW_PLUGINS=1 in the server's environment:
-    they are repository code run with the server's permissions, so never pass
-    allow_plugins without the user's say-so.
+    allow_plugins=true AND ALTIUM_COPILOT_ALLOW_PLUGINS=1 in the server's environment
+    (Claude Desktop: the extension's "Allow check-pack Python plugins" setting, off by
+    default; only the user can turn it on): they are repository code run with the
+    server's permissions, so never pass allow_plugins without the user's say-so.
 
     pack= narrows to pack ids (comma-separated; 'plugins' for the plugin files), rules= to
     rule ids (a disabled rule runs only when named). Findings are ERC-style, errors first:
@@ -10405,6 +10570,7 @@ def pcb_manufacturing_review() -> str:
         return json.dumps(error)
     return build_manufacturing_review(
         project, variant_state.active.name, index, netlist_free=netlist is None,
+        fab_profile_setting=app_settings.current().fab_profile,
     )
 
 
@@ -10786,9 +10952,17 @@ def package_for_xfn() -> str:
 
 # ---------- entry point ----------
 
-def _serve() -> None:
-    """Run the MCP server on stdio (and the daily release check)."""
-    threading.Thread(target=_check_for_update, args=(_read_version(),), daemon=True).start()
+def _serve(argv: list[str] | None = None) -> None:
+    """Run the MCP server on stdio (and the daily release check unless the user's Check for
+    updates setting is off). The settings are read here, once: a problem is logged and
+    reported by detect_altium_project, never fatal."""
+    settings = app_settings.activate(argv)
+    for problem in settings.problems:
+        logging.warning("Setting %s (%s) not applied as given: %s", problem["title"],
+                        problem["variable"], problem["message"])
+    if settings.check_updates:
+        threading.Thread(target=_check_for_update, args=(_read_version(),),
+                         daemon=True).start()
     try:
         mcp.run()
     finally:
@@ -10806,7 +10980,8 @@ def _serve() -> None:
 def run_entry(argv: list[str]) -> int:
     """The executable's entry point: 'check ...' runs the headless checks (cli.py, roadmap
     #50: no MCP server, no update check, no registry or state file), --version prints the
-    version, anything else starts the MCP server exactly as before."""
+    version, anything else starts the MCP server exactly as before (its arguments carry
+    the Project folders setting: --project-folders <folder> ...)."""
     if argv[:1] == ["check"]:
         try:
             import cli
@@ -10816,7 +10991,7 @@ def run_entry(argv: list[str]) -> int:
     if "--version" in argv:
         print(f"altium-copilot-kc v{_read_version()}")  # noqa: T201
         return 0
-    _serve()
+    _serve(argv)
     return 0
 
 

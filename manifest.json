@@ -20,11 +20,19 @@
     "entry_point": "server/dist/altium-copilot.exe",
     "mcp_config": {
       "command": "${__dirname}/server/dist/altium-copilot.exe",
-      "args": []
+      "args": ["--project-folders", "${user_config.project_folders}"],
+      "env": {
+        "ALTIUM_COPILOT_UNITS": "${user_config.units}",
+        "ALTIUM_COPILOT_FAB_PROFILE": "${user_config.fab_profile}",
+        "ALTIUM_COPILOT_DERATING_POLICY": "${user_config.derating_policy}",
+        "ALTIUM_COPILOT_DEFAULT_VARIANT": "${user_config.default_variant}",
+        "ALTIUM_COPILOT_CHECK_UPDATES": "${user_config.check_updates}",
+        "ALTIUM_COPILOT_ALLOW_PLUGINS": "${user_config.allow_plugins}"
+      }
     }
   },
   "tools": [
-    { "name": "detect_altium_project", "description": "Detect whether Altium Designer is running, which project is currently open, and list previously loaded projects from the local registry. Always call this first to orient Claude before loading a project." },
+    { "name": "detect_altium_project", "description": "Detect whether Altium Designer is running, which project is currently open, and list previously loaded projects from the local registry and the projects in the Project folders setting, with the settings in effect. Always call this first to orient Claude before loading a project." },
     { "name": "get_clone_status", "description": "Show where the project's local copy stands against Altium 365, read offline from its Git clone: project GUID, last fetch time, commits ahead or behind as of that fetch, uncommitted local changes and the last commit, with a warning when the last fetch is old. Never fetches." },
     { "name": "set_project_dir", "description": "Load an Altium project from disk given its folder path. Parses the .PrjPcb file, reads all schematic sheets, and generates a Protel netlist by automating Altium's export. Required before calling any other tool. Altium Designer must have the project open when the netlist has to be generated; with Altium closed and no up-to-date netlist, the netlist is compiled offline from the saved sheets and every tool works (only when no sheet can be compiled does the project load partially, without a netlist)." },
     { "name": "refresh_netlist", "description": "Regenerate the netlist after the user saves schematic changes in Altium (or compile it again offline when Altium is closed). Only call when the user confirms they have saved — do not call speculatively." },
@@ -111,5 +119,57 @@
   "compatibility": {
     "claude_desktop": ">=1.0.0",
     "platforms": ["win32"]
+  },
+  "user_config": {
+    "project_folders": {
+      "type": "directory",
+      "title": "Project folders",
+      "description": "Where your Altium projects live: a project folder (with its .PrjPcb) or a folder of project folders. When Altium is not running, Claude offers the projects found there, beside the ones you opened before, and the library where-used search covers them. Leave empty to name the folder in the chat.",
+      "multiple": true,
+      "required": false,
+      "default": []
+    },
+    "units": {
+      "type": "string",
+      "title": "Units",
+      "description": "mil or mm for the lengths, coordinates and distances in results and the distances you give. Leave empty to use each board's own display unit (PCB tools) and mm (the schematic-side checks). A unit named in the chat wins.",
+      "required": false,
+      "default": ""
+    },
+    "fab_profile": {
+      "type": "file",
+      "title": "Fab profile",
+      "description": "Your fabricator's limits as a profile file (.json, written like a project's fab_profile.json) for the DFM check, used when a project folder has no fab_profile.json of its own. Leave empty to check against Altimade's published limits. A profile named in the chat wins.",
+      "required": false,
+      "default": ""
+    },
+    "derating_policy": {
+      "type": "file",
+      "title": "Derating policy",
+      "description": "Your team's derating limits as a policy file (.json, written like a project's derating_policy.json) for the derating check and the resistor power limits. A project's own derating_policy.json, then limits given in the chat, override it key by key. Leave empty for the built-in defaults.",
+      "required": false,
+      "default": ""
+    },
+    "default_variant": {
+      "type": "string",
+      "title": "Default variant",
+      "description": "The variant to work in when a project is loaded, by name (for example Production), when the project defines it; otherwise its first variant, as without this setting. You can still switch variants in the chat.",
+      "required": false,
+      "default": ""
+    },
+    "check_updates": {
+      "type": "boolean",
+      "title": "Check for updates",
+      "description": "Once a day, ask GitHub whether a newer release of this server exists and mention it at the start of a session. Nothing is downloaded or installed. Turn off for offline or air-gapped PCs: no request is made then.",
+      "required": false,
+      "default": true
+    },
+    "allow_plugins": {
+      "type": "boolean",
+      "title": "Allow check-pack Python plugins",
+      "description": "Off by default. When on, your team's check packs may run the Python files in a project's check_packs/plugins folder, and only when you also ask for them in the chat. They are code from the project's repository and run with your Windows permissions: turn this on only for repositories you trust.",
+      "required": false,
+      "default": false
+    }
   }
 }

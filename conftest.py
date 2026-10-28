@@ -9,6 +9,22 @@ sys.path.insert(0, os.path.dirname(__file__))
 # Also allow direct imports from server/ (for new services tests)
 sys.path.insert(0, str(Path(__file__).parent / "server"))
 
+# The extension settings' variables (server/services/settings.py; tests/test_settings.py
+# checks this list against it).
+SETTING_VARIABLES = (
+    "ALTIUM_COPILOT_PROJECT_FOLDERS", "ALTIUM_COPILOT_UNITS", "ALTIUM_COPILOT_FAB_PROFILE",
+    "ALTIUM_COPILOT_DERATING_POLICY", "ALTIUM_COPILOT_DEFAULT_VARIANT",
+    "ALTIUM_COPILOT_CHECK_UPDATES", "ALTIUM_COPILOT_ALLOW_PLUGINS",
+)
+
+
+@pytest.fixture(autouse=True)
+def no_extension_settings(monkeypatch):
+    """Settings in the environment of the shell running the tests must not change any
+    result: every test starts with none set (a test sets the ones it needs)."""
+    for name in SETTING_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+
 
 @pytest.fixture
 def sample_netlist():

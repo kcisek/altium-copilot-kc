@@ -165,6 +165,7 @@ class ReleaseInputs:
     clone_status: Callable[[str], dict] = field(default=read_clone_status)
     offline_erc: Callable[[], dict | None] | None = None
     verify_outputs: Callable[[], dict | None] | None = None
+    fab_profile_setting: str | None = None  # the user's Fab profile setting
 
 
 class GateResult(Exception):
@@ -533,11 +534,14 @@ def gate_fiducials(ctx: ReleaseContext) -> tuple[str, str]:
     smd = {side: sides[side]["smd"] for side in ("top", "bottom")}
     if not any(smd.values()):
         return "not_applicable", "No SMD placements: fiducials are for machine assembly."
-    profile, error = load_profile(None, ctx.project.get("root_dir"))
+    profile, error = load_profile(None, ctx.project.get("root_dir"),
+                                  setting=ctx.inputs.fab_profile_setting)
     unreadable = ""
     if error:  # check_dfm answers this error; the fiducials are counted without limits
         profile, _ = load_profile("none", None)
-        unreadable = f"; the project's fab profile is not usable ({error.get('error')})"
+        whose = ("the user's Fab profile setting" if error.get("setting")
+                 else "the project's fab profile")
+        unreadable = f"; {whose} is not usable ({error.get('error')})"
     full = review_dfm(index, profile, ["fiducials"], False, variant)
     if "error" in full:
         return "not_verified", full.get("message") or full["error"]

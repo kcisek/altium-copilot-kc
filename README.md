@@ -43,7 +43,7 @@ Part of the [ee-in-a-box](https://github.com/ee-in-a-box) suite.
 | *"Are my pull-ups right? Is anything floating? Are the I2C pull-ups the right value?"* | Signals that need a defined state, found from net and pin names and the pins' electrical types: reset, enable, shutdown, boot, strap and mode nets, open-drain nets (OpenCollector pins, I2C, interrupt, alert, power-good, fault), MOSFET gates and transistor bases driven from an IC, comparator outputs, and on request connector pins wired straight to IC inputs; each with its pull-ups and pull-downs fitted in the active variant (nets joined by a series resistor under 1 kohm count as one signal). Findings for a missing pull, pulls that are all Not Fitted, both up and down, and pull-ups in parallel. I2C buses pair SDA and SCL and size the pull-up per NXP UM10204: effective resistance, Rmin = (VDD - 0.4 V) / IOL with VDD from the rail's name, Rmax = tr / (0.8473 x Cb) for standard, fast or fast-plus mode, with Cb given or estimated (10 pF per pin, plus routing when the PcbDoc loads) and a verdict. Advice, not ERC: pull-ups inside ICs are invisible | `check_pull_resistors` |
 | *"Are my connectors ESD-protected? Is the USB shield tied right?"* | Per connector, whether it looks user-facing (USB, RJ45, D-Sub, terminal block, jack, coax, SFP port: external; board-to-board, FPC, debug header, card edge, configuration jumper: internal; else unknown, with the basis, and overridable) and a per-pin table: the pin's class (signal, ground, power, shield, unconnected), and for a signal the walk through series resistors, 0 ohm links, ferrites, common-mode chokes and series capacitors to the first IC pin, with the ESD/TVS devices met (on the connector side or behind a series part), series parts, capacitors to ground and pulls. Findings: exposed pins with no ESD/TVS (warning on external connectors), a shield tied to ground only through an RC network or left floating, a ground pin that reaches ground only through a capacitor or ferrite, sparse ground pins, low-speed off-board lines with no series resistor or 0 ohm footprint, and with the PcbDoc a TVS nearer the IC than the connector or far from it (plan view, the opposite side marked). Advice from part prefixes and text, after Altium's schematic review checklist and its TVS layout and EMC articles; choosing the TVS part is left to its datasheet | `check_interfaces` |
 | *"How is this board powered? Draw the power tree. Is the input protected?"* | The power tree from the input connectors and batteries through their protection (fuse, reverse-polarity diode or P-FET, TVS, bulk capacitance) to each converter and rail: converters recognised by their words, part numbers and pin names (VIN, VOUT, SW, FB, EN, PG), each with its type and basis, EN state (tied, pulled, undervoltage divider, GPIO, another regulator's PG, floating, held off), PG use, feedback divider with the Vref the rail name implies (or the output a given Vref sets, and a leg a jumper switches in), input and output capacitors and the LC or pi filter on a switcher's input; rails with what feeds them and their load counts. Findings: rails with no source (or fed only through a resistor above 100 ohm), floating enables and enables held off with nothing driving them, divider mismatches, missing fuse, reverse-polarity (a P-FET's orientation read from its pins) or TVS on external inputs, unfiltered SMPS inputs, unused power-good, sequencing chains. JSON, or a Mermaid flowchart Claude can render; in Claude Desktop the result also opens as an interactive diagram (see [Interactive views](#interactive-views)). A draft read from names, after Altium's schematic review checklist and its power-supply and EMC articles: Claude checks each converter against its datasheet | `get_power_tree` |
-| *"Are my capacitors rated high enough? Any DC-bias problems? Is this resistor running too hot?"* | Each fitted capacitor's voltage rating against the voltage across it: ceramics above 75% of their rating (50% on a switching converter's input or output, the ripple nets), tantalums and electrolytics above 80%, anything above its rating; small high-value Class II ceramics at 30% of their rating or more get an approximate DC-bias loss band; resistors get their power (dV^2/R) and working voltage against the stated or typical rating of their size, and LED, shunt and series-supply resistors are listed with what to look up. Net voltages come from rails you give, net names (3V3, -12V), the power tree (outputs set by a given Vref, rails joined through 0 ohm links, ferrites, fuses and inductors) and the midpoints of resistor dividers, each with its source and confidence; ratings, dielectric and size from parameters, text, decoded part numbers (Murata, TDK, Samsung, KEMET, Yageo, AVX, Taiyo Yuden, Walsin, tantalum and resistor families) and footprints, each with its source and any disagreement. Thresholds from a policy table (defaults after Altium's derating article and schematic review checklist, `derating_policy.json` in the project folder or a per-call override). A heuristic: Claude confirms findings in datasheets | `check_derating` |
+| *"Are my capacitors rated high enough? Any DC-bias problems? Is this resistor running too hot?"* | Each fitted capacitor's voltage rating against the voltage across it: ceramics above 75% of their rating (50% on a switching converter's input or output, the ripple nets), tantalums and electrolytics above 80%, anything above its rating; small high-value Class II ceramics at 30% of their rating or more get an approximate DC-bias loss band; resistors get their power (dV^2/R) and working voltage against the stated or typical rating of their size, and LED, shunt and series-supply resistors are listed with what to look up. Net voltages come from rails you give, net names (3V3, -12V), the power tree (outputs set by a given Vref, rails joined through 0 ohm links, ferrites, fuses and inductors) and the midpoints of resistor dividers, each with its source and confidence; ratings, dielectric and size from parameters, text, decoded part numbers (Murata, TDK, Samsung, KEMET, Yageo, AVX, Taiyo Yuden, Walsin, tantalum and resistor families) and footprints, each with its source and any disagreement. Thresholds from a policy table (defaults after Altium's derating article and schematic review checklist, your [Derating policy](#settings) setting, `derating_policy.json` in the project folder or a per-call override). A heuristic: Claude confirms findings in datasheets | `check_derating` |
 | *"Do my logic levels match? Can this 5 V output hurt the 3.3 V MCU? Are the FPGA banks right?"* | For every signal that links ICs powered from different rails, each pin's I/O supply with its basis and confidence (an FPGA pin's bank supply from its name, such as VCCO_14 for IO_L1P_T0_14 or VCCIO3G for LVDS3G_6p; a level translator's or isolator's side supply; a clock part's output supply; else the part's VDDIO-style I/O supply, its only supply or its digital supply, a regulator's VIN only when nothing else is named) and each pin's direction (electrical type, else its name for the part's class: TX, MOSI, SCK and CS drive from a processor; a peripheral's SDO and INT drive; I2C lines are open-drain with the pull-up's rail as their high level). Candidates: a push-pull driver's rail below 70% of a receiver's (likely VOH < VIH; a warning at or below 50%, such as 1.8 V into 5 V), a driver or a pull-up more than 0.3 V above a receiver's supply, or a pull-up above an output's (softened for 5 V tolerant pins and series resistors), open-drain pull-up rails above or below a receiver's, the rails of unknown voltage to give in `rails` (all of them in one call), and level translators and isolators listed as handled. Crystal pins an oscillator drives are judged; crystals, differential pairs, CAN and RS-485 line pins and analog nets are left out. Voltages from rails you give, net names and the power tree. After Altium's common-errors article and schematic review checklist: candidates only, Claude confirms VOH, VIH and absolute maximum ratings in the datasheets | `check_logic_levels` |
 | *"Check my dividers. What does this feedback divider set? How much current through this LED? Are the ADC inputs filtered?"* | Calculations a review recalculates, each with its inputs (and where each came from), formula, result and confidence: resistor dividers (two resistors, parallel or series-chained legs, also through a test point or header pin; each tap of a resistor stack, such as a window comparator's or an EN pin with a hysteresis tap) with their ratio, unloaded output, source impedance, current and a tolerance range when the resistors' tolerances are read, legs a jumper selects, and what each feeds (a converter's FB with Vout/Vref and the Vref the top's voltage implies, an EN/UVLO pin with the input voltage at which a threshold trips, an ADC input, a comparator, op-amp or reference); each LED's (a display's backlight pins too) and optocoupler input's current from its supply (a rail, a GPIO's I/O rail, a transistor), Vf (given, stated, or typical for its colour) and series resistor (parallel resistors combined, a resistor across the diode taking its share), with the resistors' power and, for optocouplers, the R or C across the input, the output pull-up and the CTR it needs; each ADC input's series R and shunt C with its cutoff, and other RC filters. Pull-up/pull-down pairs on driven lines and series terminations into a pull-down are not dividers. Findings for LED overcurrent, an LED or optocoupler input held off by the resistor across it, a divider above the pin's rail + 0.3 V or below ground, resistor overpower, unfiltered ADC inputs and optocouplers with nothing across the input. After Altium's schematic review checklist: Vf, Vref and thresholds are datasheet values, so these are calculations to check | `get_circuit_calculations` |
 | *"Will this regulator run too hot? Are there enough thermal vias under the exposed pad? What sits next to the hot parts?"* | The parts that dissipate, each with its basis: the power tree's converters (LDOs, switchers, modules, chargers, load switches, eFuses), the FETs a converter's gate pins drive and the diodes on its switch node, FETs and diodes in series with a rail, current-sense shunts, resistors computed at 0.25 W or half their rating, power LEDs, processors, FPGAs, Ethernet PHYs, LED and motor drivers, and with the PcbDoc every part with an exposed pad or thermal tab. Dissipation where the inputs allow (LDO (Vin - Vout) x I_out + Vin x Iq, switcher Vout x I_out x (1/eta - 1), shunt I^2 x R, diode Vf x I with its stated or a typical Vf, resistor V^2/R from the net voltages, LED Vf x I) with loads, efficiencies and powers you give, never guessed, and Tj = Ta + thetaJA x P at the typical and worst-case ambient against Tj max. On the PcbDoc: the vias whose centre lies in each exposed pad or tab, or in a paddle the footprint draws as a fill or region (count against a common one-per-1.5 mm^2 guideline, drill, vias on another net, the planes and pours of its net they reach; a pad array's ground pads as one; shelved and unpoured pours listed apart), and hot parts within 5 mm of each other (not the parts of one power stage) or of electrolytics, crystals, references, temperature sensors and batteries. After Altium's IC thermal management article and 'Beyond the PCB review': an estimate, the datasheets and a thermal simulation decide | `check_thermal` |
@@ -403,9 +403,11 @@ folder's; a pack whose `id` was already loaded replaces it), plus a pack file pa
   `api.reachable`, `api.pads`, `api.distance_mm` and `api.nearest`). **Plugins run
   repository code with the server's
   permissions**, so they run only when the call passes `allow_plugins=true` **and** the
-  server was started with `ALTIUM_COPILOT_ALLOW_PLUGINS=1` in its environment (set it
-  where the server is configured, for example the MCP client's `env`); otherwise they are
-  listed, never imported. A plugin that raises, calls `sys.exit`, returns something else
+  server was started with `ALTIUM_COPILOT_ALLOW_PLUGINS=1` in its environment (or `true`;
+  set it where the server is configured, for example the MCP client's `env`, or tick
+  Allow check-pack Python plugins in the extension's [settings](#settings), off by
+  default); otherwise they are listed, never imported. A plugin that raises, calls
+  `sys.exit`, returns something else
   or prints is reported in its rule row; it never stops the server. A plugin has no time
   limit (one that never returns blocks the call) and output it writes past
   `sys.stdout` (`os.write`, `sys.__stdout__`) is not captured: review plugins as you
@@ -481,9 +483,95 @@ No ERC runs offline: open the project in Altium for its compile messages.
    
 ---
 
+## Settings
+
+Every setting is optional: left empty, the copilot works exactly as without it. A value
+you give in the chat (a tool argument) always wins over a setting. Installed as a Claude
+Desktop extension (the `.mcpb` that `.github/pack.ps1` builds from this repository; the
+releases publish only the `.exe` that `install.ps1` installs), the copilot's settings are
+the extension's settings in Claude Desktop (Settings → Extensions); anywhere else they
+are environment variables of the server (see [below](#setting-them-outside-the-extension)).
+They are read once, when the server starts: a changed setting applies when the server
+next starts (if saving the extension's settings does not restart it, turn the extension
+off and on, or restart Claude Desktop). A Fab profile or Derating policy file is read
+again at each use, so a fix to the file itself applies at once.
+
+| Setting | Variable | Effect | Default (empty) |
+|---|---|---|---|
+| Project folders | `ALTIUM_COPILOT_PROJECT_FOLDERS` (folders separated by `;`), or the arguments `--project-folders <folder> ...` | Folders that hold your projects: a project folder or a folder of project folders (searched 4 levels deep, at most 50 projects listed). When Altium is not running, Claude offers the projects found there beside the ones you opened before (`detect_altium_project` lists them under `project_folders`), and `check_libraries`' where-used search covers them when no `folders` is given | Only the projects you opened before |
+| Units | `ALTIUM_COPILOT_UNITS` | `mil` or `mm` for every tool that takes `units` when the call gives none: the lengths, coordinates and distances in results and the numbers given to the tool (`detect_altium_project` tells Claude so in `settings.units_note`). Check packs' tool rules and review checklists keep each tool's own default, so a pack's `max_distance: 3` means the same for everyone | Each board's display unit (PCB tools), mm (the schematic-side checks such as `check_decoupling`) |
+| Fab profile | `ALTIUM_COPILOT_FAB_PROFILE` | A fab profile file (absolute path, written like a project's `fab_profile.json`), or `altimade` or `none`, for `check_dfm` (`chosen_by` `setting`), the release check's fiducials gate and `pcb_manufacturing_review`, when the project folder has no `fab_profile.json` of its own | Altimade's published limits |
+| Derating policy | `ALTIUM_COPILOT_DERATING_POLICY` | A policy file (absolute path, written like a project's `derating_policy.json`) for `check_derating` and the resistor power limits of `get_circuit_calculations` and `check_thermal`; the project's `derating_policy.json` and then the `policy` argument override it key by key (`policy.chosen_by` names the layers, e.g. `setting+project_file`) | The built-in policy |
+| Default variant | `ALTIUM_COPILOT_DEFAULT_VARIANT` | The variant made active when a project is loaded, when the project defines it (any case); `set_project_dir` says so in `default_variant_note`, or that the project has no such variant | The project's first variant |
+| Check for updates | `ALTIUM_COPILOT_CHECK_UPDATES` | `false` (or `0`) stops the daily request to GitHub for the latest release and the update notice | `true` |
+| Allow check-pack Python plugins | `ALTIUM_COPILOT_ALLOW_PLUGINS` | `true` (or `1`) lets `run_custom_checks` run a project's `check_packs/plugins/*.py`, still only when the call asks for them (`allow_plugins=true`): see [Custom check packs](#custom-check-packs). Only you can turn it on; the model cannot | Off |
+
+What is checked when the server starts: folders and files must be absolute paths that
+exist (the message says when a path is a file instead of a folder or the other way
+round, or longer than Windows opens without long-path support), units `mil` or `mm`, the
+switches `true` or `false` (`1` or `0`), the profile and policy files are read and
+parsed as `check_dfm` and `check_derating` read them (a link to a file elsewhere is
+followed: you chose the file). A setting that fails never stops the server:
+`detect_altium_project` lists it under `settings.problems` (and `set_project_dir` under
+`settings_problems`; the profile and policy files as they are at that moment), the MCP
+client's log has a warning, and the tool works as without it, except a Fab profile or
+Derating policy file that cannot be read: `check_dfm` and `check_derating` answer its
+error (naming the setting) until it is fixed, rather than checking against other limits;
+`get_circuit_calculations` and `check_thermal`, which only read resistor limits, leave
+the setting out with a note (the project's `derating_policy.json` still applies). An
+empty value, or a value that is exactly a `${user_config...}` placeholder a host left in
+place, is unset; a placeholder inside other text (Claude Desktop puts one back for a
+value containing `$&`) fails its check. `detect_altium_project` shows the settings in
+effect under `settings.applied` whenever one is set.
+
+No setting holds a secret, and there is no update channel to choose: only stable
+releases are published, and the copilot only says that one exists. Installed with
+`install.ps1`, the notice gives its command; installed as an extension, it says to
+install a newer `.mcpb` instead (`install.ps1` would add a second copy beside the
+extension, without its settings).
+
+### Setting them outside the extension
+
+The server reads the same variables wherever it runs. In Claude Desktop's own
+configuration (`claude_desktop_config.json`, where `install.ps1` registers it), add an
+`env` block (and `args` for several project folders); `install.ps1` keeps both when it
+updates the copilot:
+
+```json
+{
+  "mcpServers": {
+    "altium-copilot-kc": {
+      "command": "C:\\Users\\you\\AppData\\Local\\altium-copilot-kc\\altium-copilot-kc.exe",
+      "args": ["--project-folders", "D:\\Boards", "E:\\Archive"],
+      "env": {
+        "ALTIUM_COPILOT_UNITS": "mm",
+        "ALTIUM_COPILOT_FAB_PROFILE": "D:\\Fab\\our_fab.json",
+        "ALTIUM_COPILOT_DEFAULT_VARIANT": "Production",
+        "ALTIUM_COPILOT_CHECK_UPDATES": "false"
+      }
+    }
+  }
+}
+```
+
+In Claude Code, pass them with `-e` (the same `env` block works in a project's
+`.mcp.json`):
+
+```powershell
+claude mcp add --scope user altium-copilot-kc -e ALTIUM_COPILOT_UNITS=mm `
+  -e ALTIUM_COPILOT_PROJECT_FOLDERS="D:\Boards;E:\Archive" `
+  -- "$env:LOCALAPPDATA\altium-copilot-kc\altium-copilot-kc.exe"
+```
+
+`install.ps1` registers Claude Code again on every update without them: add the `-e`
+options again afterwards. The `check` command for CI reads the same variables (see
+[Continuous integration](#continuous-integration)).
+
+---
+
 ## Usage
 
-Once installed, open Claude and ask anything about your schematic — the copilot detects your running Altium instance and orients itself to your project automatically. With Altium closed, it offers the projects you loaded before. It asks which variant to work in, and every answer follows that variant's fitted and Not Fitted parts.
+Once installed, open Claude and ask anything about your schematic — the copilot detects your running Altium instance and orients itself to your project automatically. With Altium closed, it offers the projects you loaded before (and those in your [Project folders](#settings) setting). It asks which variant to work in, and every answer follows that variant's fitted and Not Fitted parts.
 
 After you save schematic changes in Altium, tell Claude: it calls `refresh_netlist` to pick them up. Board changes are picked up on the next question after you save the `.PcbDoc`.
 
@@ -517,7 +605,14 @@ loaded headless: the netlist is compiled offline from the committed sheets (see
 file times cannot say whether it is up to date), Altium is never started or asked, the
 project registry and the state file in `%USERPROFILE%\.ee-in-a-box` are not written, no
 update check runs and nothing is written into the project folder. Everything runs
-in-process through the same functions the MCP tools are.
+in-process through the same functions the MCP tools are, so the [settings](#settings)'
+variables set in the job's environment apply too (Units, for the `--checks` tools only,
+as checklists and packs keep each tool's own unit; Fab profile, Derating policy, Default
+variant, Project folders, the plugin switch; the update check is never run): the JSON
+names them under `options.settings`, and one that cannot be applied is a configuration
+error (exit 2) rather than a check run without it, except Project folders (only a pack's
+where-used rule reads them) and a plugin switch other than `true` or `1` (the plugins
+stay off, as they always did): those are notes.
 
 | Option | What it does |
 |---|---|
@@ -525,8 +620,8 @@ in-process through the same functions the MCP tools are.
 | `--checklist schematic,release` | Review checklists to run (default `schematic,release`; also `pcb`, `bom`, a team checklist's id, or `none`), with the team's overrides as `run_review_checklist` applies them |
 | `--checks run_erc,check_sch_pcb_sync,...` | Single tools to run as well: any tool a pack's tool rule may call that answers in JSON (all but `get_design_notes`) |
 | `--packs auto` | Check packs (`run_custom_checks`): `auto` runs every pack found next to the `.PrjPcb` or in the Git repository root (none found: a note, not an error), `none`, or pack ids; `--pack-file` adds a pack file (absolute or relative to the project folder), whose rules the checklists' custom items see too |
-| `--allow-plugins` | Runs the packs' Python plugins, only when `ALTIUM_COPILOT_ALLOW_PLUGINS=1` is set in the job's environment too; otherwise they are listed as not run |
-| `--variant`, `--rails`, `--hv`, `--vref` | The variant to check; net voltages, working voltages and feedback references given to every tool that takes them (checklist items and pack tool rules included) |
+| `--allow-plugins` | Runs the packs' Python plugins, only when `ALTIUM_COPILOT_ALLOW_PLUGINS=1` (or `true`) is set in the job's environment too; otherwise they are listed as not run |
+| `--variant`, `--rails`, `--hv`, `--vref` | The variant to check (default: `ALTIUM_COPILOT_DEFAULT_VARIANT` when the project defines it, else its first); net voltages, working voltages and feedback references given to every tool that takes them (checklist items and pack tool rules included) |
 | `--diff-base <ref>` | A design-diff summary (`diff_design`) of the files checked against a commit, branch, tag or `HEAD~1`: the base revision is read with git into a temporary folder, the work tree is not touched (the checkout needs the history: `fetch-depth: 0`). A change that adds, moves or renames the board has no project in the base revision: the diff says so and is skipped |
 | `--drc-report` | Reads the committed Batch DRC report of the board (`get_drc_report`, where Altium writes it or anywhere under the project folder); none found fails as an error |
 | `--junit`, `--markdown`, `--json` | Output files; the Markdown summary is also appended to `$GITHUB_STEP_SUMMARY` when it is set (shortened to fit GitHub's 1 MiB) |
@@ -536,7 +631,7 @@ in-process through the same functions the MCP tools are.
 Exit code 0 when nothing fails at or above `--fail-on`, 1 when something does, 2 for a
 usage, load or configuration problem (an unknown option, checklist, tool, pack, variant
 or base revision, a project that does not load, a checklist override or pack file that
-does not validate), for a run that checked nothing (no checklist, no pack found, no
+does not validate, a setting that cannot be applied), for a run that checked nothing (no checklist, no pack found, no
 tool) and for an internal error of the command; the reports are written in every case
 (except `--help`) and name the problem.
 
@@ -610,7 +705,7 @@ examples take 2.3 s (median; 34 s for the largest).
 
 ## Privacy
 
-Your data stays yours. The MCP server runs locally and sends no telemetry: its only network request is a check for a new release on GitHub, at most once a day, and it carries no project data. For Altium 365 projects it runs local `git` commands in the project's clone, which are blocked from contacting any server. For database libraries it opens their data source read-only, and a database server, an ODBC data source, a network share, a OneDrive folder or a table an Access file links from elsewhere only when you allow it; connection strings and passwords are never shown or logged. It keeps the list of projects you loaded in `%USERPROFILE%\.ee-in-a-box\`, and its warnings go to your MCP client's log. All schematic data is sent only to Claude via your own Enterprise or Pro subscription.
+Your data stays yours. The MCP server runs locally and sends no telemetry: its only network request is a check for a new release on GitHub, at most once a day, and it carries no project data (the [Check for updates](#settings) setting turns it off). For Altium 365 projects it runs local `git` commands in the project's clone, which are blocked from contacting any server. For database libraries it opens their data source read-only, and a database server, an ODBC data source, a network share, a OneDrive folder or a table an Access file links from elsewhere only when you allow it; connection strings and passwords are never shown or logged. It keeps the list of projects you loaded in `%USERPROFILE%\.ee-in-a-box\`, and its warnings go to your MCP client's log. All schematic data is sent only to Claude via your own Enterprise or Pro subscription.
 
 ---
 
