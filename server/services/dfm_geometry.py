@@ -56,8 +56,8 @@ try:
     from parsers.pcb_doc import (
         MULTI_LAYER,
         PAD_SHAPE_OCTAGONAL,
-        decode_region_records,
         pad_copper_on,
+        read_board_cutouts,
     )
     from services.connectivity import _closest_on, _closest_pair, _toward
     from services.pcb_compliance import CLEARANCE_TOLERANCE_MIL, EPS_MIL
@@ -76,8 +76,8 @@ except ImportError:
     from server.parsers.pcb_doc import (
         MULTI_LAYER,
         PAD_SHAPE_OCTAGONAL,
-        decode_region_records,
         pad_copper_on,
+        read_board_cutouts,
     )
     from server.services.connectivity import _closest_on, _closest_pair, _toward
     from server.services.pcb_compliance import CLEARANCE_TOLERANCE_MIL, EPS_MIL
@@ -2156,16 +2156,11 @@ class _Edge:
 
     def __init__(self, pcb):
         outline = pcb.board.outline_shape
-        raw = pcb.raw or {}
-        shape_based = "ShapeBasedRegions6/Data" in raw
-        data = raw.get("ShapeBasedRegions6/Data") or raw.get("Regions6/Data") or b""
-        regions, self.unread = decode_region_records(data, shape_based)
+        regions, self.unread = read_board_cutouts(pcb)
         self.cutouts = []
         self.degenerate_cutouts = 0
         cutout_pieces = []
         for region in regions:
-            if not region.board_cutout:
-                continue
             pieces = _shape_pieces(region.vertices) if len(region.vertices) >= 3 else []
             if not pieces:
                 self.degenerate_cutouts += 1

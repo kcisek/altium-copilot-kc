@@ -1913,6 +1913,17 @@ def decode_region_records(data: bytes, shape_based: bool,
     return regions, skipped
 
 
+def read_board_cutouts(pcb: "PcbData") -> tuple[list[PcbRegion], int]:
+    """(board cutouts, region records that could not be read) of a parsed board: its
+    ShapeBasedRegions6 shapes with their arcs, or Regions6 without that stream (never
+    BoardRegions). The DFM edge checks and the board view read the cutouts here."""
+    raw = pcb.raw or {}
+    shape_based = "ShapeBasedRegions6/Data" in raw
+    data = raw.get("ShapeBasedRegions6/Data") or raw.get("Regions6/Data") or b""
+    regions, unread = decode_region_records(data, shape_based)
+    return [region for region in regions if region.board_cutout], unread
+
+
 @dataclass
 class ComponentBody:
     """A ComponentBodies6 record (or a footprint's body record in a PcbLib): a 3D body's

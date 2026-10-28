@@ -17,9 +17,9 @@ Hosts without the extension (Claude Code) ignore the _meta and show the tool's t
 text is the same whether a view is drawn or not: the tools are unchanged, and the view
 reads the same JSON text (FastMCP's structuredContent {"result": text} for a str result,
 as before). No structuredContent is added for the views, since text-only hosts may show
-it in place of the text, and no app-only tool is registered: a view pages through and
-drills into the existing tools (its own tool, and query_net, get_component,
-get_sheet_context or query_pcb_region for a selection's details).
+it in place of the text. A view pages through and drills into the existing tools (its
+own tool, and query_net, get_component, get_sheet_context or query_pcb_region for a
+selection's details); the board view adds the one app-only tool (below).
 
 Two choices the spec leaves open, made on purpose:
 - The tool's _meta link is static, not sent only to clients that advertise the extension
@@ -58,6 +58,15 @@ findings (and lists them by check in a tab); a second page would repeat the BOM 
 get_active_bom links no view either: the BOM view asks it for one line's ranked solutions
 in its details pane, and a whole-BomDoc page (sourcing, cached stock and prices) is not on
 the roadmap. The registry stays one tool per view.
+
+The board view (#63) is linked from get_board_view only. Its geometry comes from
+get_board_view_geometry, the first app-only tool (_meta.ui.visibility ["app"], spec
+2026-01-26). It links no view, returns compact pages without structuredContent, and exists
+because whole-board geometry (about 0.7 MB on MiniPC) is useless and costly as model
+context. A page or section argument on get_board_view would sit in every model's schema.
+Text-only hosts still list the tool (the static tool list), so its description redirects
+to the model-facing tools and it needs get_board_view's rev. The registry stays one tool
+per view. APP_ONLY_TOOLS lists the tools pages may call that link no view.
 """
 
 from __future__ import annotations
@@ -195,7 +204,28 @@ VIEWS = (
             "get_component, which shows the active variant."
         ),
     ),
+    View(
+        name="board",
+        tool="get_board_view",
+        file="board.html",
+        title="Board view",
+        description=(
+            "HTML page (MCP Apps view) that hosts showing MCP Apps draw next to "
+            "get_board_view's result; not for reading as text. The board in 2D (outline "
+            "and cutouts, copper per layer: pads, vias, tracks, arcs, areas and pours, "
+            "poured copper, silkscreen and part boxes with designators) with the nets, "
+            "parts, pads, spots and finding locations get_board_view names highlighted, "
+            "pad-to-pad distances, zoom, pan, fit, a top or bottom view and layer toggles; "
+            "its geometry read from get_board_view_geometry in pages; an Objects and a "
+            "Parts table; and a details pane per object with get_component_placement, "
+            "get_component, get_net_pcb and query_pcb_region."
+        ),
+    ),
 )
+
+# Tools a page may call that link no view: they serve the views and are not meant for
+# the model (_meta.ui.visibility ["app"]).
+APP_ONLY_TOOLS = ("get_board_view_geometry",)
 
 
 def view_for(tool: str) -> View:
@@ -214,6 +244,12 @@ def link_meta(tool: str, meta: dict | None = None) -> dict:
     linked["ui"] = {**linked.get("ui", {}), "resourceUri": uri}
     linked[LEGACY_URI_KEY] = uri
     return linked
+
+
+def app_only_meta(meta: dict | None = None) -> dict:
+    """An app-only tool's _meta: ui.visibility ["app"] (spec 2026-01-26), so hosts that
+    know the extension keep it from the model; the other keys are kept as they are."""
+    return {**(meta or {}), "ui": {"visibility": ["app"]}}
 
 
 def ui_dir() -> Path:

@@ -168,6 +168,7 @@ try:
     )
     from services import db_parts
     from services import multiboard
+    from services import board_view
     from services import ui_views
     from parsers.pin_table import PinTableError, parse_pin_file, parse_pin_text
     from services.pin_table import (
@@ -342,6 +343,7 @@ except ImportError:
     )
     from server.services import db_parts
     from server.services import multiboard
+    from server.services import board_view
     from server.services import ui_views
     from server.parsers.pin_table import PinTableError, parse_pin_file, parse_pin_text
     from server.services.pin_table import (
@@ -1435,6 +1437,14 @@ class PcbSession:
         self._path: str | None = None
         self._file_signature: tuple[int, int] | None = None
         self._netlist_ref: dict | None = None
+
+    @property
+    def loaded(self) -> tuple[str, tuple[int, int]] | None:
+        """(path, (mtime_ns, size)) of the board the held index was read from; None
+        before one is loaded."""
+        if self._index is None or self._path is None or self._file_signature is None:
+            return None
+        return self._path, self._file_signature
 
     def invalidate(self) -> None:
         """Drop parsed PCB state when its schematic mapping input changes."""
@@ -3709,6 +3719,184 @@ def get_component_placement(
         indent=2,
     )
 
+
+# ---------- board view (roadmap #63) ----------
+
+BOARD_VIEW_FINDINGS_SCHEMA = {"type": ["object", "array"], "items": {"type": "object"},
+                              "maxItems": board_view.MAX_FINDINGS}
+
+
+def _board_rev(project: dict) -> str:
+    """The loaded board's geometry revision (services/board_view.geometry_rev)."""
+    loaded = _pcb_session.loaded or (project["pcb_doc_paths"][0], (0, 0))
+    return board_view.geometry_rev(*loaded)
+
+
+@mcp.tool(
+    title="Board View",
+    annotations=ToolAnnotations(readOnlyHint=True),
+    meta=ui_views.link_meta("get_board_view",
+                            {"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS}),
+)
+def get_board_view(
+    nets: str | None = None,
+    parts: str | None = None,
+    findings: Annotated[Any, WithJsonSchema(BOARD_VIEW_FINDINGS_SCHEMA)] = None,
+    finding_tool: str | None = None,
+    x: float | None = None,
+    y: float | None = None,
+    radius: float | None = None,
+    layers: str | None = None,
+    side: Literal["auto", "top", "bottom"] = "auto",
+    units: PcbUnits | None = None,
+) -> str:
+    """Show where things lie on the board: nets, parts, pads, a spot, or the objects
+    findings name. Call it when the user wants to see where something is on the PCB, or
+    to point at findings from get_drc_report, check_dfm, check_testpoints,
+    check_decoupling or check_interfaces: pass the finding object(s) unchanged in
+    findings (one, or a list of up to 20) and the tool that gave them in finding_tool,
+    which sets their coordinate frame.
+
+    nets: comma-separated net names, differential pair names or regexes (as get_net_pcb
+    takes; 20 nets at most). parts: comma-separated designators (PCB, netlist, or a
+    sheet's logical one for every channel), or pads as U3-4 or U3.4. x and y: a spot,
+    absolute as query_pcb_region takes it (add origin_* to values relative to the board
+    origin); radius (default 50 mil) bounds what is listed near it. layers: the copper
+    layers shown first (names, or top, bottom, inner, all). side: the side viewed from
+    (bottom is mirrored, as Altium's flipped view); auto views from the bottom when all
+    the parts and pads asked for are there. units: mil or mm (default: the board's
+    display unit).
+
+    The text answers where things are in every host: each net's layers, counts and
+    extents, each part's side, position and rotation, marks with the nets and parts near
+    them, pad-to-pad distances for decoupling and TVS findings, the board third each
+    lies in, and what was not found, with suggestions. MCP Apps hosts also draw the
+    board, with the highlights, zoom, layer toggles and details."""
+    try:
+        project, netlist, _ = _require_project(netlist=False)
+    except ProjectNotReady as error:
+        return json.dumps(error.payload)
+    index, error = _pcb_session.get(project, netlist)
+    if error:
+        return json.dumps(error)
+    to_mm, unit_name, units_error = _pcb_units_or_error(index, units)
+    if units_error:
+        return json.dumps(units_error)
+    if (x is None) != (y is None) or (
+        x is not None and not (math.isfinite(x) and math.isfinite(y))
+    ):
+        return json.dumps({"error": "invalid_coordinate",
+                           "message": "x and y go together, and must be finite."})
+    if radius is not None and not _finite_nonnegative(radius):
+        return json.dumps({"error": "invalid_radius",
+                           "message": "radius must be finite and nonnegative."})
+    read_findings = None
+    if findings is not None:
+        read_findings = board_view.parse_findings(findings)
+        if read_findings is None:
+            return json.dumps({
+                "error": "invalid_findings",
+                "message": "findings takes one finding object, or a list of them, copied "
+                           "unchanged from finding_tool's result.",
+            })
+    schematic = None
+    if netlist is not None:
+        schematic = {name.lower() for name in [*(netlist.get("components") or {}),
+                                               *(netlist.get("pin_to_net") or {})]}
+    located = board_view.locate(
+        index, nets=nets, parts=parts, findings=read_findings, finding_tool=finding_tool,
+        point=None if x is None else (_input_to_mil(x, unit_name), _input_to_mil(y, unit_name)),
+        point_label=None if x is None else f"{x:g}, {y:g}",
+        radius_mil=50.0 if radius is None else _input_to_mil(radius, unit_name),
+        layers=layers, side=side, schematic=schematic,
+        is_dnp=lambda name: bool(name and _variant_state.is_dnp(name)),
+    )
+    asked = {key: value for key, value in (
+        ("nets", nets), ("parts", parts),
+        ("findings", None if read_findings is None
+         else {"count": len(read_findings), "finding_tool": finding_tool}),
+        ("finding_tool", finding_tool), ("x", x), ("y", y), ("radius", radius),
+        ("layers", layers), ("side", side), ("units", units),
+    ) if value is not None}
+    board = index.pcb.board
+    extents = board_view.board_extents(index)
+    pcb_path = Path(project["pcb_doc_paths"][0])
+    notes = []
+    if len(project["pcb_doc_paths"]) > 1:
+        notes.append(
+            f"Project lists {len(project['pcb_doc_paths'])} PcbDocs; using "
+            f"'{pcb_path.name}'. Others: "
+            + ", ".join(Path(path).name for path in project["pcb_doc_paths"][1:]))
+    if index.pcb.embedded_boards:
+        notes.append(f"The board holds "
+                     f"{board_view.counted(index.pcb.embedded_boards, 'embedded board array')} "
+                     "(a panel): their boards are not drawn or searched.")
+    if netlist is None:
+        notes.append(NETLIST_FREE_PCB_NOTE)
+    notes += located.notes
+    context = {
+        "pcb_doc": pcb_path.name,
+        "units": unit_name,
+        "frame": board_view.FRAME,
+        "origin_mil": {"x_mil": board.origin_x, "y_mil": board.origin_y},
+        "board_extents_mil": {"minx_mil": extents[0], "miny_mil": extents[1],
+                              "maxx_mil": extents[2], "maxy_mil": extents[3]},
+        "copper_layers": board_view.copper_layer_names(index),
+        "variant": _variant_state.active.name,
+        "asked": asked,
+    }
+    view = {
+        "side": located.side, "layers_on": located.layers_on, "window_mil": located.window,
+        "geometry_rev": _board_rev(project), "poured_copper": board_view.POURED_COPPER_NOTE,
+        "not_drawn": board_view.NOT_DRAWN,
+    }
+    for listed in board_view.SHRINK_STEPS:
+        result = {**context, "highlight": board_view.highlight_block(located, listed),
+                  "view": view, **({"notes": notes} if notes else {}),
+                  "note": board_view.VIEW_NOTE}
+        text = board_view.dumps_text(_convert_units(result, to_mm))
+        if len(text) <= QUERY_NET_MAX_RESULT_SIZE_CHARS:
+            break
+    return text
+
+
+@mcp.tool(
+    title="Board View Geometry",
+    annotations=ToolAnnotations(readOnlyHint=True),
+    meta=ui_views.app_only_meta(
+        {"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS}),
+    structured_output=False,
+)
+def get_board_view_geometry(rev: str, offset: int = 0) -> str:
+    """Pages of numbers for the board view. MCP Apps hosts call it from the view; never
+    call it to answer a question: use get_board_view, get_board_info, get_net_pcb,
+    get_component_placement or query_pcb_region. rev comes from get_board_view's result;
+    offset is the page number (next_offset)."""
+    try:
+        project, netlist, _ = _require_project(netlist=False)
+    except ProjectNotReady as error:
+        return json.dumps(error.payload)
+    index, error = _pcb_session.get(project, netlist)
+    if error:
+        return json.dumps(error)
+    current = _board_rev(project)
+    if rev != current:
+        return json.dumps({
+            "error": "board_changed", "rev": current,
+            "message": "The board changed since get_board_view answered (saved again, or "
+                       "another project or board loaded): call get_board_view again.",
+        })
+    export = board_view.export_for(index, current)
+    if not 0 <= offset < export.page_count:
+        return json.dumps({
+            "error": "invalid_offset", "pages": export.page_count,
+            "message": f"offset is a page number from 0 to {export.page_count - 1}.",
+        })
+    if offset:
+        return export.page(offset)
+    dnp = [number for number, name in enumerate(export.dnp_names)
+           if name and _variant_state.is_dnp(name)]
+    return export.page(0, _variant_state.active.name, dnp)
 
 
 # ---------- design rules, classes, differential pairs ----------

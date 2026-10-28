@@ -82,6 +82,9 @@ WORKING_TOOL_CALLS = {
     "get_net_neighbors": lambda: main.get_net_neighbors("CLK_A"),
     "query_pcb_region": lambda: main.query_pcb_region(100.0, 100.0),
     "get_component_placement": lambda: main.get_component_placement("R1"),
+    "get_board_view": lambda: main.get_board_view(nets="CLK_A", parts="R1"),
+    "get_board_view_geometry": lambda: main.get_board_view_geometry(
+        json.loads(main.get_board_view())["view"]["geometry_rev"]),
     "get_design_rules": lambda: main.get_design_rules(),
     "get_rules_for_net": lambda: main.get_rules_for_net("CLK_A"),
     "get_classes": lambda: main.get_classes(),
