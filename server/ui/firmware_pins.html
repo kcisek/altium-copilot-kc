@@ -1,0 +1,2523 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!--@csp-->
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Firmware pin map</title>
+<style>/*@shell.css*/</style>
+<style>
+/* Firmware pin map (roadmap #75): get_firmware_pin_map's pins as a table and a package
+   diagram coloured by function, its findings, and the tool's own CSV, C header and
+   devicetree text. The diagram is a layout by pin number (or ball name), labelled so, or
+   the pad centres the board gives (get_component_placement): never an invented footprint. */
+:root {
+  --f1: #2a78d6; --f2: #eb6834; --f3: #1baf7a; --f4: #eda100;
+  --f5: #e87ba4; --f6: #008300; --f7: #6250d6; --f8: #e34948;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --f1: #3987e5; --f2: #d95926; --f3: #199e70; --f4: #c98500;
+    --f5: #d55181; --f6: #008300; --f7: #9085e9; --f8: #e66767;
+  }
+}
+:root[data-theme="dark"] {
+  --f1: #3987e5; --f2: #d95926; --f3: #199e70; --f4: #c98500;
+  --f5: #d55181; --f6: #008300; --f7: #9085e9; --f8: #e66767;
+}
+.fam-serial { --fam: var(--f1); }
+.fam-debug { --fam: var(--f2); }
+.fam-bus { --fam: var(--f3); }
+.fam-i2c { --fam: var(--f4); }
+.fam-fast { --fam: var(--f5); }
+.fam-analog { --fam: var(--f6); }
+.fam-control { --fam: var(--f7); }
+.fam-user { --fam: var(--f8); }
+.fam-gpio, .fam-tied, .fam-open, .fam-power, .fam-ground, .fam-pad { --fam: var(--c-text3); }
+
+.head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 0 0 6px; }
+.head h1 { font-size: var(--fs-lg); margin: 0; font-weight: var(--fw-bold); }
+.head h1[tabindex="-1"]:focus { outline: none; }
+.head .meta { min-width: 0; overflow-wrap: anywhere; color: var(--c-text2); font-size: var(--fs-sm); }
+.head .grow { flex: 1 1 auto; }
+.argline { font-size: var(--fs-xs); color: var(--c-text3); margin: 0 0 8px; overflow-wrap: anywhere; }
+.argline code, .mono { font-family: var(--mono); }
+.block { border: 1px solid var(--c-line); border-radius: var(--radius); padding: 8px 12px; margin: 0 0 8px;
+         font-size: var(--fs-sm); }
+.block > summary { cursor: pointer; color: var(--c-text2); }
+.block h2 { font-size: var(--fs-md); margin: 0; display: inline; }
+.help { color: var(--c-text2); margin: 6px 0 0; overflow-wrap: anywhere; font-size: var(--fs-sm); }
+.cands { margin: 6px 0 0; padding: 0; list-style: none; }
+.cands li { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; padding: 3px 0;
+            border-bottom: 1px solid var(--c-line); }
+.cands .what { flex: 1 1 14em; min-width: 0; overflow-wrap: anywhere; }
+.sumline { font-size: var(--fs-sm); color: var(--c-text2); margin: 0 0 6px; overflow-wrap: anywhere; }
+.filters { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; margin: 0 0 6px; }
+.btn[aria-disabled="true"], .btn-link[aria-disabled="true"] { opacity: .5; cursor: default; }
+.btn-link:disabled { color: var(--c-text3); cursor: default; text-decoration: none; }
+.sub { display: block; font-size: var(--fs-xs); color: var(--c-text2); overflow-wrap: anywhere; }
+.tbl td.c-pin { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.tbl td.c-net { min-width: 9em; overflow-wrap: anywhere; }
+.tbl td.c-fn { min-width: 12em; }
+.tbl td.c-fn .sub { max-width: 22em; }
+.fn { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.fn .code { font: var(--fw-bold) var(--fs-xs) var(--mono); }
+svg.sw { flex: none; vertical-align: -1px; }
+.fcount { margin-left: 4px; }
+.pinlist { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 0; padding: 0; list-style: none; }
+.pinchip { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--c-border); border-radius: var(--radius-sm);
+           background: var(--c-bg); padding: 1px 6px; font-size: var(--fs-xs); cursor: pointer; }
+.pinchip[aria-pressed="true"] { border-color: var(--c-ring); background: var(--c-info-bg); }
+.pinchip.dim { opacity: .35; }
+.findpins { display: inline-flex; flex-wrap: wrap; gap: 2px 6px; }
+/* The package diagram. */
+.dtools { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin: 0 0 6px; }
+.layoutnote { font-size: var(--fs-xs); color: var(--c-text2); margin: 0 0 6px; overflow-wrap: anywhere; }
+.canvas { border: 1px solid var(--c-line); border-radius: var(--radius); overflow: auto; max-height: var(--pane-height);
+          background: var(--c-bg); }
+.canvas svg { display: block; }
+.canvas .pkg { fill: var(--c-bg2); stroke: var(--c-border); stroke-width: 1.5; }
+.canvas .pin1 { fill: var(--c-text3); }
+.canvas .pkgtext { font: 600 12px var(--font); fill: var(--c-text2); }
+.canvas .pkgsub { font: 10px var(--font); fill: var(--c-text3); }
+.canvas .axis { font: 9px var(--mono); fill: var(--c-text3); }
+.canvas .plabel { font: 9px var(--mono); fill: var(--c-text2); }
+.pinmark { cursor: pointer; }
+.pinmark .body, svg.sw .body { fill: var(--fam); fill-opacity: .32; stroke: var(--fam); stroke-width: 1.5; }
+.pinmark.fam-gpio .body, svg.sw.fam-gpio .body { fill: var(--c-bg3); fill-opacity: 1; stroke: var(--c-text3); }
+.pinmark.fam-tied .body, svg.sw.fam-tied .body { fill: var(--c-bg3); fill-opacity: 1; stroke: var(--c-text3); stroke-dasharray: 3 2; }
+.pinmark.fam-open .body, svg.sw.fam-open .body { fill: var(--c-bg); fill-opacity: 1; stroke: var(--c-text3); stroke-dasharray: 2 2; }
+.pinmark.fam-power .body, svg.sw.fam-power .body { fill: var(--c-text2); fill-opacity: 1; stroke: var(--c-text2); }
+.pinmark.fam-ground .body, svg.sw.fam-ground .body { fill: var(--c-text); fill-opacity: 1; stroke: var(--c-text); }
+.pinmark.fam-pad .body, svg.sw.fam-pad .body { fill: none; stroke: var(--c-text3); stroke-dasharray: 1 2; }
+.pinmark .code { font: 700 8px var(--mono); fill: var(--c-text); pointer-events: none; }
+.pinmark.fam-power .code, .pinmark.fam-ground .code { fill: var(--c-bg); }
+.pinmark .fmark { stroke: var(--c-bg); stroke-width: 1; }
+.pinmark .fmark.warning { fill: var(--c-warning); }
+.pinmark .fmark.info { fill: var(--c-info); }
+.pinmark.dim { opacity: .18; }
+.pinmark:hover .body { stroke-width: 2.5; }
+.pinmark:focus { outline: none; }
+.pinmark:focus-visible .body { stroke: var(--c-ring); stroke-width: 2.5; stroke-dasharray: 3 2; }
+.pinmark.sel .body, .pinmark.sel:focus-visible .body { stroke: var(--c-ring); stroke-width: 3.5; stroke-dasharray: none; }
+.slot-empty { fill: none; stroke: var(--c-border); stroke-dasharray: 1 3; }
+.readout { font-size: var(--fs-xs); color: var(--c-text2); margin: 4px 0 0; min-height: 1.45em; overflow-wrap: anywhere; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 6px 0 0; padding: 0; list-style: none; font-size: var(--fs-xs); }
+.legend li { display: inline-flex; align-items: center; gap: 5px; min-width: 0; overflow-wrap: anywhere; }
+.legend .codes { color: var(--c-text3); }
+/* Outputs: the tool's own text, read-only and selectable. */
+.outs { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0 0 8px; }
+.outpage { margin: 6px 0 10px; }
+.outpage .row { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; margin: 0 0 4px; font-size: var(--fs-xs);
+                color: var(--c-text2); }
+textarea.out { display: block; width: 100%; min-height: 3.5em; max-height: var(--pane-height); resize: vertical;
+               font: var(--fs-xs)/1.45 var(--mono); color: var(--c-text); background: var(--c-bg2);
+               border: 1px solid var(--c-line); border-radius: var(--radius-sm); padding: 6px 8px; tab-size: 4; }
+.sections h3 { font-size: var(--fs-sm); margin: 12px 0 4px; color: var(--c-text2); }
+.sections ul { margin: 2px 0; padding-left: 18px; font-size: var(--fs-sm); }
+.sections li { margin: 2px 0; overflow-wrap: anywhere; }
+.pane .summary { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
+.pane .summary .badge { white-space: normal; overflow-wrap: anywhere; }
+.pane h2[tabindex="-1"]:focus { outline: none; }
+.pane h2[tabindex="-1"]:focus-visible { outline: 2px solid var(--c-ring); outline-offset: 2px; }
+.pane dl.facts { grid-template-columns: fit-content(40%) minmax(0, 1fr); margin-top: 8px; }
+.pane dl.facts dt { min-width: 0; overflow-wrap: anywhere; }
+.pane ul.flat { list-style: none; padding: 0; margin: 4px 0; }
+.pane ul.flat li { margin: 3px 0; overflow-wrap: anywhere; }
+.pane .btn-row .btn { white-space: normal; overflow-wrap: anywhere; text-align: left; max-width: 100%; }
+.answer { border-top: 1px solid var(--c-line); margin: 8px 0 0; padding: 6px 0 0; }
+.answer h4 { font-size: var(--fs-sm); margin: 0 0 4px; overflow-wrap: anywhere; font-weight: var(--fw-medium); }
+.foot { font-size: var(--fs-xs); color: var(--c-text3); margin: 8px 0 0; overflow-wrap: anywhere; }
+.notes li { overflow-wrap: anywhere; margin: 3px 0; }
+/* A short host 980 px wide or less: the selected pin's details take the main pane's place
+   (Close or Esc brings it back), rather than both shrinking to a few rows. */
+@media (max-width: 980px) {
+  .split.solo > .content { display: none; }
+}
+@media (max-width: 600px) {
+  .block { padding: 6px 8px; }
+  .head h1 { font-size: var(--fs-md); }
+  .head .meta { order: 5; flex-basis: 100%; }
+}
+#app.short .block { padding: 4px 8px; margin-bottom: 6px; }
+#app.short .head { margin-bottom: 2px; }
+#app.short .argline { margin-bottom: 4px; }
+</style>
+</head>
+<body>
+<main id="app"></main>
+<script type="application/json" id="data-contract">
+{
+  "tool": "get_firmware_pin_map",
+  "max_pages": 60,
+  "outputs": {"csv": "CSV", "c_header": "C header", "devicetree": "Devicetree"},
+  "checks": ["uart_crossing", "debug_access", "boot_straps", "external_memory", "unused_pins",
+             "conflicting_assignment", "variant_changes"],
+  "check_titles": {
+    "uart_crossing": "UART and CAN crossing",
+    "debug_access": "Debug access",
+    "boot_straps": "Boot and strap pins",
+    "external_memory": "External memory",
+    "unused_pins": "Unused pins",
+    "conflicting_assignment": "Conflicting assignment",
+    "variant_changes": "Variant changes"
+  },
+  "families": {
+    "serial": "UART and CAN",
+    "debug": "Debug and programming",
+    "bus": "SPI, QSPI, SDIO and memory buses",
+    "i2c": "I2C and I2S",
+    "fast": "USB, Ethernet, high speed and RF",
+    "analog": "Analog and PWM",
+    "control": "Clock, reset, boot and control",
+    "user": "LEDs, buttons, display and camera",
+    "gpio": "GPIO, nothing names its use",
+    "tied": "Tied to a rail or ground",
+    "open": "Not connected",
+    "power": "Power",
+    "ground": "Ground"
+  },
+  "functions": {
+    "uart": ["serial", "UA", "UART"],
+    "debug_uart": ["serial", "DU", "debug UART"],
+    "can": ["serial", "CA", "CAN"],
+    "swd": ["debug", "SW", "SWD"],
+    "jtag": ["debug", "JT", "JTAG"],
+    "programming": ["debug", "PG", "programming"],
+    "spi": ["bus", "SP", "SPI"],
+    "qspi": ["bus", "QS", "QSPI"],
+    "sdio": ["bus", "SD", "SDIO"],
+    "memory_bus": ["bus", "MB", "memory bus"],
+    "i2c": ["i2c", "I2", "I2C"],
+    "i2s": ["i2c", "IS", "I2S"],
+    "usb": ["fast", "US", "USB"],
+    "ethernet": ["fast", "ET", "Ethernet"],
+    "high_speed": ["fast", "HS", "high speed"],
+    "rf": ["fast", "RF", "RF"],
+    "analog": ["analog", "AN", "analog"],
+    "pwm_timer": ["analog", "PW", "PWM or timer"],
+    "crystal": ["control", "XT", "crystal"],
+    "reset": ["control", "RS", "reset"],
+    "boot_strap": ["control", "BT", "boot or strap"],
+    "enable": ["control", "EN", "enable"],
+    "interrupt": ["control", "IQ", "interrupt"],
+    "wakeup": ["control", "WK", "wake-up"],
+    "led": ["user", "LD", "LED"],
+    "button": ["user", "BN", "button"],
+    "display": ["user", "DP", "display"],
+    "camera": ["user", "CM", "camera"],
+    "gpio": ["gpio", "IO", "GPIO"],
+    "unknown": ["gpio", "??", "unknown"],
+    "tied": ["tied", "TI", "tied"],
+    "unconnected": ["open", "--", "not connected"],
+    "nc": ["open", "NC", "NC by name"],
+    "power": ["power", "+", "power"],
+    "ground": ["ground", "G", "ground"]
+  },
+  "layout": {
+    "number": "^[1-9][0-9]{0,3}$",
+    "ball": "^([A-Z]{1,3})([1-9][0-9]{0,2})$",
+    "min_pins": 4,
+    "min_share": 0.75,
+    "min_fill": 0.9,
+    "quad_from": 32
+  },
+  "shapes": {
+    "result": {
+      "required": ["variant", "heuristic", "candidates_total", "candidates", "mapped", "rows_total", "findings",
+                   "total", "offset", "has_more", "notes"],
+      "optional": ["netlist_updated_utc", "checks_run", "summary", "severity_counts", "overview", "power_pins",
+                   "rows", "csv", "c_header", "devicetree", "debug_access", "boot_straps", "external_memory",
+                   "next_offset", "not_checked", "page_limited_to"]
+    },
+    "candidates[]": {
+      "required": ["designator", "kind", "score", "gpio_named_pins", "io_typed_pins", "pins", "basis"],
+      "optional": ["part", "port_scheme", "not_fitted"]
+    },
+    "overview[]": {
+      "required": ["designator", "pins", "signal_pins", "power_pins", "ground_pins", "not_connected",
+                   "gpio_named_pins", "port_parsed", "functions"],
+      "optional": []
+    },
+    "rows[]": {
+      "required": ["pin", "net", "function"],
+      "optional": ["mcu", "name", "port", "bit", "type", "role", "basis", "alternates", "pulls", "peers",
+                   "peers_total", "not_fitted_paths", "same_part_pins", "unused"]
+    },
+    "rows[].peers[]": {"required": ["designator", "pin", "kind"], "optional": ["name", "through"]},
+    "rows[].pulls[]": {"required": ["designator", "direction", "to", "value"],
+                       "optional": ["on", "pins", "to_signal", "not_fitted"]},
+    "findings[]": {
+      "required": ["check", "severity", "mcu", "issue"],
+      "optional": ["pin", "pins", "debug_pins", "net", "designators", "peer", "peer_class", "certain", "level",
+                   "interface", "interfaces", "memory", "bus", "parts", "values"],
+      "objects": ["parts", "values"]
+    }
+  }
+}
+</script>
+<script>/*@shell.js*/</script>
+<script>
+(() => {
+  "use strict";
+  const { el, svg, clear } = Shell;
+  const CONTRACT = JSON.parse(document.getElementById("data-contract").textContent);
+  const app = document.getElementById("app");
+  const TOOL = CONTRACT.tool;
+
+  // The read-only tools the page calls: the map itself (another mcu=, its pages, the
+  // outputs' formats), query_net and get_component for a pin's details, and
+  // get_component_placement for the board's pad centres.
+  const READ_ONLY_TOOLS = new Set(["get_firmware_pin_map", "query_net", "get_component", "get_component_placement"]);
+  const MAX_PAGES = CONTRACT.max_pages;
+  const OUTPUTS = CONTRACT.outputs;  // format -> its label; the tool's text is under the same key
+  const OUTPUT_KEYS = Object.keys(OUTPUTS);
+  const CHECKS = CONTRACT.checks;
+  const CHECK_TITLES = CONTRACT.check_titles;
+  const FAMILIES = CONTRACT.families;
+  const FAMILY_ORDER = Object.keys(FAMILIES);
+  const FUNCTIONS = CONTRACT.functions;
+  const FUNCTION_ORDER = Object.keys(FUNCTIONS);
+  const LAYOUT = CONTRACT.layout;
+  const NUMBER = new RegExp(LAYOUT.number);
+  const BALL = new RegExp(LAYOUT.ball);
+  const SEVERITY_RANK = { warning: 0, info: 1 };
+  const PITCH = 18;     // pin pitch on the sides (SVG units)
+  const PIN_LEN = 30;   // a pin's length out of the body
+  const CELL = 22;      // a ball's cell in the grid
+
+  const view = {
+    args: {}, argsKnown: false,  // the tool call's arguments as the host sent them
+    data: null, resultSig: "", gen: 0, closed: false, busy: "", headError: "", noticeSig: "",
+    tab: "pins", query: "", groupBy: "function", chipsOn: null, findGroup: "check",
+    tables: {},           // the Pins and Findings tables' sort and shown columns, kept across redraws
+    selected: null,       // {kind: "pin", key} | {kind: "finding", id}
+    part: null, layout: null, labels: "number", padLabels: "code", scale: 1, autoFit: true, hover: "",
+    // format -> {loading, args} | {pages, args, stopped, next, fromResult} | {error, args, pages}
+    // (next: the offset to read on from, null when every page is read)
+    outputFormat: null, outputs: new Map(),
+    filtersOpen: null, candsOpen: null, aboutOpen: false, auto: { filters: true, cands: true },
+  };
+  const ui = {};
+  // Detail answers: one entry per (tool, arguments): {loading} | {text} | {error}. A
+  // failure is shown with Retry and never kept as the answer.
+  const answers = new Map();
+
+  // ---------- helpers ----------
+
+  const canCall = () => Shell.canCallTools();
+  const plural = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
+  const pinKey = (mcu, pin) => `${mcu}\u0001${pin}`;
+  const isObject = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  const listOf = (value) => (Array.isArray(value) ? value : []);
+  // A table looked up by a string from the result: its own keys only, never a member of
+  // Object.prototype ("constructor", "__proto__", "toString").
+  const own = (table, key) => (isObject(table) && Object.prototype.hasOwnProperty.call(table, key) ? table[key] : undefined);
+  const fnInfo = (fn) => {
+    const spec = own(FUNCTIONS, fn);
+    return spec ? { family: spec[0], code: spec[1], label: spec[2] } : { family: "gpio", code: "??", label: String(fn || "unknown") };
+  };
+  const famOf = (fn) => fnInfo(fn).family;
+  const fnRank = (fn) => {
+    const at = FUNCTION_ORDER.indexOf(fn);
+    return at < 0 ? FUNCTION_ORDER.length : at;
+  };
+  const checkTitle = (check) => own(CHECK_TITLES, check) || String(check || "").replace(/_/g, " ");
+  const sevRank = (severity) => own(SEVERITY_RANK, severity) ?? 2;
+  /** A severity badge: warning and info coloured, any other word plain. */
+  const sevBadge = (severity) => Shell.levelBadge(own(SEVERITY_RANK, severity) === undefined ? "" : severity, String(severity ?? ""));
+  const narrowHost = () => window.innerWidth <= 600;
+
+  /** The height the page may take: the host's (fixed or maximum), else in full screen the
+   *  window's own (a host may give no dimensions there); 0 for no limit. */
+  function hostHeight() {
+    const dims = Shell.context().containerDimensions || {};
+    const limit = Number(dims.height || dims.maxHeight) || 0;
+    return limit || (Shell.context().displayMode === "fullscreen" ? window.innerHeight : 0);
+  }
+
+  /** True when the host gives the page at least this height, or sets no limit (full screen
+   *  counts its own height too). */
+  function tall(height) {
+    const limit = hostHeight();
+    return !limit || limit >= height;
+  }
+
+  /** A short or narrow host: the filters, candidates and notes wait behind disclosures. Open,
+   *  they take about 550 px above and below the table or diagram, so a host under 800 px
+   *  folds them (else the panes shrink to a few rows and the page outgrows the host). */
+  const short = () => !Shell.roomy() || !tall(800);
+
+  /** A host 980 px wide or less and too short for the main pane and the details stacked
+   *  (under 1100 px): a selected pin's details take the main pane's place there. */
+  const compactHost = () => window.innerWidth <= 980 && !tall(1100);
+
+  /** A call's arguments as text: mcu="U2", checks=[...], format="csv" (offset left out). */
+  function argText(args) {
+    const parts = [];
+    if (args.mcu) parts.push(`mcu="${args.mcu}"`);
+    if (args.format && args.format !== "table") parts.push(`format="${args.format}"`);
+    if (args.checks && args.checks.length) parts.push(`checks=[${args.checks.map((check) => `"${check}"`).join(", ")}]`);
+    if (args.offset) parts.push(`offset=${args.offset}`);
+    return `${TOOL}(${parts.join(", ")})`;
+  }
+
+  /** The arguments the view keeps and asks with: mcu and checks (format and offset are
+   *  set per call). */
+  function cleanArgs(args) {
+    const out = {};
+    if (args && typeof args.mcu === "string" && args.mcu.trim()) out.mcu = args.mcu.trim();
+    if (args && Array.isArray(args.checks) && args.checks.length) out.checks = args.checks.map(String);
+    return out;
+  }
+
+  /** Arguments that give this result again when the host did not send the call's: the
+   *  parts it mapped and the checks it ran (or could not). */
+  function inferredArgs(first) {
+    const args = {};
+    if (Array.isArray(first.mapped) && first.mapped.length) args.mcu = first.mapped.join(",");
+    const ran = [...(first.checks_run || []), ...Object.keys(first.not_checked || {})];
+    if (ran.length && CHECKS.some((check) => !ran.includes(check))) args.checks = CHECKS.filter((check) => ran.includes(check));
+    return args;
+  }
+
+  const sameArgs = (a, b) => JSON.stringify(cleanArgs(a)) === JSON.stringify(cleanArgs(b));
+
+  // ---------- data contract ----------
+
+  function rowsAt(data, path) {
+    if (path === "result") return [data];
+    let rows = [data];
+    for (const part of path.split(".")) {
+      const key = part.replace(/\[\]$/, "");
+      rows = rows.flatMap((row) => {
+        const value = row && typeof row === "object" ? row[key] : undefined;
+        if (part.endsWith("[]")) return Array.isArray(value) ? value : [];
+        return value === undefined || value === null ? [] : [value];
+      });
+    }
+    return rows;
+  }
+
+  function checkContract(data) {
+    const problems = [];
+    for (const [path, shape] of Object.entries(CONTRACT.shapes)) {
+      for (const key of shape.required) {
+        const missing = rowsAt(data, path).filter((row) => !(key in row)).length;
+        if (missing) problems.push(`${path}: ${key} missing in ${missing} row(s)`);
+      }
+      // Fields that are objects by name (a variant finding's parts and values).
+      for (const key of shape.objects || []) {
+        const wrong = rowsAt(data, path).filter((row) => key in row && !isObject(row[key])).length;
+        if (wrong) problems.push(`${path}: ${key} not an object in ${wrong} row(s)`);
+      }
+    }
+    return problems;
+  }
+
+  // ---------- tool calls: one at a time ----------
+
+  // Teardown rejects every call still waiting: the closed view waits for no answer.
+  let closeCalls = () => {};
+  const whenClosed = new Promise((resolve, reject) => {
+    closeCalls = () => reject(new Error("the view was closed"));
+  });
+  whenClosed.catch(() => {});
+  let queue = Promise.resolve();
+
+  /** Call one of the page's read-only tools through the shell (which checks serverTools).
+   *  Calls run one at a time: each waits for the one before it to be answered. */
+  function call(tool, args) {
+    if (!READ_ONLY_TOOLS.has(tool)) return Promise.reject(new Error(`The view does not call ${tool}.`));
+    if (view.closed) return Promise.reject(new Error("the view was closed"));
+    if (!canCall()) return Promise.reject(new Error(`this host does not let the view call ${tool}`));
+    const run = queue.then(() => {
+      if (view.closed) throw new Error("the view was closed");
+      return Promise.race([Shell.callTool(tool, args), whenClosed]);
+    });
+    queue = run.catch(() => {});
+    return run;
+  }
+
+  const answerKey = (tool, args) => `${tool} ${JSON.stringify(args)}`;
+
+  /** Ask a read-only tool for a selection's details, once: an answer is kept, a failure
+   *  is asked again (Retry). */
+  async function askDetail(tool, args) {
+    if (!READ_ONLY_TOOLS.has(tool)) return;
+    const key = answerKey(tool, args);
+    const entry = answers.get(key);
+    if ((entry && !entry.error) || view.closed || !canCall()) {
+      redrawFor(tool);
+      return;
+    }
+    answers.set(key, { loading: true });
+    redrawFor(tool);
+    try {
+      const result = await call(tool, args);
+      answers.set(key, { text: Shell.resultText(result) });
+      Shell.announce(`${tool} answered`);
+    } catch (error) {
+      answers.set(key, { error: view.closed ? "the view was closed" : error.message });
+      if (!view.closed) Shell.announce(`${tool} failed`);
+    }
+    redrawFor(tool);
+  }
+
+  function askAgain(tool, args) {
+    const key = answerKey(tool, args);
+    const entry = answers.get(key);
+    if (entry && entry.loading) return;
+    answers.delete(key);
+    askDetail(tool, args);
+  }
+
+  function parsedAnswer(entry) {
+    try {
+      return { json: JSON.parse(entry.text), text: entry.text };
+    } catch (error) {
+      return { json: null, text: entry.text };
+    }
+  }
+
+  /** Redraw what shows a tool's answers: the details pane, and the package diagram for the
+   *  board's pads. */
+  function redrawFor(tool) {
+    if (tool === "get_component_placement" && view.tab === "package") renderTab();
+    renderPane();
+  }
+
+  // ---------- reading the map ----------
+
+  function showState(kind, title, detail) {
+    clear(app).appendChild(Shell.state(kind, title, detail));
+  }
+
+  const ERROR_TITLES = {
+    no_project: "No project is loaded",
+    netlist_required: "The project was loaded without a netlist",
+    no_components_loaded: "The netlist has no component data",
+    mcu_not_found: "No such part in the netlist",
+    invalid_format: "get_firmware_pin_map does not know this format",
+    invalid_checks: "get_firmware_pin_map does not know these checks",
+  };
+  const INFO_ERRORS = new Set(["no_project", "netlist_required", "no_components_loaded", "mcu_not_found"]);
+
+  function showError(payload, asked) {
+    const kind = INFO_ERRORS.has(payload.error) ? "info" : "error";
+    clear(app).appendChild(Shell.state(kind, own(ERROR_TITLES, payload.error) || `${TOOL} answered with an error`,
+                                       payload.message || payload.error));
+    if (asked) app.appendChild(el("p", { class: "argline", text: `Asked: ${argText(asked)}.` }));
+    if (payload.error === "mcu_not_found" && asked && asked.mcu) {
+      app.appendChild(canCall() && !view.closed
+        ? el("div", { class: "btn-row" }, el("button", { type: "button", class: "btn", text: "Show the candidates",
+            title: `${TOOL}() without mcu=: the processors it finds, ranked`,
+            on: { click: () => reask({ mcu: null }, "the ranked candidates") } }))
+        : el("p", { class: "help", text: view.closed ? "The view was closed: it asks the server nothing more."
+          : "Ask Claude for the pin map without mcu= to see the processors it finds." }));
+    }
+  }
+
+  const stamp = (page) => page.netlist_updated_utc ?? null;
+
+  /** A page whose netlist is not the first page's (the netlist read again, or another project
+   *  loaded, between two pages): its pins are of other files, so the map is read again. */
+  function changedError(page, expect) {
+    const error = new Error(`the netlist changed while the view read the pages (updated ${stamp(page) || "?"}, the first page ${stamp(expect) || "?"})`);
+    error.changed = true;
+    return error;
+  }
+
+  async function mapPage(args, offset, expect) {
+    const page = Shell.resultJson(await call("get_firmware_pin_map", { ...args, format: "table", offset }));
+    if (page && page.error) throw new Error(page.message || page.error);
+    if (!page || !Array.isArray(page.findings)) throw new Error("it is not a pin map");
+    // A page of another map (other parts, another variant, the files changed) is not merged.
+    if (expect && stamp(page) !== stamp(expect)) throw changedError(page, expect);
+    if (expect && (page.variant !== expect.variant || page.rows_total !== expect.rows_total ||
+                   page.total !== expect.total || String(page.mapped) !== String(expect.mapped))) {
+      throw new Error(`it is not a page of this map (${page.variant}, ${plural(page.rows_total, "row")})`);
+    }
+    return page;
+  }
+
+  function progress(text) {
+    if (view.data && ui.header) {
+      view.busy = text;
+      renderHeadBlocks();
+    } else {
+      showState("loading", "Reading the pin map", text);
+    }
+  }
+
+  async function loadResult(result) {
+    // A result the host marks as an error is drawn as one, never as a map.
+    if (result && result.isError) {
+      showState("error", `${TOOL} failed`, Shell.resultText(result).slice(0, 400) || "The host marked the result as an error.");
+      return;
+    }
+    const text = Shell.resultText(result);
+    // The same result again (a host may send it twice, even while the first is still being
+    // read): what is drawn, or being read, stays; it is read once.
+    if (text && text === view.resultSig) return;
+    let first;
+    try {
+      first = Shell.resultJson(result);
+    } catch (error) {
+      showState("error", "The pin map could not be read", error.message);
+      return;
+    }
+    view.resultSig = text;
+    const asked = view.argsKnown ? { ...cleanArgs(view.args), format: view.args.format, offset: view.args.offset } : null;
+    await loadFrom(first, asked, "claude");
+  }
+
+  // The offset a text-format page reads on from: a page past the last pin carries
+  // findings only and is not read.
+  const textNext = (page) => (page.has_more && page.next_offset !== undefined && page.next_offset < page.rows_total ? page.next_offset : null);
+  const mapNext = (page) => (page.has_more && page.next_offset !== undefined ? page.next_offset : null);
+
+  /**
+   * Read a get_firmware_pin_map result: from offset 0 when it is a later page, again as
+   * the table when it is a text format (csv, c_header, devicetree), then every page after
+   * it with the same mcu and checks. asked: the call's arguments, or null when the host did
+   * not send them (then the parts and checks the result names). origin: "claude" or "view".
+   * gen: this read's turn; a later read (another result, the view asking again) makes it
+   * stop and draw nothing.
+   */
+  async function loadFrom(first, asked, origin, gen = ++view.gen) {
+    const current = () => gen === view.gen;
+    if (!first || typeof first !== "object") {
+      showState("error", "The pin map could not be read", "The result is not a pin map.");
+      return;
+    }
+    if (first.error) {
+      if (view.data && origin === "view") throw new Error(first.message || first.error);
+      view.data = null;
+      showError(first, asked);
+      return;
+    }
+    const args = asked ? cleanArgs(asked) : inferredArgs(first);
+    const notes = [];
+    const reasons = [];
+    let again = false;  // what is read cannot be read on from: Read again asks from offset 0
+    if (!asked) notes.push(`The host did not send the call's arguments: the view reads with ${argText(args)}, the parts and checks this result names.`);
+    const textKey = OUTPUT_KEYS.find((key) => typeof first[key] === "string");
+    let given = null;
+    if (textKey) {
+      given = first;
+      if (!canCall() || view.closed) {
+        drawTextOnly(first, textKey, args, view.closed ? "the view was closed" : `this host does not let the view ask ${TOOL} again for the table`);
+        return;
+      }
+      progress(`The call asked for format ${textKey}: asking ${TOOL} again for the table.`);
+      try {
+        first = await mapPage(args, 0, null);
+      } catch (error) {
+        if (current()) drawTextOnly(given, textKey, args, `${TOOL} could not be asked again for the table: ${error.message}`);
+        return;
+      }
+      if (!current()) return;
+    } else if (first.offset > 0 && canCall() && !view.closed) {
+      // A later page: the earlier rows and findings come with the first page.
+      progress(`Asking ${TOOL} for its first page.`);
+      try {
+        const later = first.offset;
+        first = await mapPage(args, 0, first);
+        notes.push(`The result was a later page (offset ${later}): the view read the map again from offset 0.`);
+      } catch (error) {
+        reasons.push(`its first page could not be read: ${error.message}`);
+      }
+      if (!current()) return;
+    }
+    if (first.offset > 0) {
+      reasons.unshift(`this result starts at offset ${first.offset}, so its first ${plural(first.offset, "row")} and findings are not in it`);
+      again = true;
+    }
+    const state = { first, last: first, rows: [...(first.rows || [])], findings: [...(first.findings || [])],
+                    warnings: checkContract(first), pages: 1, args, asked, origin, notes, reasons, again, stop: "" };
+    // The first page counts: a stop says "at most 60 pages" after 60 pages read.
+    await readRest(state, gen, Shell.pageBudget(MAX_PAGES, 1));
+    if (!current()) return;
+    if (given) keepTextResult(textKey, given, state);
+    finish(state);
+  }
+
+  /** The call's own text page, for the Outputs tab (shown there first): kept when it is the
+   *  first page of this map's netlist, else asked again there; the note says which. */
+  function keepTextResult(format, page, state) {
+    const label = OUTPUTS[format];
+    const kept = !page.offset && stamp(page) === stamp(state.first) && page.variant === state.first.variant;
+    const next = kept ? textNext(page) : null;
+    if (kept) view.outputs.set(format, { pages: [page], args: state.args, stopped: "", next, fromResult: true });
+    view.outputFormat = format;
+    state.notes.push(`The call asked for format ${format}: the view asked ${TOOL} again for the table with ${argText(state.args)}; ` +
+      (!kept ? `the Outputs tab asks the tool for the ${label} text again, from offset 0 (the call's page ${page.offset ? `starts at offset ${page.offset}` : "is of another netlist or variant"}).`
+        : next !== null ? `the call's own first page of the ${label} text is in the Outputs tab, which reads the other pages when asked.`
+        : `the call's own ${label} text is in the Outputs tab.`));
+  }
+
+  /** Read the map's pages after state.last, at most budget's pages. A failed page stops the
+   *  reading with its reason (Read the rest goes on from it); a page of another netlist
+   *  stops it too, and only a new read from offset 0 goes on. */
+  async function readRest(state, gen, budget) {
+    let failed = null;
+    const { pages, stopped } = await Shell.readPages({
+      first: state.last, tool: TOOL, budget, closed: () => view.closed || gen !== view.gen,
+      pageOffset: mapNext,
+      getPage: async (offset) => {
+        try {
+          return await mapPage(state.args, offset, state.first);
+        } catch (error) {
+          failed = error;
+          throw error;
+        }
+      },
+      onPage: (page) => {
+        state.rows.push(...(page.rows || []));
+        state.findings.push(...(page.findings || []));
+        state.warnings.push(...checkContract(page));
+        state.last = page;
+      },
+      progress: (page, offset) => progress(`${TOOL} pages its pins: page ${state.pages + page - 1} (offset ${offset}).`),
+    });
+    // readPages counts the page it starts from, which is already counted here, and names a
+    // failed page by that count: pages are numbered from offset 0 here.
+    const read = state.pages + pages - 1;
+    state.pages = read;
+    if (failed && failed.changed) state.again = true;
+    // A page the closed view stopped waiting for: the reason is the closing.
+    state.stop = !stopped ? "" : view.closed ? "the view was closed" : stopped.replace(/^page \d+ of/, `page ${read + 1} of`);
+  }
+
+  /** Draw what a read gave: the model, the selection kept when it is the same map. */
+  function finish(state) {
+    const previous = view.data;
+    view.textOnly = false;
+    view.data = buildModel(state.first, state.rows, state.findings, {
+      args: state.args, asked: state.asked, origin: state.origin, notes: state.notes, pages: state.pages,
+      warnings: [...new Set(state.warnings)], read: state,
+      stopReason: [...state.reasons, state.stop].filter(Boolean).join("; ").replace(/[.\s]+$/, ""),
+    });
+    view.busy = "";
+    view.headError = "";
+    // Another map (other parts, another variant or netlist): its selection, layout, pads
+    // and outputs do not carry over.
+    const same = previous && String(previous.mapped) === String(view.data.mapped) && previous.variant === view.data.variant &&
+      previous.netlist === view.data.netlist;
+    if (!same) {
+      view.selected = null;
+      view.part = view.data.mapped[0] || null;
+      view.layout = null;
+      view.chipsOn = null;
+      // An output is kept only when asked with these arguments of this netlist and variant
+      // (the call's own text page is checked so before it is kept).
+      for (const [format, entry] of view.outputs) {
+        const page = entry.pages && entry.pages[0];
+        const fresh = page ? stamp(page) === view.data.netlist && page.variant === view.data.variant : !previous;
+        if (!entry.args || !sameArgs(entry.args, state.args) || !fresh) view.outputs.delete(format);
+      }
+    } else if (view.selected && view.selected.kind === "pin" && !view.data.byKey.has(view.selected.key)) {
+      view.selected = null;
+    }
+    if (view.selected && view.selected.kind === "finding") view.selected = null;
+    renderAll();
+    Shell.announce(view.data.mapped.length
+      ? `Pin map of ${view.data.mapped.join(", ")}: ${plural(view.data.rows.length + view.data.power.length, "pin")}`
+      : "No processor found");
+  }
+
+  /** Read on from where the reading stopped (a failed page, the page budget), or read the
+   *  map again from offset 0 when what was read cannot be read on from (another netlist,
+   *  a later page whose first page failed). */
+  async function resumeRead() {
+    const data = view.data;
+    if (!data || !data.read || view.busy || view.closed || !canCall()) return;
+    const next = mapNext(data.read.last);
+    if (data.read.again || next === null) {
+      reask({}, "the map again from offset 0");
+      return;
+    }
+    const gen = ++view.gen;
+    const mark = Shell.focusMark(app);
+    const state = { ...data.read, rows: [...data.read.rows], findings: [...data.read.findings],
+                    warnings: [...data.read.warnings], stop: "" };
+    view.busy = `Reading the rest of the map from offset ${next}…`;
+    view.headError = "";
+    renderHeadBlocks();
+    Shell.announce(view.busy);
+    await readRest(state, gen, Shell.pageBudget(MAX_PAGES));
+    if (gen !== view.gen) return;
+    finish(state);
+    if (mark) Shell.refocus(app, mark, () => ui.headline || null);
+  }
+
+  /** Ask get_firmware_pin_map again with other arguments (a candidate, the default): the
+   *  map drawn stays until the answer arrives, and stays when the call fails. */
+  async function reask(change, what) {
+    if (view.busy || view.closed || !canCall()) return;
+    const base = view.data ? view.data.args : cleanArgs(view.args);
+    const args = cleanArgs({ ...base, ...change, mcu: change.mcu === null ? undefined : (change.mcu || base.mcu) });
+    const gen = ++view.gen;
+    const mark = Shell.focusMark(app);
+    if (view.data && ui.header) {
+      view.busy = `Asking ${TOOL} for ${what}…`;
+      view.headError = "";
+      renderHeadBlocks();
+    } else {
+      showState("loading", "Reading the pin map", `Asking ${TOOL} for ${what}.`);
+    }
+    Shell.announce(`Asking ${TOOL} for ${what}`);
+    try {
+      const first = Shell.resultJson(await call("get_firmware_pin_map", { ...args, format: "table", offset: 0 }));
+      if (gen !== view.gen) return;
+      if (first && first.error && view.data) throw new Error(first.message || first.error);
+      await loadFrom(first, args, "view", gen);
+    } catch (error) {
+      if (gen !== view.gen) return;
+      view.busy = "";
+      if (view.data && ui.header) {
+        // After teardown the page only says the view was closed.
+        if (!view.closed) view.headError = `Asking ${TOOL} for ${what} failed: ${error.message}`;
+        renderHeadBlocks();
+        if (!view.closed) Shell.announce(view.headError);
+      } else {
+        showState(view.closed ? "info" : "error", view.closed ? "The view was closed" : "The pin map could not be read",
+                  view.closed ? "It asks the server nothing more." : error.message);
+      }
+    }
+    if (mark) Shell.refocus(app, mark, () => ui.headline || null);
+  }
+
+  /** A text-format result the view cannot ask again as a table: the tool's own text, as
+   *  it gave it, with the reason. */
+  function drawTextOnly(page, format, args, why) {
+    view.data = null;
+    view.textOnly = true;
+    const total = page.rows_total || 0;
+    const end = page.has_more && page.next_offset !== undefined ? page.next_offset : total;
+    const area = el("textarea", { class: "out", readonly: true, rows: "18", wrap: "off", spellcheck: "false",
+                                  "aria-label": `${OUTPUTS[format]} text from ${TOOL}` });
+    area.value = page[format];
+    // Shell.append leaves out the null of a page that holds every pin.
+    Shell.append(clear(app), [
+      el("div", { class: "head" }, el("h1", { text: "Firmware pin map", tabindex: "-1" }),
+        el("span", { class: "meta", text: [(page.mapped || []).join(", "), page.variant ? `variant ${page.variant}` : null].filter(Boolean).join(" · ") })),
+      el("p", { class: "argline", text: `Answer: ${argText({ ...args, format, offset: page.offset })}.` }),
+      Shell.notice("info", `The call asked for the ${OUTPUTS[format]} text and ${why}: it is shown as the tool wrote it, without the table, diagram and findings.`),
+      page.offset > 0 || textNext(page) !== null ? Shell.notice("warning", `This page holds pins ${(page.offset || 0) + 1} to ${Math.min(end, total)} of ${total}: ask Claude for the others (offset ${textNext(page) !== null ? page.next_offset : 0}).`) : null,
+      el("div", { class: "outpage" }, area),
+    ]);
+  }
+
+  // ---------- the model ----------
+
+  function buildModel(first, rawRows, findings, meta) {
+    const mapped = (first.mapped || []).map(String);
+    const single = mapped.length === 1 ? mapped[0] : "";
+    const rows = [];
+    const byKey = new Map();
+    let doubles = 0;
+    for (const raw of rawRows) {
+      const mcu = String(raw.mcu || single);
+      const key = pinKey(mcu, raw.pin);
+      if (byKey.has(key)) { doubles += 1; continue; }
+      const row = { ...raw, mcu, pin: String(raw.pin), _key: key, _power: false };
+      rows.push(row);
+      byKey.set(key, row);
+    }
+    // Power and ground pins: the tool summarises them per net, without pin names.
+    const power = [];
+    for (const [mcu, groups] of Object.entries(first.power_pins || {})) {
+      for (const [fn, nets] of Object.entries(groups || {})) {
+        for (const [net, pins] of Object.entries(nets || {})) {
+          for (const pin of pins || []) {
+            const key = pinKey(mcu, pin);
+            if (byKey.has(key)) { doubles += 1; continue; }
+            // "(not connected)" is the tool's word for a power pin with no net.
+            const row = { mcu, pin: String(pin), net: net === "(not connected)" ? null : net,
+                          function: fn === "ground" ? "ground" : "power", _key: key, _power: true };
+            power.push(row);
+            byKey.set(key, row);
+          }
+        }
+      }
+    }
+    const listed = findings.map((finding, index) => ({ ...finding, _id: index, _pins: findingPins(finding) }));
+    listed.sort((a, b) => sevRank(a.severity) - sevRank(b.severity) || a._id - b._id);
+    const findingsByPin = new Map();
+    for (const finding of listed) {
+      for (const pin of finding._pins) {
+        const key = pinKey(finding.mcu, pin);
+        if (!findingsByPin.has(key)) findingsByPin.set(key, []);
+        findingsByPin.get(key).push(finding);
+      }
+    }
+    const overview = new Map((first.overview || []).map((item) => [String(item.designator), item]));
+    return {
+      ...meta, mapped, rows, power, byKey, doubles, findings: listed, findingsByPin, overview,
+      variant: first.variant, netlist: stamp(first), heuristic: first.heuristic, candidates: first.candidates || [],
+      candidatesTotal: first.candidates_total || 0, notesFromTool: first.notes || [],
+      rowsTotal: first.rows_total || 0, findingsTotal: first.total || 0,
+      checksRun: first.checks_run || [], notChecked: first.not_checked || {},
+      severity: first.severity_counts || {}, summary: first.summary || {},
+      sections: { debug_access: first.debug_access, boot_straps: first.boot_straps, external_memory: first.external_memory },
+    };
+  }
+
+  /** The pins a finding names: its pin, its pins and its debug pins. */
+  function findingPins(finding) {
+    const out = [];
+    if (finding.pin !== undefined && finding.pin !== null) out.push(String(finding.pin));
+    for (const pin of [...listOf(finding.pins), ...listOf(finding.debug_pins)]) if (!out.includes(String(pin))) out.push(String(pin));
+    return out;
+  }
+
+  const partPins = (mcu) => [...view.data.rows, ...view.data.power].filter((row) => row.mcu === mcu);
+
+  // ---------- the package layout ----------
+
+  /**
+   * The layout by pin number of one part's pins (strings, each once): a grid when ball
+   * names (A1, B12, AA3) name most pins over two or more rows; numbers 1..N around four
+   * sides (or two) when numbers name most pins (one letter before every number, P1 ...
+   * P40, reads as the number) and fill 1..N; else none. Every pin is either placed once
+   * or listed in unplaced: an odd last number, a name outside the scheme or a second pin
+   * for one place. The contract's layout block holds the thresholds; the tests run the
+   * same rule.
+   */
+  function planLayout(pins) {
+    const total = pins.length;
+    const enough = (count) => count >= LAYOUT.min_pins && count >= LAYOUT.min_share * total;
+    const balls = [];
+    for (const pin of pins) {
+      const match = BALL.exec(String(pin).toUpperCase());
+      if (match) balls.push({ pin, row: match[1], col: Number(match[2]) });
+    }
+    let numbered = pins.filter((pin) => NUMBER.test(pin)).map((pin) => ({ pin, number: Number(pin) }));
+    let prefix = "";
+    if (enough(balls.length)) {
+      const rows = [...new Set(balls.map((ball) => ball.row))]
+        .sort((a, b) => a.length - b.length || (a < b ? -1 : a > b ? 1 : 0));
+      if (rows.length >= 2) {
+        const cols = Math.max(...balls.map((ball) => ball.col));
+        const cells = new Set();
+        const placed = [];
+        for (const ball of balls) {
+          const cell = `${ball.row}|${ball.col}`;
+          if (cells.has(cell)) continue;  // a second pin for one ball is listed, not drawn over it
+          cells.add(cell);
+          placed.push(ball);
+        }
+        const taken = new Set(placed.map((ball) => ball.pin));
+        return { kind: "grid", rows, cols, placed, unplaced: pins.filter((pin) => !taken.has(pin)) };
+      }
+      prefix = rows[0];
+      numbered = balls.map((ball) => ({ pin: ball.pin, number: ball.col }));
+    }
+    if (!enough(numbered.length)) return { kind: "list", placed: [], unplaced: [...pins] };
+    const last = Math.max(...numbered.map((item) => item.number));
+    if (numbered.length < LAYOUT.min_fill * last) return { kind: "list", placed: [], unplaced: [...pins], gaps: true };
+    const slots = last % 2 ? last - 1 : last;
+    const used = new Set();
+    const placed = [];
+    for (const item of numbered) {
+      if (item.number > slots || used.has(item.number)) continue;
+      used.add(item.number);
+      placed.push({ pin: item.pin, slot: item.number });
+    }
+    const taken = new Set(placed.map((item) => item.pin));
+    const quad = slots % 4 === 0 && slots >= 8;
+    return { kind: quad && slots >= LAYOUT.quad_from ? "quad" : "dual", quad, slots, prefix, placed,
+             unplaced: pins.filter((pin) => !taken.has(pin)) };
+  }
+
+  /** The text beside a pin on the sides: its number, name or net (shortened). */
+  function sideLabel(item, slot) {
+    if (!item) return String(slot);
+    const text = view.labels === "name" ? (item.name || item.pin) : view.labels === "net" ? (item.net || "–") : item.pin;
+    return text.length > 18 ? `${text.slice(0, 17)}…` : text;
+  }
+
+  /** Marks for a plan: {item, x, y, w, h, round, vertical, label: {x, y, anchor, rotate, text}} with
+   *  item null for a number with no pin in the result; plus the body and the size. */
+  function geometry(plan, items) {
+    const marks = [];
+    const extra = [];  // axis labels, body
+    if (plan.kind === "grid") {
+      const left = 30;
+      const top = 24;
+      const rowIndex = new Map(plan.rows.map((row, index) => [row, index]));
+      for (const ball of plan.placed) {
+        marks.push({ item: items.get(ball.pin), x: left + (ball.col - 1) * CELL + CELL / 2,
+                     y: top + rowIndex.get(ball.row) * CELL + CELL / 2, w: CELL - 5, h: CELL - 5, round: true });
+      }
+      const step = plan.cols > 30 ? 5 : plan.cols > 15 ? 2 : 1;
+      // The first and the last column are always named, so the grid's extent reads off it.
+      for (let col = 1; col <= plan.cols; col += 1) {
+        if (col === 1 || col === plan.cols || col % step === 0) extra.push({ text: String(col), x: left + (col - 1) * CELL + CELL / 2, y: top - 8, anchor: "middle" });
+      }
+      plan.rows.forEach((row, index) => extra.push({ text: row, x: left - 6, y: top + index * CELL + CELL / 2 + 3, anchor: "end" }));
+      return { marks, extra, body: null, width: left + plan.cols * CELL + 8, height: top + plan.rows.length * CELL + 8 };
+    }
+    const quad = plan.kind === "quad";
+    const labelWidth = view.labels === "number" ? 30 : 108;
+    const perSide = quad ? plan.slots / 4 : plan.slots / 2;
+    const span = perSide * PITCH + PITCH;
+    const x0 = labelWidth + PIN_LEN;
+    const y0 = quad ? labelWidth + PIN_LEN : 12;
+    const bodyW = quad ? span : Math.max(120, Math.round(span * 0.45));
+    const bodyH = span;
+    const bySlot = new Map(plan.placed.map((entry) => [entry.slot, entry.pin]));
+    for (let slot = 1; slot <= plan.slots; slot += 1) {
+      const pin = bySlot.has(slot) ? bySlot.get(slot) : null;
+      const item = pin === null ? null : items.get(pin);
+      const side = Math.floor((slot - 1) / perSide);
+      const j = (slot - 1) % perSide;
+      const text = sideLabel(item, plan.prefix && pin === null ? `${plan.prefix}${slot}` : slot);
+      let mark;
+      if (side === 0) {  // left, top to bottom
+        const cy = y0 + PITCH + j * PITCH;
+        mark = { x: x0 - PIN_LEN / 2, y: cy, w: PIN_LEN, h: PITCH - 5, label: { x: x0 - PIN_LEN - 4, y: cy + 3, anchor: "end", text } };
+      } else if (quad && side === 1) {  // bottom, left to right
+        const cx = x0 + PITCH + j * PITCH;
+        mark = { x: cx, y: y0 + bodyH + PIN_LEN / 2, w: PITCH - 5, h: PIN_LEN, vertical: true,
+                 label: { x: cx + 3, y: y0 + bodyH + PIN_LEN + 4, anchor: "start", rotate: 90, text } };
+      } else if ((quad && side === 2) || (!quad && side === 1)) {  // right, bottom to top
+        const cy = y0 + PITCH + (perSide - 1 - j) * PITCH;
+        mark = { x: x0 + bodyW + PIN_LEN / 2, y: cy, w: PIN_LEN, h: PITCH - 5,
+                 label: { x: x0 + bodyW + PIN_LEN + 4, y: cy + 3, anchor: "start", text } };
+      } else {  // top, right to left
+        const cx = x0 + PITCH + (perSide - 1 - j) * PITCH;
+        mark = { x: cx, y: y0 - PIN_LEN / 2, w: PITCH - 5, h: PIN_LEN, vertical: true,
+                 label: { x: cx + 3, y: y0 - PIN_LEN - 4, anchor: "start", rotate: -90, text } };
+      }
+      marks.push({ ...mark, item, slot });
+    }
+    const width = 2 * (labelWidth + PIN_LEN) + bodyW;
+    const height = quad ? width : bodyH + 24;
+    return { marks, extra, body: { x: x0, y: y0, w: bodyW, h: bodyH }, width, height };
+  }
+
+  /** The pad centres get_component_placement gives for the part, as placed on the board and
+   *  seen from the top (y up on the board, down on the screen). */
+  function padGeometry(instance, items) {
+    const pads = (instance.pins || []).filter((pad) => Number.isFinite(pad.x_mil) && Number.isFinite(pad.y_mil));
+    if (!pads.length) return null;
+    const xs = pads.map((pad) => pad.x_mil);
+    const ys = pads.map((pad) => pad.y_mil);
+    const minX = Math.min(...xs);
+    const maxY = Math.max(...ys);
+    let pitch = Infinity;
+    for (let a = 0; a < pads.length; a += 1) {
+      for (let b = a + 1; b < pads.length; b += 1) {
+        const d = Math.hypot(pads[a].x_mil - pads[b].x_mil, pads[a].y_mil - pads[b].y_mil);
+        if (d > 0.01 && d < pitch) pitch = d;
+      }
+    }
+    const spread = Math.max(Math.max(...xs) - minX, maxY - Math.min(...ys), 1);
+    if (!Number.isFinite(pitch)) pitch = spread;
+    const scale = Math.min(PITCH / pitch, 1600 / spread);
+    const size = Math.max(5, Math.min(pitch * scale * 0.72, 16));
+    const margin = 16;
+    const marks = pads.map((pad) => {
+      const item = items.get(String(pad.pin)) || null;
+      return { item, pad, x: margin + (pad.x_mil - minX) * scale, y: margin + (maxY - pad.y_mil) * scale, w: size, h: size };
+    });
+    const onBoard = new Set(pads.map((pad) => String(pad.pin)));
+    // Pin 1 (or ball A1) is marked with a dot outside its pad's top-left corner.
+    const first = marks.find((mark) => String(mark.pad.pin) === "1") || marks.find((mark) => String(mark.pad.pin).toUpperCase() === "A1");
+    return {
+      marks, extra: [], body: null, size,
+      pin1: first ? { pin: String(first.pad.pin), x: first.x - size * 0.75, y: first.y - size * 0.75 } : null,
+      width: Math.ceil(margin * 2 + (Math.max(...xs) - minX) * scale), height: Math.ceil(margin * 2 + (maxY - Math.min(...ys)) * scale),
+      unplaced: [...items.keys()].filter((pin) => !onBoard.has(pin)),
+      strays: [...new Set(pads.filter((pad) => !items.has(String(pad.pin))).map((pad) => String(pad.pin)))],
+    };
+  }
+
+  // ---------- filters ----------
+
+  function portText(row) {
+    if (row.port !== undefined && row.port !== null) return `${row.port}${/^\d+$/.test(String(row.port)) ? "." : ""}${row.bit ?? ""}`;
+    if (row.bit !== undefined && row.bit !== null) return `GPIO ${row.bit}`;
+    return "";
+  }
+
+  const pullText = (row) => (row.pulls || []).map((pull) =>
+    `${pull.direction} ${pull.value || "?"} to ${pull.to} (${pull.designator}${pull.not_fitted ? ", Not Fitted" : ""})`).join("; ");
+
+  const peerLabel = (peer) => `${peer.designator}.${peer.pin}${peer.name ? ` (${peer.name})` : ""}${(peer.through || []).length ? ` via ${peer.through.join("+")}` : ""}`;
+
+  function peersText(row) {
+    const list = (row.peers || []).map(peerLabel);
+    const more = (row.peers_total || 0) - list.length;
+    return list.join("; ") + (more > 0 ? `; ${more} more` : "");
+  }
+
+  const functionText = (row) => `${fnInfo(row.function).label}${row.role ? ` ${row.role}` : ""} ${fnInfo(row.function).code}`;
+
+  function rowText(row) {
+    if (row._power) return [row.mcu, row.pin, row.net || "not connected", functionText(row)].join(" ");
+    return [row.mcu, row.pin, row.name, portText(row), row.type, row.net, functionText(row), (row.basis || []).join(" "),
+            pullText(row), peersText(row), (row.alternates || []).join(" ")].filter(Boolean).join(" ");
+  }
+
+  const chipOk = (row) => row._power || !view.chipsOn || view.chipsOn.has(row.function);
+  const shownPin = (row) => chipOk(row) && (!view.query || Shell.matches(rowText(row), view.query));
+
+  // ---------- the page ----------
+
+  function renderAll() {
+    const data = view.data;
+    ui.header = el("div", {});
+    ui.notices = el("div", {});
+    ui.cands = el("div", {});
+    ui.sumline = el("div", {});
+    view.noticeSig = "";  // a new, empty notices box
+    app.classList.toggle("short", short());
+    if (!data.mapped.length) {
+      clear(app).append(ui.header, ui.notices, ui.cands, ui.sumline);
+      ui.panel = null;
+      ui.pane = null;
+      ui.split = null;
+      ui.table = null;
+      renderHeadBlocks();
+      return;
+    }
+    ui.panel = el("div", { class: "content" });
+    ui.pane = el("aside", { class: "pane", "aria-label": "Details" });
+    ui.split = el("div", { class: "split" }, ui.panel, ui.pane);
+    const tabItems = [
+      { id: "pins", label: `Pins (${data.rows.length})` },
+      { id: "package", label: "Package" },
+      { id: "findings", label: `Findings (${data.findings.length})` },
+      { id: "outputs", label: "Outputs" },
+    ];
+    ui.tabBar = Shell.tabs(tabItems, (id) => {
+      if (id === view.tab) return;
+      view.tab = id;
+      renderTab();
+    }, view.tab, ui.panel);
+    clear(app).append(ui.header, ui.notices, ui.cands, ui.sumline, ui.tabBar.el, ui.split);
+    renderHeadBlocks();
+    renderTab();
+    renderPane();
+    wasLayout = layoutSig();
+  }
+
+  /** Where keyboard focus goes when its control is gone: the first control left in the
+   *  same box, else the page's heading. */
+  const nearby = (box) => () => box.querySelector("button:not([disabled]), input, summary, select") || ui.headline || null;
+
+  function renderHeadBlocks() {
+    if (!view.data || !ui.header) return;
+    for (const [box, draw] of [[ui.header, renderHeader], [ui.notices, renderNotices], [ui.cands, renderCandidates],
+                               [ui.sumline, renderSummary]]) {
+      Shell.keepFocus(box, draw, nearby(box));
+    }
+  }
+
+  function originText(data) {
+    if (data.origin === "view") return "asked by the view";
+    return data.asked ? "Claude's call" : "Claude's call (its arguments not sent by the host)";
+  }
+
+  function renderHeader() {
+    const data = view.data;
+    const box = ui.header;
+    clear(box);
+    ui.displayButton = ui.displayButton || Shell.displayModeButton((error) => ui.notices && ui.notices.prepend(Shell.notice("error", error.message)));
+    ui.headline = el("h1", { text: "Firmware pin map", tabindex: "-1" });
+    const parts = data.mapped.map((mcu) => {
+      const candidate = data.candidates.find((item) => String(item.designator) === mcu);
+      return candidate && candidate.part ? `${mcu} (${candidate.part})` : mcu;
+    });
+    const asked = data.asked && data.origin === "claude" ? { ...data.asked } : { ...data.args };
+    Shell.append(box, [
+      el("div", { class: "head" }, ui.headline,
+        el("span", { class: "meta", text: [parts.join(", ") || "no processor", data.variant ? `variant ${data.variant}` : null].filter(Boolean).join(" · ") }),
+        el("span", { class: "grow" }), ui.displayButton),
+      el("p", { class: "argline" }, `Answer: `, el("code", { text: argText(asked) }), `, ${originText(data)}`,
+        data.origin === "claude" && data.asked && (data.asked.format && data.asked.format !== "table" || data.asked.offset)
+          ? `; read with ${argText(data.args)}` : "", ". ",
+        el("span", { class: "badge muted", text: "heuristic", title: data.heuristic || "" })),
+      view.busy ? el("p", { class: "muted small", text: view.busy }) : null,
+    ]);
+  }
+
+  /** The notices, redrawn only when what they say changes (a notice is a status region). */
+  function renderNotices() {
+    const data = view.data;
+    const list = [];
+    if (view.headError) list.push(["error", view.headError]);
+    const read = data.rows.length;
+    if (data.stopReason) {
+      // Read the rest goes on from the page that stopped the reading; Read again starts from
+      // offset 0 when the pages read cannot be read on from (another netlist, a later page).
+      const fresh = !data.read || data.read.again || mapNext(data.read.last) === null;
+      const action = canCall() && !view.closed && data.read ? (fresh ? "Read again" : "Read the rest") : "";
+      list.push(["warning", `Showing ${read} of ${plural(data.rowsTotal, "signal pin")} and ${data.findings.length} of ${plural(data.findingsTotal, "finding")}: ${data.stopReason}.`,
+                 action, action && view.busy ? "busy" : ""]);
+    }
+    if (data.doubles) list.push(["warning", `${plural(data.doubles, "pin")} came twice in the pages and ${data.doubles === 1 ? "is" : "are"} shown once.`]);
+    if (view.closed) list.push(["info", "The view was closed: it sends no more requests, and its server buttons are gone."]);
+    else if (!canCall()) list.push(["info", "This host does not let the view call tools: the first page is drawn, and the candidates, outputs and details need Claude."]);
+    if (data.warnings.length) list.push(["warning", `The result is not quite the shape this view reads: ${data.warnings.slice(0, 3).join("; ")}.`]);
+    const sig = JSON.stringify(list);
+    if (sig === view.noticeSig) return;
+    view.noticeSig = sig;
+    clear(ui.notices);
+    for (const [kind, text, action, busy] of list) {
+      const box = Shell.notice(kind, text);
+      if (action) {
+        const fresh = action === "Read again";
+        box.insertBefore(el("button", { type: "button", class: "btn-link", text: action, "aria-disabled": busy ? "true" : null,
+          title: fresh ? `${argText(data.args)}: the whole map again, from offset 0` : `${argText(data.args)}: the pages from offset ${mapNext(data.read.last)} on`,
+          on: { click: () => { if (!view.busy) resumeRead(); } } }), box.lastChild);
+      }
+      ui.notices.appendChild(box);
+    }
+  }
+
+  function candidateText(candidate) {
+    const bits = [candidate.kind, candidate.part || null, `score ${candidate.score}`,
+                  `${candidate.gpio_named_pins} GPIO-named of ${plural(candidate.pins, "pin")}`];
+    if (candidate.port_scheme) bits.push(`port scheme ${candidate.port_scheme}`);
+    return bits.filter(Boolean).join(" · ");
+  }
+
+  function renderCandidates() {
+    const data = view.data;
+    const box = ui.cands;
+    clear(box);
+    const list = data.candidates;
+    const mappedNone = !data.mapped.length;
+    if (mappedNone) {
+      const firstNote = data.notesFromTool[0] || "No processor was found.";
+      box.appendChild(Shell.state("info", "No processor found", firstNote));
+    }
+    // The picker shows when the tool ranked several parts or one it did not map (mcu= asked
+    // for another part, or no processor was mapped), so the ranked one can be mapped.
+    const unmapped = list.some((candidate) => !data.mapped.includes(String(candidate.designator)));
+    if (list.length <= 1 && !unmapped) return;
+    const canAsk = canCall() && !view.closed;
+    const items = list.map((candidate) => {
+      const name = String(candidate.designator);
+      const mapped = data.mapped.includes(name);
+      return el("li", {},
+        el("strong", { text: name }),
+        el("span", { class: "what", text: candidateText(candidate), title: (candidate.basis || []).join("; ") }),
+        candidate.not_fitted ? el("span", { class: "badge muted", text: "Not Fitted" }) : null,
+        mapped ? el("span", { class: "badge info", text: "mapped" })
+          : canAsk ? el("button", { type: "button", class: "btn", text: `Map ${name}`, "aria-disabled": view.busy ? "true" : null,
+                                    title: `${argText({ ...data.args, mcu: name })}: asks the tool for this part's map`,
+                                    on: { click: () => { if (!view.busy) reask({ mcu: name }, `the pin map of ${name}`); } } }) : null);
+    });
+    const more = data.candidatesTotal > list.length ? ` (the first ${list.length} of ${data.candidatesTotal})` : "";
+    const forced = data.mapped.filter((mcu) => !list.some((candidate) => String(candidate.designator) === mcu));
+    const body = [
+      el("p", { class: "help", text: `${TOOL} ranked ${plural(data.candidatesTotal, "candidate")}${more} by GPIO-named and IO-typed pins and processor words; without mcu= it maps the top fitted one.` +
+        (forced.length ? ` ${forced.join(", ")} ${forced.length === 1 ? "is" : "are"} mapped because mcu= named ${forced.length === 1 ? "it" : "them"}${data.candidatesTotal > list.length ? "" : ", not by the ranking"}.` : "") }),
+      el("ul", { class: "cands" }, items),
+      !canAsk ? el("p", { class: "help", text: view.closed ? "The view was closed: it asks the server nothing more." : "This host does not let the view ask for another part: ask Claude for get_firmware_pin_map with mcu= that part." }) : null,
+    ];
+    if (view.candsOpen === null) view.candsOpen = mappedNone || !short();
+    const disclosure = el("details", { class: "block", open: view.candsOpen },
+      el("summary", {}, el("h2", { text: `Candidates (${list.length})` })), body);
+    disclosure.addEventListener("toggle", () => {
+      if (disclosure.open === view.candsOpen) return;
+      view.candsOpen = disclosure.open;
+      view.auto.cands = false;
+    });
+    box.appendChild(disclosure);
+  }
+
+  function renderSummary() {
+    const data = view.data;
+    const box = ui.sumline;
+    clear(box);
+    if (!data.mapped.length) {
+      if (data.notesFromTool.length > 1) box.appendChild(notesBlock(data.notesFromTool.slice(1)));
+      return;
+    }
+    const counts = data.mapped.map((mcu) => {
+      const item = data.overview.get(mcu);
+      if (!item) return null;
+      return `${mcu}: ${plural(item.pins, "pin")} (${item.signal_pins} signal, ${item.power_pins} power, ${item.ground_pins} ground, ${item.not_connected} not connected)`;
+    }).filter(Boolean).join("; ");
+    const sev = data.severity;
+    const findings = data.findingsTotal ? `${plural(sev.warning || 0, "warning")} and ${sev.info || 0} info in ${plural(data.findingsTotal, "finding")}` : "no finding";
+    const notRun = Object.keys(data.notChecked);
+    const full = `${counts || plural(data.rows.length, "pin")}. ${findings} from ${plural(data.checksRun.length, "check")}${notRun.length ? ` (not checked: ${notRun.join(", ")})` : ""}.`;
+    const pins = data.rows.length + data.power.length;
+    box.appendChild(el("p", { class: "sumline", text: short()
+      ? `${plural(pins, "pin")}; ${plural(sev.warning || 0, "warning")}, ${sev.info || 0} info.` : full }));
+    const notes = [...(short() ? [full] : []), ...data.notes, ...data.notesFromTool];
+    if (notes.length) box.appendChild(notesBlock(notes));
+  }
+
+  function notesBlock(notes) {
+    return el("details", { class: "more" }, el("summary", { text: `Notes (${notes.length}) and how to read the map` }),
+      el("ul", { class: "notes small" }, notes.map((note) => el("li", { text: note })),
+        el("li", { text: view.data.heuristic || "" })));
+  }
+
+  // ---------- tabs ----------
+
+  function renderTab() {
+    if (!ui.panel) return;
+    const mark = Shell.focusMark(ui.panel);
+    const spot = ui.panel.contains(document.activeElement) ? focusSpot() : null;
+    keepTable("pins");
+    keepTable("findings");
+    clear(ui.panel);
+    ui.table = null;
+    ui.findTable = null;
+    ui.canvas = null;
+    ui.marks = [];
+    ui.markEls = new Map();
+    if (view.tab === "package") packageTab();
+    else if (view.tab === "findings") findingsTab();
+    else if (view.tab === "outputs") outputsTab();
+    else pinsTab();
+    // A button that is gone (Read the other pages, Retry): the output's own button in the
+    // Outputs tab, the layout chosen in the Package tab, else the tab.
+    if (!restoreSpot(spot) && mark) {
+      Shell.refocus(ui.panel, mark, () => (view.tab === "outputs" && ui.panel.querySelector('.outs button[aria-pressed="true"]')) ||
+        (view.tab === "package" && ui.panel.querySelector('.dtools [aria-label="Layout"] button[aria-pressed="true"]')) ||
+        (ui.tabBar ? ui.tabBar.selected() : null));
+    }
+  }
+
+  /** Where keyboard focus is among what a redraw rebuilds and Shell.refocus does not find
+   *  again (it finds buttons): a pin's row, a finding's row, a pin on the diagram. */
+  function focusSpot() {
+    const active = document.activeElement;
+    if (!active || active === document.body) return null;
+    if (active.tagName === "TR") {
+      const ref = active.querySelector("[data-key], [data-fid]");
+      if (!ref) return null;
+      return ref.dataset.key !== undefined ? { row: ref.dataset.key } : { finding: Number(ref.dataset.fid) };
+    }
+    const mark = active.closest ? active.closest(".pinmark") : null;
+    return mark && mark.dataset.key ? { mark: mark.dataset.key } : null;
+  }
+
+  /** Focus that row or pin again after a redraw; false when it is not drawn. */
+  function restoreSpot(spot) {
+    if (!spot) return false;
+    if (spot.row !== undefined) return Boolean(ui.table && ui.table.focus((row) => row._key === spot.row));
+    if (spot.finding !== undefined) return Boolean(ui.findTable && ui.findTable.focus((finding) => finding._id === spot.finding));
+    const mark = (ui.marks || []).find((item) => item.item && item.item._key === spot.mark);
+    if (!mark || !mark.el.isConnected) return false;
+    rove(mark, false);
+    return document.activeElement === mark.el;
+  }
+
+  /** A table's sort and shown columns as the user left them, read from its header and its
+   *  column chooser, so a table drawn again (another tab, another layout) keeps them. */
+  function keepTable(name) {
+    const table = name === "pins" ? ui.table : ui.findTable;
+    const columns = ui.tableColumns && ui.tableColumns[name];
+    if (!table || !columns) return;
+    const th = table.el.querySelector('thead th[aria-sort="ascending"], thead th[aria-sort="descending"]');
+    const button = th ? th.querySelector("button[data-col]") : null;
+    const boxes = [...table.el.querySelectorAll(".colchooser input[type=checkbox]")];
+    const kept = view.tables[name] || { added: new Set(), removed: new Set() };
+    // What the user showed or hid against the defaults (which follow the host's width),
+    // gathered over redraws: a column hidden on a wide host stays hidden after a narrow one.
+    if (boxes.length === columns.length) {
+      columns.forEach((column, index) => {
+        const shown = boxes[index].checked;
+        if (shown && column.hidden) kept.added.add(column.key);
+        if (!shown && !column.hidden) kept.removed.add(column.key);
+        if (shown) kept.removed.delete(column.key);
+        else kept.added.delete(column.key);
+      });
+    }
+    kept.sort = button ? { key: button.dataset.col, dir: th.getAttribute("aria-sort") === "descending" ? -1 : 1 } : null;
+    view.tables[name] = kept;
+  }
+
+  /** The columns and the sort: today's default columns (they follow the host's width) with
+   *  the columns the user showed or hid. */
+  function tableSpec(name, columns, sort) {
+    ui.tableColumns = { ...(ui.tableColumns || {}), [name]: columns };
+    const kept = view.tables[name];
+    if (!kept) return { columns, sort };
+    const visible = columns.filter((column) => (!column.hidden || kept.added.has(column.key)) && !kept.removed.has(column.key));
+    return {
+      // At least one column stays, as the column chooser keeps one.
+      columns: visible.length ? columns.map((column) => ({ ...column, hidden: !visible.includes(column) })) : columns,
+      sort: kept.sort && columns.some((column) => column.key === kept.sort.key) ? kept.sort : sort,
+    };
+  }
+
+  /** The tables announce nothing themselves (the page has one live region). */
+  function quiet(table) {
+    for (const node of table.el.querySelectorAll("[aria-live]")) node.setAttribute("aria-live", "off");
+    return table;
+  }
+
+  function swatch(fn) {
+    return svg("svg", { class: `sw fam-${famOf(fn)}`, width: 12, height: 12, viewBox: "0 0 12 12", "aria-hidden": "true" },
+      svg("rect", { class: "body", x: 1, y: 1, width: 10, height: 10, rx: 2 }));
+  }
+
+  function functionCell(row) {
+    const info = fnInfo(row.function);
+    return el("span", { class: "fn" }, swatch(row.function), el("span", { class: "code", text: info.code }),
+      `${info.label}${row.role ? ` ${row.role}` : ""}`);
+  }
+
+  /** The function and, under it, its basis (what the tool read it from). */
+  function functionBasisCell(row) {
+    const basis = (row.basis || []).join("; ");
+    return el("span", {}, functionCell(row), basis ? el("span", { class: "sub", text: basis }) : null);
+  }
+
+  /** A pin's findings in words, severities named: "2 findings (1 warning, 1 info)". */
+  function findingWords(list) {
+    if (!list.length) return "";
+    const warnings = list.filter((finding) => finding.severity === "warning").length;
+    const infos = list.filter((finding) => finding.severity === "info").length;
+    const parts = [warnings ? plural(warnings, "warning") : "", infos ? `${infos} info` : ""].filter(Boolean);
+    return `${plural(list.length, "finding")}${parts.length ? ` (${parts.join(", ")})` : ""}`;
+  }
+
+  function findingBadge(row) {
+    const list = view.data.findingsByPin.get(row._key) || [];
+    if (!list.length) return null;
+    const worst = list.some((finding) => finding.severity === "warning") ? "warning" : "info";
+    return el("span", { class: `badge ${worst} fcount`, text: plural(list.length, "finding"),
+                        title: `${findingWords(list)}: ${list.map((finding) => checkTitle(finding.check)).join(", ")}` });
+  }
+
+  function pinColumns() {
+    const several = view.data.mapped.length > 1;
+    const narrow = narrowHost();
+    return [
+      { key: "mcu", label: "Part", hidden: !several, cls: "c-name" },
+      // data-key: the row's pin, so keyboard focus finds its row again after a redraw.
+      { key: "pin", label: "Pin", cls: "c-pin", render: (row) => el("span", { data: { key: row._key } }, row.pin, findingBadge(row)) },
+      { key: "name", label: "Name and alternates", cls: "c-name", value: (row) => row.name || "",
+        text: (row) => `${row.name || ""} ${(row.alternates || []).join(" ")}`,
+        render: (row) => el("span", {}, row.name || "",
+          (row.alternates || []).length ? el("span", { class: "sub", text: `could be ${row.alternates.join(", ")}` }) : null) },
+      { key: "port", label: "Port/bit", value: portText, hidden: narrow },
+      { key: "type", label: "Type", hidden: narrow, value: (row) => row.type || "" },
+      { key: "net", label: "Net", cls: "c-net", value: (row) => row.net || "", render: (row) => row.net || el("span", { class: "muted", text: "not connected" }) },
+      { key: "function", label: "Function and basis", cls: "c-fn", value: (row) => `${String(fnRank(row.function)).padStart(3, "0")} ${row.role || ""}`,
+        text: (row) => `${functionText(row)} ${(row.basis || []).join(" ")}`, render: functionBasisCell },
+      { key: "pull", label: "Pull", cls: "c-name", hidden: narrow, value: pullText },
+      { key: "peers", label: "Reaches", cls: "c-name", hidden: narrow, value: peersText },
+    ];
+  }
+
+  function groupSpec() {
+    if (view.groupBy === "none") return null;
+    if (view.groupBy === "port") {
+      const keyOf = (row) => (row.port !== undefined && row.port !== null ? `Port ${row.port}` : row.bit !== undefined && row.bit !== null ? "GPIO numbers" : "No port");
+      return {
+        key: keyOf,
+        label: (key) => key,
+        count: (key, rows) => el("span", { class: "badge", text: plural(rows.length, "pin") }),
+        order: (a, b) => (a === "No port") - (b === "No port") || Shell.naturally(a, b),
+      };
+    }
+    return {
+      key: (row) => row.function,
+      label: (key) => el("span", { class: "fn" }, swatch(key), el("span", { class: "code", text: fnInfo(key).code }), fnInfo(key).label),
+      count: (key, rows) => el("span", { class: "badge", text: plural(rows.length, "pin") }),
+      order: (a, b) => fnRank(a) - fnRank(b) || Shell.naturally(a, b),
+    };
+  }
+
+  function functionCounts() {
+    const counts = new Map();
+    for (const row of view.data.rows) counts.set(row.function, (counts.get(row.function) || 0) + 1);
+    return [...counts.entries()].sort((a, b) => fnRank(a[0]) - fnRank(b[0]));
+  }
+
+  function pinsTab() {
+    const data = view.data;
+    const filter = Shell.filterBox({
+      placeholder: "Filter pins", label: "Filter the pins", value: view.query,
+      onInput: (text) => {
+        view.query = text;
+        if (ui.table) ui.table.setQuery(text);
+      },
+    });
+    const switcher = Shell.segmented({ label: "Group by", items: [
+      { id: "function", label: "Function" }, { id: "port", label: "Port" }, { id: "none", label: "None" }],
+    current: view.groupBy, onChange: (id) => {
+      view.groupBy = id;
+      if (ui.table) ui.table.setGroup(groupSpec());
+    } });
+    const counts = functionCounts();
+    const chips = counts.length > 1 ? Shell.chips({
+      label: "Functions", items: counts.map(([fn, count]) => ({ id: fn, label: fnInfo(fn).label, count, title: `${fnInfo(fn).code}: ${FAMILIES[famOf(fn)]}` })),
+      selected: view.chipsOn || counts.map(([fn]) => fn),
+      onChange: (on) => {
+        view.chipsOn = on.size === counts.length ? null : on;
+        if (ui.table) ui.table.setFilter(chipOk);
+        ui.filteredBadge.hidden = !view.chipsOn;
+      } }).el : null;
+    if (view.filtersOpen === null) view.filtersOpen = !short();
+    ui.filteredBadge = el("span", { class: "badge info", text: "filtered", hidden: !view.chipsOn });
+    const box = el("details", { class: "filters-box", open: view.filtersOpen },
+      el("summary", { text: "Filter, group and functions" }, ui.filteredBadge),
+      el("div", { class: "filters" }, filter, switcher.el), chips);
+    box.addEventListener("toggle", () => {
+      if (box.open === view.filtersOpen) return;
+      view.filtersOpen = box.open;
+      view.auto.filters = false;
+    });
+    const spec = tableSpec("pins", pinColumns(), { key: "pin", dir: 1 });
+    ui.table = quiet(Shell.table({
+      label: "Pins", ownFilter: false, rows: data.rows, columns: spec.columns, group: groupSpec(), filter: chipOk,
+      rowKey: (row) => row._key, onActivate: (row) => selectPin(row._key),
+      sort: spec.sort, empty: "No signal pin in this map.",
+    }));
+    ui.table.setQuery(view.query);
+    if (view.selected && view.selected.kind === "pin") ui.table.select((row) => row._key === view.selected.key);
+    Shell.append(ui.panel, [box, ui.table.el, powerBlock()]);
+  }
+
+  function powerBlock() {
+    const data = view.data;
+    if (!data.power.length) return null;
+    const groups = new Map();
+    for (const row of data.power) {
+      const key = `${row.mcu}\u0001${row.function}\u0001${row.net === null ? "" : row.net}`;
+      if (!groups.has(key)) groups.set(key, { mcu: row.mcu, fn: row.function, net: row.net, pins: [] });
+      groups.get(key).pins.push(row);
+    }
+    const list = [...groups.values()].sort((a, b) => Shell.naturally(a.mcu, b.mcu) || (a.fn === b.fn ? 0 : a.fn === "power" ? -1 : 1) || Shell.naturally(a.net || "", b.net || ""));
+    const powerCount = data.power.filter((row) => row.function === "power").length;
+    return el("details", { class: "block section-gap" },
+      el("summary", {}, el("h2", { text: `Power and ground pins (${data.power.length})` })),
+      el("p", { class: "help", text: `${plural(powerCount, "power pin")} and ${plural(data.power.length - powerCount, "ground pin")}, summarised per net by the tool (its result gives no name or type for them).` }),
+      el("ul", { class: "cands" }, list.map((group) => el("li", {},
+        el("span", { class: "fn" }, swatch(group.fn), fnInfo(group.fn).label),
+        el("strong", { text: group.net === null ? "not connected" : group.net }),
+        data.mapped.length > 1 ? el("span", { class: "muted", text: group.mcu }) : null,
+        el("span", { class: "findpins" }, group.pins.map((row) => pinButton(row.mcu, row.pin)))))));
+  }
+
+  /** A button that selects a pin (its details), or a disabled one for a pin not read. */
+  function pinButton(mcu, pin, label = null) {
+    const key = pinKey(mcu, pin);
+    const known = view.data.byKey.has(key);
+    return el("button", { type: "button", class: "btn-link", text: label || String(pin), disabled: !known,
+                          title: known ? `Details of ${mcu} pin ${pin}` : `${mcu} pin ${pin} is not among the pins read`,
+                          on: { click: () => selectPin(key) } });
+  }
+
+  // ---------- the package diagram ----------
+
+  function packageTab() {
+    const data = view.data;
+    if (!view.part || !data.mapped.includes(view.part)) view.part = data.mapped[0];
+    const pins = partPins(view.part);
+    const items = new Map(pins.map((row) => [row.pin, row]));
+    // A read that stopped short of the part's pins: sides worked out from the pins read
+    // would put pins on the wrong side, so no layout by number is drawn (the board's pads
+    // still can be, from get_component_placement).
+    const over = data.overview.get(view.part);
+    const expected = over ? Number(over.pins) || 0 : 0;
+    const partial = Boolean(data.stopReason) && (expected ? pins.length < expected : data.rows.length < data.rowsTotal);
+    const plan = partial ? { kind: "list", placed: [], unplaced: pins.map((row) => row.pin), partial: true } : planLayout(pins.map((row) => row.pin));
+    const placementArgs = { refdes: view.part, units: "mil" };
+    const padEntry = answers.get(answerKey("get_component_placement", placementArgs));
+    const kinds = [];
+    if (plan.kind === "grid") kinds.push({ id: "grid", label: "Ball grid" });
+    if (plan.kind === "quad" || plan.kind === "dual") {
+      if (plan.quad) kinds.push({ id: "quad", label: "Four sides" });
+      kinds.push({ id: "dual", label: "Two sides" });
+    }
+    if (plan.kind === "list") kinds.push({ id: "list", label: "List" });
+    if ((canCall() && !view.closed) || (padEntry && padEntry.text)) kinds.push({ id: "pads", label: "Board pads", title: `get_component_placement(refdes="${view.part}"): the pad centres on the board` });
+    if (!view.layout || !kinds.some((item) => item.id === view.layout)) view.layout = plan.kind;
+    let geo = null;
+    let note = "";
+    let retry = null;
+    let unplaced = plan.unplaced;
+    let unplacedWhy = "Not on the layout";
+    let strays = [];
+    if (view.layout === "pads") {
+      const label = `get_component_placement(refdes="${view.part}", units="mil")`;
+      if (!padEntry || padEntry.loading) {
+        note = view.closed ? "The view was closed: it asks the server nothing more." : `Asking ${label}…`;
+      } else if (padEntry.error) {
+        note = `${label} failed: ${padEntry.error}.${plan.kind !== "list" ? " The layout by pin number is drawn meanwhile." : ""}`;
+        retry = canCall() && !view.closed ? el("button", { type: "button", class: "btn-link", text: "Retry", title: label,
+          on: { click: () => askDetail("get_component_placement", placementArgs) } }) : null;
+      } else {
+        const { json } = parsedAnswer(padEntry);
+        const instances = json && Array.isArray(json.instances) ? json.instances : [];
+        if (!json || json.error || !instances.length) {
+          note = `${label}: ${json ? json.message || json.error || "no instance on the board" : "the answer is not JSON"}.${plan.kind !== "list" ? " The layout by pin number is drawn instead." : ""}`;
+        } else {
+          geo = padGeometry(instances[0], items);
+          if (geo) {
+            unplaced = geo.unplaced;
+            strays = geo.strays;
+            unplacedWhy = "No pad on the board";
+            note = `Pad centres from ${label}: as placed on the board, seen from the top (side ${instances[0].side || "?"}, rotation ${instances[0].rotation ?? "?"}°; a part on the bottom appears mirrored). Pad shapes and sizes are not drawn${geo.pin1 ? `; a dot marks pin ${geo.pin1.pin}` : ""}.${instances.length > 1 ? ` The first of ${instances.length} instances.` : ""}`;
+          } else {
+            note = `${label} gives no pad positions for ${view.part}.${plan.kind !== "list" ? " The layout by pin number is drawn instead." : ""}`;
+          }
+        }
+      }
+    }
+    if (!geo && view.layout !== "list" && plan.kind !== "list") {
+      const shown = view.layout === "pads" ? plan : { ...plan, kind: view.layout === "quad" || view.layout === "dual" ? view.layout : plan.kind };
+      geo = geometry(shown, items);
+      if (view.layout !== "pads" || !note) note = layoutNote(shown);
+      else note += ` ${layoutNote(shown)}`;
+    }
+    if (plan.kind === "list" && !geo) {
+      const why = plan.partial
+        ? `No layout: ${expected ? `only ${pins.length} of ${plural(expected, "pin")} of ${view.part} were read` : `not every pin of ${view.part} was read`} (${data.stopReason}); a layout by number needs every pin, so the pins read are listed below.`
+        : plan.gaps
+          ? "No layout: the pin numbers leave too many gaps to lay out by number; every pin is listed below."
+          : "No layout: the pins are not numbered 1 to N or named as balls (A1, B12), so the view lays out none; every pin is listed below.";
+      note = (note ? `${note} ` : "") + why;
+      unplacedWhy = plan.partial ? "Pins read" : "Pins";
+    }
+    const pads = Boolean(geo) && view.layout === "pads";
+    // What only a drawn diagram uses (labels, zoom, its keys) is left out without one.
+    const tools = el("div", { class: "dtools" },
+      data.mapped.length > 1 ? Shell.segmented({ label: "Part", items: data.mapped.map((mcu) => ({ id: mcu, label: mcu })), current: view.part,
+        onChange: (id) => { view.part = id; view.layout = null; view.autoFit = true; renderTab(); } }).el : null,
+      kinds.length > 1 ? Shell.segmented({ label: "Layout", items: kinds, current: view.layout, onChange: (id) => {
+        view.layout = id;
+        view.autoFit = true;
+        if (id === "pads") askDetail("get_component_placement", placementArgs);
+        renderTab();
+      } }).el : null,
+      geo && ["quad", "dual"].includes(view.layout) ? Shell.segmented({ label: "Labels", items: [
+        { id: "number", label: "Number" }, { id: "name", label: "Name" }, { id: "net", label: "Net" }],
+      current: view.labels, onChange: (id) => { view.labels = id; view.autoFit = true; renderTab(); } }).el : null,
+      pads ? Shell.segmented({ label: "In each pad", items: [{ id: "code", label: "Function code" }, { id: "number", label: "Pin number" }],
+        current: view.padLabels, onChange: (id) => { view.padLabels = id; renderTab(); } }).el : null,
+      el("span", { class: "grow" }),
+      geo ? el("button", { type: "button", class: "btn", text: "−", "aria-label": "Zoom out", on: { click: () => zoom(1 / 1.25) } }) : null,
+      geo ? el("button", { type: "button", class: "btn", text: "+", "aria-label": "Zoom in", on: { click: () => zoom(1.25) } }) : null,
+      geo ? el("button", { type: "button", class: "btn", text: "Fit", title: "Fit the diagram in its pane", on: { click: () => { view.autoFit = true; fitWidth(); } } }) : null);
+    ui.canvas = el("div", { class: "canvas" });
+    ui.readout = el("p", { class: "readout", "aria-hidden": "true" });
+    const noteEl = el("p", { class: "layoutnote" }, note, retry ? " " : null, retry);
+    // Pins the Pins tab's filters hide are faded here: said so, with a way back.
+    const faded = pins.filter((row) => !shownPin(row)).length;
+    const fadedEl = faded ? el("p", { class: "layoutnote" }, `${plural(faded, "pin")} ${faded === 1 ? "is" : "are"} faded: the Pins tab's filters hide ${faded === 1 ? "it" : "them"}. `,
+      el("button", { type: "button", class: "btn-link", text: "Show every pin", on: { click: clearFilters } })) : null;
+    const about = [legend(pins), unplacedList(unplaced, unplacedWhy, items),
+      strays.length ? el("p", { class: "help", text: `Pads on the board with no pin of the map: ${strays.slice(0, 20).join(", ")}${strays.length > 20 ? ` and ${strays.length - 20} more` : ""}.` }) : null,
+      geo ? el("p", { class: "foot", text: "Keys: Tab to the diagram, arrows move between pins, Home and End go to the first and last, Enter or Space selects (the table and the details follow), Esc closes the details." }) : null];
+    if (short() && geo) {
+      // A short host: the diagram keeps the height; what it shows and the pins it leaves out
+      // wait behind one disclosure (its summary counts them). A Retry stays in sight.
+      const box = el("details", { class: "more", open: view.aboutOpen },
+        el("summary", { text: `What the diagram shows: legend${unplaced.length ? `, ${plural(unplaced.length, "pin")} not on it` : ""}` }),
+        retry ? null : noteEl, about);
+      box.addEventListener("toggle", () => { view.aboutOpen = box.open; });
+      Shell.append(ui.panel, [tools, retry ? noteEl : null, fadedEl, ui.canvas, ui.readout, box]);
+    } else {
+      Shell.append(ui.panel, [tools, noteEl, fadedEl, geo ? ui.canvas : null, geo ? ui.readout : null, about]);
+    }
+    if (geo) drawDiagram(geo, pins);
+  }
+
+  /** Clear the Pins tab's filters (function chips, text) from the Package tab; focus goes
+   *  to the diagram's pin in the tab order. */
+  function clearFilters() {
+    view.chipsOn = null;
+    view.query = "";
+    renderTab();
+    const mark = (ui.marks || []).find((item) => item.el.getAttribute("tabindex") === "0");
+    if (mark) mark.el.focus({ preventScroll: true });
+  }
+
+  function layoutNote(plan) {
+    if (plan.kind === "grid") {
+      return `Ball grid by pin name: rows ${plan.rows.slice(0, 3).join(", ")}${plan.rows.length > 3 ? " … " + plan.rows[plan.rows.length - 1] : ""} as the names give them (letters no ball uses are left out) and columns 1 to ${plan.cols}, A1 at the top left. A layout by name, not the footprint.`;
+    }
+    const prefix = plan.prefix ? ` (named ${plan.prefix}1 to ${plan.prefix}${plan.slots})` : "";
+    if (plan.kind === "quad") {
+      return `Pins 1 to ${plan.slots}${prefix} by number, counter-clockwise from pin 1 at the top left, ${plan.slots / 4} a side (the usual QFP and QFN order, seen from the top). A layout by pin number, not the footprint: check the package drawing.`;
+    }
+    return `Pins 1 to ${plan.slots}${prefix} by number, down the left side and up the right, ${plan.slots / 2} a side (the usual dual-row order, seen from the top). A layout by pin number, not the footprint: check the package drawing.`;
+  }
+
+  function markLabel(mark) {
+    const item = mark.item;
+    if (!item) return mark.pad ? `Pad ${mark.pad.pin}: no pin of the map` : `No pin ${mark.slot} in the result`;
+    const info = fnInfo(item.function);
+    const findings = view.data.findingsByPin.get(item._key) || [];
+    return [`Pin ${item.pin}`, item.name && item.name !== item.pin ? item.name : null,
+            item.net ? `net ${item.net}` : item.function === "unconnected" ? null : "not connected",
+            `${info.label}${item.role ? ` ${item.role}` : ""}`, findingWords(findings) || null,
+            shownPin(item) ? null : "faded: the Pins tab's filters hide it"].filter(Boolean).join(", ");
+  }
+
+  function drawDiagram(geo, pins) {
+    const root = svg("svg", { width: geo.width, height: geo.height, viewBox: `0 0 ${geo.width} ${geo.height}`, role: "group",
+                              "aria-label": `Package diagram of ${view.part}: ${plural(pins.length, "pin")}` });
+    if (geo.body) {
+      root.appendChild(svg("rect", { class: "pkg", x: geo.body.x, y: geo.body.y, width: geo.body.w, height: geo.body.h, rx: 4 }));
+      root.appendChild(svg("circle", { class: "pin1", cx: geo.body.x + 12, cy: geo.body.y + 12, r: 4 }));
+      root.appendChild(svg("text", { class: "pkgtext", x: geo.body.x + geo.body.w / 2, y: geo.body.y + geo.body.h / 2, "text-anchor": "middle", text: view.part }));
+      root.appendChild(svg("text", { class: "pkgsub", x: geo.body.x + geo.body.w / 2, y: geo.body.y + geo.body.h / 2 + 15, "text-anchor": "middle", text: "layout by pin number" }));
+    }
+    for (const label of geo.extra) root.appendChild(svg("text", { class: "axis", x: label.x, y: label.y, "text-anchor": label.anchor, text: label.text }));
+    if (geo.pin1) {
+      root.appendChild(svg("circle", { class: "pin1", cx: geo.pin1.x, cy: geo.pin1.y, r: 2.5 }, svg("title", { text: `Pin ${geo.pin1.pin}` })));
+    }
+    ui.marks = [];
+    ui.markEls = new Map();
+    const selectedKey = view.selected && view.selected.kind === "pin" ? view.selected.key : null;
+    let roving = null;
+    for (const mark of geo.marks) {
+      if (mark.label) {
+        root.appendChild(svg("text", { class: "plabel", x: mark.label.x, y: mark.label.y, "text-anchor": mark.label.anchor,
+                                       transform: mark.label.rotate ? `rotate(${mark.label.rotate} ${mark.label.x} ${mark.label.y})` : null,
+                                       text: mark.label.text }));
+      }
+      if (!mark.item && !mark.pad) {
+        root.appendChild(svg("rect", { class: "slot-empty", x: mark.x - mark.w / 2, y: mark.y - mark.h / 2, width: mark.w, height: mark.h },
+          svg("title", { text: markLabel(mark) })));
+        continue;
+      }
+      const item = mark.item;
+      const fam = item ? famOf(item.function) : "pad";
+      const group = svg("g", { class: `pinmark fam-${fam}`, tabindex: "-1", role: "button", "aria-label": markLabel(mark),
+                               data: item ? { key: item._key } : null, transform: `translate(${mark.x} ${mark.y})` });
+      group.appendChild(svg("title", { text: markLabel(mark) }));
+      group.appendChild(mark.round
+        ? svg("circle", { class: "body", r: mark.w / 2 })
+        : svg("rect", { class: "body", x: -mark.w / 2, y: -mark.h / 2, width: mark.w, height: mark.h, rx: 2 }));
+      const room = Math.min(mark.w, mark.h);
+      // In each pin its function's code; on the board's pads, the pin number when asked.
+      const inside = mark.pad && view.padLabels === "number" ? String(mark.pad.pin) : item ? fnInfo(item.function).code : "";
+      if (inside && room >= 11) {
+        const text = svg("text", { class: "code", "text-anchor": "middle", y: 3, transform: mark.vertical ? "rotate(-90)" : null, text: inside });
+        // A longer number is squeezed into the pad rather than drawn over its neighbours.
+        if (inside.length > 2) {
+          text.setAttribute("textLength", String(room - 2));
+          text.setAttribute("lengthAdjust", "spacingAndGlyphs");
+        }
+        group.appendChild(text);
+      }
+      const findings = item ? view.data.findingsByPin.get(item._key) || [] : [];
+      if (findings.length) {
+        const worst = findings.some((finding) => finding.severity === "warning") ? "warning" : "info";
+        group.appendChild(svg("circle", { class: `fmark ${worst}`, cx: mark.w / 2 - 1, cy: -mark.h / 2 + 1, r: 3 }));
+      }
+      if (item) {
+        group.addEventListener("click", () => {
+          rove(mark, false);
+          selectPin(item._key, { from: "diagram" });
+        });
+        group.addEventListener("mouseenter", () => showReadout(mark));
+        group.addEventListener("focus", () => showReadout(mark));
+        ui.markEls.set(item._key, group);
+        if (item._key === selectedKey) roving = group;
+      }
+      group.addEventListener("keydown", (event) => onMarkKey(event, mark));
+      mark.el = group;
+      ui.marks.push(mark);
+      root.appendChild(group);
+    }
+    const first = roving || (ui.marks[0] && ui.marks[0].el);
+    if (first) first.setAttribute("tabindex", "0");
+    clear(ui.canvas).appendChild(root);
+    ui.size = { width: geo.width, height: geo.height };
+    applyMarks();
+    if (view.autoFit) requestAnimationFrame(fitWidth);
+    else setScale(view.scale);
+  }
+
+  /** Dim the pins the filters hide and mark the selected one (no redraw: focus stays). */
+  function applyMarks() {
+    const selectedKey = view.selected && view.selected.kind === "pin" ? view.selected.key : null;
+    for (const mark of ui.marks || []) {
+      if (!mark.item) continue;
+      const selected = mark.item._key === selectedKey;
+      mark.el.classList.toggle("dim", !shownPin(mark.item));
+      mark.el.classList.toggle("sel", selected);
+      // The selection and the fading said to assistive technology too, not by colour alone.
+      mark.el.setAttribute("aria-pressed", selected ? "true" : "false");
+      const label = markLabel(mark);
+      if (mark.el.getAttribute("aria-label") !== label) {
+        mark.el.setAttribute("aria-label", label);
+        const title = mark.el.querySelector("title");
+        if (title) title.textContent = label;
+      }
+    }
+    for (const chip of ui.panel ? ui.panel.querySelectorAll(".pinchip[data-key]") : []) {
+      const item = view.data.byKey.get(chip.dataset.key);
+      chip.setAttribute("aria-pressed", chip.dataset.key === selectedKey ? "true" : "false");
+      chip.classList.toggle("dim", Boolean(item) && !shownPin(item));
+    }
+  }
+
+  function showReadout(mark) {
+    if (ui.readout) ui.readout.textContent = markLabel(mark);
+  }
+
+  function rove(target, scroll = true) {
+    for (const mark of ui.marks || []) mark.el.setAttribute("tabindex", mark === target ? "0" : "-1");
+    target.el.focus({ preventScroll: !scroll });
+    // Keep the pin in view inside the scrolled diagram.
+    if (scroll && typeof target.el.scrollIntoView === "function") target.el.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
+
+  /** Arrow keys move to the nearest pin that way; Home, End; Enter or Space select. */
+  function onMarkKey(event, mark) {
+    const dirs = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+    const marks = ui.marks || [];
+    let target = null;
+    if (dirs[event.key]) {
+      const [ux, uy] = dirs[event.key];
+      let best = Infinity;
+      for (const other of marks) {
+        if (other === mark) continue;
+        const dx = other.x - mark.x;
+        const dy = other.y - mark.y;
+        const along = dx * ux + dy * uy;
+        if (along <= 0.5) continue;
+        const score = along + Math.abs(dx * uy - dy * ux) * 3;
+        if (score < best) { best = score; target = other; }
+      }
+    } else if (event.key === "Home") target = marks[0];
+    else if (event.key === "End") target = marks[marks.length - 1];
+    else if ((event.key === "Enter" || event.key === " ") && mark.item) {
+      event.preventDefault();
+      selectPin(mark.item._key, { from: "diagram" });
+      return;
+    } else return;
+    event.preventDefault();
+    if (target) rove(target);
+  }
+
+  function setScale(scale) {
+    view.scale = Math.max(0.2, Math.min(4, scale));
+    const root = ui.canvas && ui.canvas.querySelector("svg");
+    if (root && ui.size) {
+      root.setAttribute("width", Math.ceil(ui.size.width * view.scale));
+      root.setAttribute("height", Math.ceil(ui.size.height * view.scale));
+    }
+  }
+
+  /** Fit the diagram in the canvas: its width, and its height when the canvas has a
+   *  height limit (the panes' height) unless that leaves it under 70 %, at most 1.6 times. */
+  function fitWidth() {
+    if (!ui.canvas || !ui.size || !ui.canvas.clientWidth) return;
+    const limit = parseFloat(getComputedStyle(ui.canvas).maxHeight);
+    const byHeight = Number.isFinite(limit) && limit > 80 ? (limit - 4) / ui.size.height : Infinity;
+    setScale(Math.min(1.6, (ui.canvas.clientWidth - 4) / ui.size.width, Math.max(byHeight, 0.7)));
+  }
+
+  function zoom(factor) {
+    view.autoFit = false;
+    setScale(view.scale * factor);
+  }
+
+  function legend(pins) {
+    const counts = new Map();
+    for (const row of pins) {
+      const fam = famOf(row.function);
+      if (!counts.has(fam)) counts.set(fam, new Map());
+      const fns = counts.get(fam);
+      fns.set(row.function, (fns.get(row.function) || 0) + 1);
+    }
+    const items = FAMILY_ORDER.filter((fam) => counts.has(fam)).map((fam) => {
+      const fns = [...counts.get(fam).entries()].sort((a, b) => fnRank(a[0]) - fnRank(b[0]));
+      const total = fns.reduce((sum, [, count]) => sum + count, 0);
+      return el("li", {}, swatch(fns[0][0]), el("span", { text: `${FAMILIES[fam]} (${total})` }),
+        el("span", { class: "codes", text: fns.map(([fn, count]) => `${fnInfo(fn).code} ${fnInfo(fn).label} ${count}`).join(", ") }));
+    });
+    items.push(el("li", {}, el("span", { class: "badge warning", text: "•" }), el("span", { text: "a dot on a pin: it has a finding (warning or info)" })));
+    return el("ul", { class: "legend", "aria-label": "Legend: the colours, codes and borders by function" }, items);
+  }
+
+  function unplacedList(pins, why, items) {
+    if (!pins.length) return null;
+    return el("div", { class: "section-gap" },
+      el("p", { class: "help", text: `${why}: ${plural(pins.length, "pin")}${why === "Not on the layout" ? " (a name or number outside the layout's scheme, or a second pin for one place)" : ""}.` }),
+      el("ul", { class: "pinlist" }, [...pins].sort(Shell.naturally).map((pin) => {
+        const item = items.get(pin);
+        const key = item ? item._key : null;
+        const selected = view.selected && view.selected.kind === "pin" && view.selected.key === key;
+        return el("li", {}, el("button", { type: "button", class: `pinchip${item && !shownPin(item) ? " dim" : ""}`,
+                                           "aria-pressed": selected ? "true" : "false", disabled: !item, data: key ? { key } : null,
+                                           title: item ? markLabel({ item }) : String(pin),
+                                           on: { click: () => { if (key) selectPin(key, { from: "list" }); } } },
+          item ? swatch(item.function) : null, String(pin), item ? el("span", { class: "code", text: fnInfo(item.function).code }) : null));
+      })));
+  }
+
+  // ---------- findings ----------
+
+  function findingsTab() {
+    const data = view.data;
+    const switcher = Shell.segmented({ label: "Group by", items: [
+      { id: "check", label: "Check" }, { id: "severity", label: "Severity" }, { id: "none", label: "None" }],
+    current: view.findGroup, onChange: (id) => {
+      view.findGroup = id;
+      if (ui.findTable) ui.findTable.setGroup(findGroupSpec());
+    } });
+    const notRun = Object.entries(data.notChecked);
+    const spec = tableSpec("findings", [
+      // data-fid: the row's finding, so keyboard focus finds its row again after a redraw.
+      { key: "severity", label: "Severity", value: (finding) => sevRank(finding.severity), text: (finding) => finding.severity,
+        render: (finding) => el("span", { data: { fid: String(finding._id) } }, sevBadge(finding.severity)) },
+      { key: "check", label: "Check", cls: "c-name", value: (finding) => checkTitle(finding.check) },
+      { key: "mcu", label: "Part", hidden: data.mapped.length < 2 },
+      { key: "pins", label: "Pins", cls: "c-name", value: (finding) => finding._pins.join(" "),
+        render: (finding) => el("span", { class: "findpins" }, finding._pins.slice(0, 6).map((pin) => pinButton(finding.mcu, pin)),
+          finding._pins.length > 6 ? el("span", { class: "muted", text: `+${finding._pins.length - 6} more` }) : null) },
+      { key: "issue", label: "Finding", cls: "c-msg" },
+    ], null);
+    ui.findTable = quiet(Shell.table({
+      label: "Findings", rows: data.findings, group: findGroupSpec(), rowKey: (finding) => finding._id,
+      onActivate: (finding) => selectFinding(finding._id), sort: spec.sort,
+      empty: `No finding from ${plural(data.checksRun.length, "check")} run.`,
+      columns: spec.columns,
+    }));
+    if (view.selected && view.selected.kind === "finding") ui.findTable.select((finding) => finding._id === view.selected.id);
+    Shell.append(ui.panel, [
+      el("div", { class: "filters" }, switcher.el),
+      ui.findTable.el,
+      notRun.length ? el("p", { class: "help", text: `Not checked: ${notRun.map(([check, why]) => `${checkTitle(check)} (${why})`).join("; ")}.` }) : null,
+      data.findings.length < data.findingsTotal ? el("p", { class: "help", text: `${data.findings.length} of ${plural(data.findingsTotal, "finding")} read: ${data.stopReason || "the paging stopped"}.` }) : null,
+      sectionsBlock(),
+    ]);
+  }
+
+  function findGroupSpec() {
+    if (view.findGroup === "none") return null;
+    if (view.findGroup === "severity") {
+      return { key: (finding) => finding.severity, label: (key) => sevBadge(key),
+               order: (a, b) => sevRank(a) - sevRank(b) };
+    }
+    return {
+      key: (finding) => finding.check,
+      label: (key) => checkTitle(key),
+      count: (key, rows) => {
+        const out = [];
+        const warnings = rows.filter((finding) => finding.severity === "warning").length;
+        if (warnings) out.push(el("span", { class: "badge warning", text: plural(warnings, "warning") }));
+        if (rows.length - warnings) out.push(el("span", { class: "badge info", text: `${rows.length - warnings} info` }));
+        return out;
+      },
+      // The checks in the tool's order; a check it may add later after them.
+      order: (a, b) => (CHECKS.includes(a) ? CHECKS.indexOf(a) : CHECKS.length) - (CHECKS.includes(b) ? CHECKS.indexOf(b) : CHECKS.length) ||
+        Shell.naturally(a, b),
+    };
+  }
+
+  /** What the checks found beside their findings: the debug interfaces, the boot and strap
+   *  pins with their level, and the external memories. */
+  function sectionsBlock() {
+    const blocks = sectionItems();
+    if (!blocks.length) return null;
+    if (!short()) return el("div", { class: "sections" }, blocks);
+    return el("details", { class: "more sections section-gap" }, el("summary", { text: "Debug access, boot pins and memories" }), blocks);
+  }
+
+  function sectionItems() {
+    const sections = view.data.sections;
+    const blocks = [];
+    const debug = sections.debug_access || {};
+    const debugItems = [];
+    for (const [mcu, interfaces] of Object.entries(debug)) {
+      for (const entry of interfaces || []) {
+        const reached = `${entry.reached} of ${plural(entry.required, "required pin")} reach a header or test point`;
+        debugItems.push(el("li", {}, el("strong", { text: `${mcu} ${String(entry.interface).toUpperCase()}` }),
+          `: ${entry.complete ? "complete" : "incomplete"}, ${reached}${(entry.missing_roles || []).length ? `; no pin for ${entry.missing_roles.join(", ")}` : ""}. `,
+          el("span", { class: "findpins" }, (entry.pins || []).map((pin) => pinButton(mcu, pin.pin, `${pin.role} ${pin.pin}`)))));
+      }
+    }
+    if (debugItems.length) blocks.push(el("h3", { text: "Debug access" }), el("ul", {}, debugItems));
+    const straps = sections.boot_straps || {};
+    const strapItems = [];
+    for (const [mcu, entries] of Object.entries(straps)) {
+      for (const entry of entries || []) {
+        strapItems.push(el("li", {}, pinButton(mcu, entry.pin, `${mcu} pin ${entry.pin}`),
+          ` ${entry.name || ""} (${entry.kind}): ${String(entry.level || "").replace(/_/g, " ")}${entry.level_basis ? `, ${entry.level_basis}` : ""}.`));
+      }
+    }
+    if (strapItems.length) blocks.push(el("h3", { text: "Boot and strap pins" }), el("ul", {}, strapItems));
+    const memories = sections.external_memory || [];
+    if (memories.length) {
+      blocks.push(el("h3", { text: "External memory" }), el("ul", {}, memories.map((entry) => el("li", {},
+        el("strong", { text: entry.designator }), ` ${entry.part ? `(${entry.part}) ` : ""}on a ${entry.bus} bus${entry.use ? `, ${entry.use}` : ""}: `,
+        (entry.external_access || []).length ? `reachable from ${entry.external_access.join(", ")}.` : "no header or test point reaches its bus."))));
+    }
+    return blocks;
+  }
+
+  // ---------- outputs ----------
+
+  async function textPage(args, format, offset, expect) {
+    const page = Shell.resultJson(await call("get_firmware_pin_map", { ...args, format, offset }));
+    if (page && page.error) throw new Error(page.message || page.error);
+    if (!page || typeof page[format] !== "string") throw new Error(`it holds no ${OUTPUTS[format]} text`);
+    if (expect && stamp(page) !== stamp(expect)) throw changedError(page, expect);
+    if (expect && (page.variant !== expect.variant || page.rows_total !== expect.rows_total)) {
+      throw new Error(`it is not a page of this ${OUTPUTS[format]} (${page.variant}, ${plural(page.rows_total, "pin")})`);
+    }
+    return page;
+  }
+
+  /** Ask the tool for one format with the map's mcu and checks, every page of it. again:
+   *  from offset 0 whatever is kept (Retry, Ask again); more: the pages after those kept
+   *  (the call's own first page, or a read that stopped). */
+  async function askOutput(format, { again = false, more = false } = {}) {
+    if (!view.data) return;
+    const args = { ...view.data.args };
+    const entry = view.outputs.get(format);
+    const usable = Boolean(entry && !entry.loading && !entry.error && sameArgs(entry.args, args));
+    const kept = !again && !more && entry && (entry.loading || usable);
+    const onFrom = more && usable && entry.next !== null && entry.next !== undefined && !entry.again;
+    if (!kept && (view.busy || view.closed || !canCall() || (more && !onFrom))) {
+      if (entry) view.outputFormat = format;
+      renderTab();
+      return;
+    }
+    view.outputFormat = format;
+    if (kept) {
+      renderTab();
+      return;
+    }
+    const pages = onFrom ? [...entry.pages] : [];
+    const fromResult = Boolean(onFrom && entry.fromResult);
+    view.outputs.set(format, { loading: true, args, pages });
+    view.busy = onFrom ? `Asking ${TOOL} for the rest of the ${OUTPUTS[format]}, from offset ${entry.next}…` : `Asking ${TOOL} for the ${OUTPUTS[format]}…`;
+    renderTab();
+    renderHeadBlocks();
+    Shell.announce(view.busy);
+    let failed = null;
+    try {
+      if (!pages.length) pages.push(await textPage(args, format, 0, null));
+      const before = pages.length;
+      const read = await Shell.readPages({
+        first: pages[pages.length - 1], tool: TOOL, budget: Shell.pageBudget(MAX_PAGES, onFrom ? 0 : 1), closed: () => view.closed,
+        pageOffset: textNext,
+        getPage: async (offset) => {
+          try {
+            return await textPage(args, format, offset, pages[0]);
+          } catch (error) {
+            failed = error;
+            throw error;
+          }
+        },
+        onPage: (page) => pages.push(page),
+      });
+      // Pages are numbered from offset 0 (readPages counts from the page it starts at).
+      const stopped = !read.stopped ? "" : view.closed ? "the view was closed"
+        : read.stopped.replace(/^page \d+ of/, `page ${pages.length + 1} of`);
+      view.outputs.set(format, { pages, args, stopped, fromResult, again: Boolean(failed && failed.changed),
+                                 next: stopped ? textNext(pages[pages.length - 1]) : null });
+      Shell.announce(`${OUTPUTS[format]}: ${plural(pages.length - before + (onFrom ? 0 : 1), "page")} read`);
+    } catch (error) {
+      view.outputs.set(format, { error: view.closed ? "the view was closed" : error.message, args, pages: [], next: null });
+      if (!view.closed) Shell.announce(`${OUTPUTS[format]} failed`);
+    }
+    view.busy = "";
+    renderHeadBlocks();
+    if (view.tab === "outputs") renderTab();
+  }
+
+  function outputsTab() {
+    const data = view.data;
+    const canAsk = canCall() && !view.closed;
+    // A format neither kept nor askable (no tool calls, the view closed) is a button that
+    // says so rather than one that does nothing.
+    const buttons = OUTPUT_KEYS.map((format) => el("button", {
+      type: "button", class: "btn", text: OUTPUTS[format], "aria-pressed": view.outputFormat === format ? "true" : "false",
+      "aria-disabled": (view.busy || !canAsk) && !view.outputs.has(format) ? "true" : null,
+      title: `${argText({ ...data.args, format })}: the tool's own ${OUTPUTS[format]} text${canAsk || view.outputs.has(format) ? "" : " (ask Claude for it: the view cannot ask)"}`,
+      on: { click: () => askOutput(format) },
+    }));
+    Shell.append(ui.panel, [
+      // A short host: the buttons' titles say it, the text keeps the height.
+      short() ? null : el("p", { class: "help", text: `The tool's own text for the firmware repository, asked with the map's arguments and shown as ${TOOL} wrote it, page by page: select it and copy it. A heuristic starting point: check every line against the schematic and the datasheet.` }),
+      el("div", { class: "outs", role: "group", "aria-label": "Outputs" }, buttons),
+      !canAsk ? el("p", { class: "help", text: view.closed ? "The view was closed: it asks the server nothing more." : `This host does not let the view ask for them: ask Claude for ${TOOL} with format csv, c_header or devicetree.` }) : null,
+      view.outputFormat ? outputBlock(view.outputFormat) : null,
+    ]);
+  }
+
+  function pageRange(page) {
+    const total = page.rows_total || 0;
+    const start = (page.offset || 0) + 1;
+    const end = Math.min(page.has_more && page.next_offset !== undefined ? page.next_offset : total, total);
+    return total ? `pins ${start} to ${end} of ${total}` : "no pins";
+  }
+
+  function outputBlock(format) {
+    const entry = view.outputs.get(format);
+    const canAsk = canCall() && !view.closed;
+    if (!entry) {
+      return el("p", { class: "muted", text: canAsk ? `Ask for the ${OUTPUTS[format]}: press its button.` : `The ${OUTPUTS[format]} was not asked for.` });
+    }
+    const label = argText({ ...entry.args, format });
+    const head = el("h3", { text: `${OUTPUTS[format]}: ${label}${entry.fromResult ? ", from the call's own result" : ""}` });
+    if (entry.loading) return el("div", {}, head, el("p", { class: "muted", text: `Asking ${label}…` }));
+    const blocks = [head];
+    if (entry.error) {
+      blocks.push(el("div", { class: "notice error" }, el("span", { class: "grow", text: `${label} failed: ${entry.error}` }),
+        canAsk ? el("button", { type: "button", class: "btn-link", text: "Retry", on: { click: () => askOutput(format, { again: true }) } }) : null));
+    }
+    const more = entry.next !== null && entry.next !== undefined;
+    entry.pages.forEach((page, index) => {
+      const area = el("textarea", { class: "out", readonly: true, rows: "16", wrap: "off", spellcheck: "false",
+                                    "aria-label": `${OUTPUTS[format]} text, page ${index + 1} of ${entry.pages.length}${more ? " read" : ""}` });
+      area.value = page[format];
+      blocks.push(el("div", { class: "outpage" },
+        el("div", { class: "row" },
+          el("span", { text: `Page ${index + 1} of ${entry.pages.length}${more ? " read" : ""}: ${pageRange(page)}, variant ${page.variant}${entry.fromResult && index === 0 ? ", the call's own page" : ""}` }),
+          el("button", { type: "button", class: "btn-link", text: "Select all", on: { click: () => { area.focus(); area.select(); } } })),
+        area));
+    });
+    // Not every page read: why, and a button that reads on (or, when the netlist changed,
+    // asks again from offset 0).
+    if (entry.stopped || more) {
+      const why = entry.stopped ? `Not every page was read: ${entry.stopped}.`
+        : `Only the call's own first page is here: the ${OUTPUTS[format]} goes on from offset ${entry.next}.`;
+      const action = !canAsk ? null : entry.again || !more
+        ? el("button", { type: "button", class: "btn-link", text: "Ask again", title: `${label}: every page again, from offset 0`, "aria-disabled": view.busy ? "true" : null,
+                         on: { click: () => { if (!view.busy) askOutput(format, { again: true }); } } })
+        : el("button", { type: "button", class: "btn-link", text: "Read the other pages", title: `${label}: the pages from offset ${entry.next}`, "aria-disabled": view.busy ? "true" : null,
+                         on: { click: () => { if (!view.busy) askOutput(format, { more: true }); } } });
+      blocks.push(el("div", { class: `notice ${entry.stopped ? "warning" : "info"}` }, el("span", { class: "grow", text: why }), action));
+    }
+    if (entry.pages.length > 1) blocks.push(el("p", { class: "help", text: "Each page is the tool's text for its pins (with its own heading); the tool names the identifiers over all pages, so pages joined define each name once." }));
+    return el("div", {}, blocks);
+  }
+
+  // ---------- selection and the details pane ----------
+
+  function selectPin(key, { from = "" } = {}) {
+    if (!view.data || !view.data.byKey.has(key)) return;
+    const fromTable = Boolean(ui.table && ui.table.el.contains(document.activeElement));
+    view.selected = { kind: "pin", key };
+    if (ui.table) ui.table.select((row) => row._key === key);
+    if (ui.findTable) ui.findTable.select(() => false);
+    applyMarks();
+    renderPane();
+    const row = view.data.byKey.get(key);
+    // The details took the main pane's place (a short, narrow host): focus goes to them.
+    if ((fromTable || from) && ui.split && ui.split.classList.contains("solo") && ui.closeButton) ui.closeButton.focus();
+    Shell.announce(`Details: pin ${row.pin}${row.net ? `, net ${row.net}` : ""}`);
+  }
+
+  function selectFinding(id) {
+    const fromTable = Boolean(ui.findTable && ui.findTable.el.contains(document.activeElement));
+    view.selected = { kind: "finding", id };
+    if (ui.findTable) ui.findTable.select((finding) => finding._id === id);
+    if (ui.table) ui.table.select(() => false);
+    applyMarks();
+    renderPane();
+    if (fromTable && ui.split && ui.split.classList.contains("solo") && ui.closeButton) ui.closeButton.focus();
+    const finding = view.data.findings.find((item) => item._id === id);
+    if (finding) Shell.announce(`Details: ${checkTitle(finding.check)}`);
+  }
+
+  /** Close the details (Close, or Esc): focus goes back to the row or pin selected. */
+  function closeDetails() {
+    const selected = view.selected;
+    const inPane = ui.pane && ui.pane.contains(document.activeElement);
+    view.selected = null;
+    if (ui.table) ui.table.select(() => false);
+    if (ui.findTable) ui.findTable.select(() => false);
+    applyMarks();
+    renderPane();
+    if (!inPane && document.activeElement && document.activeElement !== document.body) return;
+    if (selected && selected.kind === "pin") {
+      if (ui.table && ui.table.focus((row) => row._key === selected.key)) return;
+      const mark = ui.markEls && ui.markEls.get(selected.key);
+      if (mark && view.tab === "package") {
+        mark.focus();
+        return;
+      }
+      const chip = ui.panel && [...ui.panel.querySelectorAll(".pinchip[data-key]")].find((node) => node.dataset.key === selected.key);
+      if (chip && chip.getClientRects().length) {
+        chip.focus();
+        return;
+      }
+    }
+    if (selected && selected.kind === "finding" && ui.findTable && ui.findTable.focus((finding) => finding._id === selected.id)) return;
+    if (ui.tabBar) ui.tabBar.focus();
+  }
+
+  /** The pin in the Pins tab: the filters that would hide it are cleared, its row focused. */
+  function showInTable(key) {
+    const row = view.data.byKey.get(key);
+    if (!row || row._power) return;
+    view.tab = "pins";
+    if (view.chipsOn && !view.chipsOn.has(row.function)) view.chipsOn = null;
+    if (view.query && !Shell.matches(rowText(row), view.query)) view.query = "";
+    if (ui.tabBar) ui.tabBar.set("pins");
+    renderTab();
+    if (ui.table && !ui.table.focus((item) => item._key === key) && view.groupBy !== "none") {
+      ui.table.setGroup(groupSpec());  // its group was collapsed: the groups open again
+      ui.table.select((item) => item._key === key);
+      ui.table.focus((item) => item._key === key);
+    }
+  }
+
+  function showOnPackage(key) {
+    const row = view.data.byKey.get(key);
+    if (!row) return;
+    view.tab = "package";
+    if (view.part !== row.mcu) {
+      view.part = row.mcu;
+      view.layout = null;
+    }
+    if (ui.tabBar) ui.tabBar.set("package");
+    renderTab();
+    const mark = (ui.marks || []).find((item) => item.item && item.item._key === key);
+    if (mark) rove(mark);
+    else {
+      const chip = ui.panel && [...ui.panel.querySelectorAll(".pinchip")].find((node) => node.getAttribute("aria-pressed") === "true");
+      if (chip) chip.focus();
+    }
+  }
+
+  /** Focus for a pane button that is gone (Ask becoming "Asking…"): the pane's heading. */
+  const paneHeading = () => (ui.pane ? ui.pane.querySelector("h2") : null);
+
+  function renderPane() {
+    if (!ui.pane) return;
+    const top = ui.pane.scrollTop;
+    const before = ui.paneShows;
+    Shell.keepFocus(ui.pane, drawPane, paneHeading);
+    if (before && before === ui.paneShows) ui.pane.scrollTop = top;
+  }
+
+  function drawPane() {
+    clear(ui.pane);
+    ui.closeButton = null;
+    const selected = view.selected;
+    const row = selected && selected.kind === "pin" ? view.data.byKey.get(selected.key) : null;
+    const finding = selected && selected.kind === "finding" ? view.data.findings.find((item) => item._id === selected.id) : null;
+    const shown = Boolean(row || finding);
+    ui.paneShows = row ? `pin ${row._key}` : finding ? `finding ${finding._id}` : "";
+    ui.pane.classList.toggle("idle", !shown);
+    if (ui.split) ui.split.classList.toggle("solo", shown && compactHost());
+    if (row) {
+      Shell.append(ui.pane, pinPane(row));
+      return;
+    }
+    if (finding) {
+      Shell.append(ui.pane, findingPane(finding));
+      return;
+    }
+    Shell.append(ui.pane, [
+      el("h2", { text: "Select a pin", tabindex: "-1" }),
+      el("p", { class: "help", text: "Click a pin in the table or on the package (or move to it and press Enter) for its name, net, function and basis, pull, the parts it reaches, its findings and the net and parts from the server." }),
+      el("p", { class: "help", text: "Keys: Up and Down move between rows and group headers, Enter selects or opens and closes a group, Left and Right close and open a group, Esc closes the details." }),
+    ]);
+  }
+
+  function closeRow(title) {
+    ui.closeButton = el("button", { type: "button", class: "btn", text: "Close", on: { click: closeDetails } });
+    return el("div", { class: "row" }, el("h2", { text: title, tabindex: "-1" }), ui.closeButton);
+  }
+
+  /** The pin's place in the checks' sections: its boot or strap entry, its debug role. */
+  function sectionFacts(row) {
+    const out = [];
+    const straps = listOf(own(view.data.sections.boot_straps, row.mcu)).filter((entry) => String(entry.pin) === row.pin);
+    for (const entry of straps) {
+      out.push(["Boot or strap", `${entry.kind}: ${String(entry.level || "").replace(/_/g, " ")}${entry.level_basis ? ` (${entry.level_basis})` : ""}`]);
+    }
+    for (const entry of listOf(own(view.data.sections.debug_access, row.mcu))) {
+      for (const pin of entry.pins || []) {
+        if (String(pin.pin) !== row.pin) continue;
+        const access = (pin.access || []).length ? `reaches ${pin.access.join(", ")}` : pin.via_processor ? `only through ${pin.via_processor.join(", ")}` : "reaches no header or test point";
+        out.push(["Debug", `${String(entry.interface).toUpperCase()} ${pin.role}: ${access}`]);
+      }
+    }
+    return out;
+  }
+
+  function pinPane(row) {
+    const data = view.data;
+    const info = fnInfo(row.function);
+    const findings = data.findingsByPin.get(row._key) || [];
+    const title = `${data.mapped.length > 1 ? `${row.mcu} ` : ""}pin ${row.pin}`;
+    const out = [
+      closeRow(title.charAt(0).toUpperCase() + title.slice(1)),
+      el("div", { class: "summary" }, el("span", { class: "badge" }, functionCell(row)),
+        row.type ? el("span", { class: "badge muted", text: row.type }) : null,
+        row.unused ? el("span", { class: "badge muted", text: "unused" }) : null,
+        findings.length ? el("span", { class: `badge ${findings.some((finding) => finding.severity === "warning") ? "warning" : "info"}`, text: plural(findings.length, "finding") }) : null),
+    ];
+    if (row._power) {
+      out.push(el("p", { class: "help", text: `A ${info.label} pin on ${row.net ? `net ${row.net}` : "no net"}: ${TOOL} summarises power and ground pins per net, with no name or type.` }));
+    } else {
+      out.push(Shell.facts([
+        ["Name", row.name || null],
+        ["Could be", (row.alternates || []).join(", ") || null],
+        ["Port/bit", portText(row) || null],
+        ["Type", row.type || null],
+        ["Net", row.net || "not connected"],
+        ["Function", `${info.label}${row.role ? ` ${row.role}` : ""} (${info.code})`],
+        ["Basis", (row.basis || []).length ? el("ul", { class: "flat" }, row.basis.map((item) => el("li", { text: item }))) : null],
+        ["Pull", pullText(row) || null],
+        ["Reaches", (row.peers || []).length ? el("ul", { class: "flat" }, row.peers.map((peer) => el("li", { text: `${peerLabel(peer)}, ${peer.kind}` })),
+          (row.peers_total || 0) > row.peers.length ? el("li", { class: "muted", text: `and ${row.peers_total - row.peers.length} more (the tool lists ${row.peers.length})` }) : null) : null],
+        ["Not Fitted paths", (row.not_fitted_paths || []).join("; ") || null],
+        ["Same part", (row.same_part_pins || []).length ? `shares its net with pins ${row.same_part_pins.join(", ")}` : null],
+        ...sectionFacts(row),
+      ]));
+    }
+    if (findings.length) {
+      out.push(el("h3", { text: plural(findings.length, "finding") }), el("ul", { class: "flat" }, findings.map((finding) => el("li", {},
+        sevBadge(finding.severity), " ",
+        el("button", { type: "button", class: "btn-link", text: checkTitle(finding.check), title: "The finding's details", on: { click: () => selectFinding(finding._id) } }),
+        `: ${finding.issue}`))));
+    }
+    out.push(el("div", { class: "btn-row" },
+      row._power ? null : el("button", { type: "button", class: "btn", text: "Show in the table", on: { click: () => showInTable(row._key) } }),
+      view.tab !== "package" ? el("button", { type: "button", class: "btn", text: "Show on the package", on: { click: () => showOnPackage(row._key) } }) : null));
+    out.push(...serverSection(row));
+    return out;
+  }
+
+  /** Buttons that ask query_net for the pin's net and get_component for the parts it
+   *  reaches, and their answers, each labelled with the call. */
+  function serverSection(row) {
+    const head = el("h3", { text: "From the server" });
+    if (view.closed) return [head, el("p", { class: "muted", text: "The view was closed: it asks the server nothing more." })];
+    if (!canCall()) return [head, el("p", { class: "muted", text: "This host does not let the view call tools: ask Claude for query_net or get_component." })];
+    const asks = [];
+    if (row.net) asks.push(["query_net", { pattern: Shell.exactPattern(row.net) }, `query_net ${row.net}`]);
+    const parts = [...new Set((row.peers || []).map((peer) => String(peer.designator)))].slice(0, 4);
+    for (const part of parts) asks.push(["get_component", { refdes: part }, `get_component ${part}`]);
+    if (!asks.length) return [head, el("p", { class: "muted", text: "Not connected: no net or part to ask about." })];
+    const out = [head, el("div", { class: "btn-row" }, asks.map(([tool, args, text]) => {
+      const entry = answers.get(answerKey(tool, args));
+      const loading = Boolean(entry && entry.loading);
+      return el("button", { type: "button", class: "btn", text: loading ? "Asking…" : text, "aria-disabled": loading ? "true" : null,
+                            title: `${tool}(${Object.entries(args).map(([key, value]) => `${key}="${value}"`).join(", ")})`,
+                            on: { click: () => askDetail(tool, args) } });
+    }))];
+    for (const [tool, args] of asks) {
+      const entry = answers.get(answerKey(tool, args));
+      if (entry) out.push(answerBlock(tool, args, entry));
+    }
+    return out;
+  }
+
+  function answerBlock(tool, args, entry) {
+    const label = `${tool}(${Object.entries(args).map(([key, value]) => `${key}="${value}"`).join(", ")})`;
+    const head = el("h4", { text: label });
+    if (entry.loading) return el("div", { class: "answer" }, head, el("p", { class: "muted", text: "Asking…" }));
+    if (entry.error) {
+      return el("div", { class: "answer" }, head, el("div", { class: "notice error" }, el("span", { class: "grow", text: entry.error }),
+        canCall() && !view.closed ? el("button", { type: "button", class: "btn-link", text: "Retry", on: { click: () => askDetail(tool, args) } }) : null));
+    }
+    const { json, text } = parsedAnswer(entry);
+    const again = canCall() && !view.closed ? el("button", { type: "button", class: "btn-link", text: "Ask again",
+      title: "The files may have changed: ask again", on: { click: () => askAgain(tool, args) } }) : null;
+    if (!json) return el("div", { class: "answer" }, head, el("pre", { class: "text", text: String(text).slice(0, 4000) }), again);
+    if (json.error) return el("div", { class: "answer" }, head, el("div", { class: "notice warning", text: json.message || json.error }), again);
+    if (tool === "query_net") {
+      const pins = json.pins || json.pins_sample || [];
+      return el("div", { class: "answer" }, head,
+        Shell.facts([["Net", json.net], ["Pins", String(json.pin_count)], ["Note", json.message || null]]),
+        el("ul", { class: "flat" }, pins.slice(0, 40).map((pin) => el("li", { text: `${pin.refdes}.${pin.pin}` })),
+          pins.length > 40 ? el("li", { class: "muted", text: `and ${pins.length - 40} more` }) : null), again);
+    }
+    const pins = Object.keys(json.pins || {}).length;
+    return el("div", { class: "answer" }, head,
+      el("p", { class: "help small", text: "As the active variant shows it when asked." }),
+      Shell.facts([
+        ["Fitted", json.dnp ? "no: Not Fitted in the active variant" : "yes"],
+        ["Value", json.value], ["Description", json.description], ["MPN", json.mpn], ["Sheet", json.sheet],
+        ["Pins", pins ? String(pins) : null],
+      ]), again);
+  }
+
+  /** Any field of a finding as text: a list joined, an object's entries, else the value. */
+  function fieldText(value) {
+    if (value === null || value === undefined || value === "") return null;
+    if (Array.isArray(value)) return value.map((item) => fieldText(item)).filter(Boolean).join(", ") || null;
+    if (typeof value === "object") return Object.entries(value).map(([key, item]) => `${key} ${fieldText(item) || "–"}`).join(", ") || null;
+    return String(value);
+  }
+
+  /** One line per part of an object field (the contract's objects), else the field as text. */
+  function perPart(value, line) {
+    if (!isObject(value)) return fieldText(value);
+    const entries = Object.entries(value);
+    return entries.length ? el("ul", { class: "flat" }, entries.map(([part, info]) => el("li", { text: `${part}: ${line(info)}` }))) : null;
+  }
+
+  // A variant finding's parts, {R3: {fitted_in: [...], not_fitted_in: [...]}}, and values,
+  // {R2: {A: null, B: "1k"}} (null: the variant leaves the value as drawn, the tool's words).
+  const fittedText = (info) => (isObject(info) && (Array.isArray(info.fitted_in) || Array.isArray(info.not_fitted_in))
+    ? `fitted in ${listOf(info.fitted_in).join(", ") || "no variant"}; Not Fitted in ${listOf(info.not_fitted_in).join(", ") || "no variant"}`
+    : fieldText(info) || "–");
+  const valuesText = (info) => (isObject(info)
+    ? Object.entries(info).map(([variant, value]) => `${variant} ${value === null || value === undefined || value === "" ? "as drawn" : fieldText(value)}`).join(", ") || "–"
+    : fieldText(info) || "–");
+
+  function findingPane(finding) {
+    const fields = [
+      ["Part", finding.mcu],
+      ["Pins", finding._pins.length ? el("span", { class: "findpins" }, finding._pins.map((pin) => pinButton(finding.mcu, pin))) : null],
+      ["Net", fieldText(finding.net)],
+      ["Level", finding.level ? String(finding.level).replace(/_/g, " ") : null],
+      ["Interface", fieldText(finding.interface) || fieldText(finding.interfaces)],
+      ["Memory", finding.memory ? `${fieldText(finding.memory)}${finding.bus ? ` on a ${fieldText(finding.bus)} bus` : ""}` : null],
+      ["Peer", finding.peer ? `${fieldText(finding.peer)}${finding.peer_class ? ` (${fieldText(finding.peer_class)})` : ""}${finding.certain ? ", certain" : ""}` : null],
+      ["Parts", perPart(finding.parts, fittedText)],
+      ["Values", perPart(finding.values, valuesText)],
+      ["Designators", fieldText(finding.designators)],
+    ];
+    return [
+      closeRow(checkTitle(finding.check)),
+      el("div", { class: "summary" }, sevBadge(finding.severity), el("span", { class: "badge mono", text: finding.check })),
+      el("p", { class: "help", text: finding.issue }),
+      Shell.facts(fields),
+      el("p", { class: "foot", text: "A heuristic from pin and net names: the schematic, the datasheet and the firmware decide." }),
+    ];
+  }
+
+  // ---------- host ----------
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && view.selected && !event.defaultPrevented) closeDetails();
+  });
+  Shell.on("toolInput", (args) => {
+    view.args = args || {};
+    view.argsKnown = true;
+    if (!view.data) showState("loading", "Reading the pin map", `${argText(cleanArgs(view.args))} is mapping the processor's pins.`);
+  });
+  Shell.on("toolInputPartial", () => {
+    if (!view.data) showState("loading", "Reading the pin map", "Waiting for the tool's arguments.");
+  });
+  Shell.on("toolResult", (result) => loadResult(result));
+  Shell.on("toolCancelled", (reason) => {
+    if (!view.data) showState("info", `The ${TOOL} call was cancelled`, reason || "No result to show.");
+  });
+  Shell.on("teardown", () => {
+    view.closed = true;
+    closeCalls();
+    view.busy = "";
+    for (const [format, entry] of view.outputs) {
+      if (entry.loading) view.outputs.set(format, { error: "the view was closed", args: entry.args, pages: [], next: null });
+    }
+    Shell.announce("The view was closed: it asks the server nothing more");
+    if (view.data && ui.header) {
+      renderHeadBlocks();
+      if (ui.panel) renderTab();
+      renderPane();
+    } else if (view.textOnly) {
+      app.prepend(Shell.notice("info", "The view was closed: it asks the server nothing more."));
+    } else if (!view.data) {
+      showState("info", "The view was closed", "It asks the server nothing more, and no pin map was read before it closed.");
+    }
+  });
+  // The host's size or display mode changed: the narrow and short layouts may too; the
+  // disclosures the user has not set open or fold again, and the diagram fits again.
+  const layoutSig = () => `${narrowHost()}|${Shell.context().displayMode}|${short()}|${compactHost()}`;
+  let wasLayout = layoutSig();
+  function onLayoutChange() {
+    if (!view.data || !ui.header) return;
+    if (view.autoFit && ui.canvas) fitWidth();
+    if (layoutSig() === wasLayout) return;
+    wasLayout = layoutSig();
+    if (view.auto.filters) view.filtersOpen = null;
+    if (view.auto.cands) view.candsOpen = null;
+    // Focus goes back to the control, the row or the pin it was on.
+    const mark = Shell.focusMark(app);
+    const spot = app.contains(document.activeElement) ? focusSpot() : null;
+    renderAll();
+    if (!restoreSpot(spot) && mark) Shell.refocus(app, mark, () => ui.headline || null);
+  }
+  Shell.on("context", () => {
+    onLayoutChange();
+    queueOwnFit();
+  });
+  window.addEventListener("resize", () => {
+    onLayoutChange();
+    queueOwnFit();
+  });
+
+  // Full screen with no height from the host: the shell then fits no pane (it has no
+  // limit), so the page fits its panes to the window's own height, on #app (the shell sets
+  // the root's --pane-height only from a height the host gives).
+  let ownFit = "";
+  let ownQueued = false;
+  function fitOwnHeight() {
+    ownQueued = false;
+    const dims = Shell.context().containerDimensions || {};
+    const mine = Shell.context().displayMode === "fullscreen" && !(Number(dims.height || dims.maxHeight) > 0);
+    const limit = window.innerHeight;
+    if (!mine || !limit) {
+      if (ownFit) app.style.removeProperty("--pane-height");
+      ownFit = "";
+      return;
+    }
+    const html = document.documentElement;
+    // The page's height with its scrollbar shown, as the shell measures it.
+    const height = () => {
+      const saved = [html.style.height, html.style.overflowY];
+      html.style.height = "max-content";
+      html.style.overflowY = "scroll";
+      const value = Math.ceil(html.getBoundingClientRect().height);
+      [html.style.height, html.style.overflowY] = saved;
+      return value;
+    };
+    const set = (px) => app.style.setProperty("--pane-height", `${px}px`);
+    const state = () => `${limit}|${window.innerWidth}|${app.style.getPropertyValue("--pane-height")}|${height()}`;
+    let current = parseInt(app.style.getPropertyValue("--pane-height"), 10);
+    if (!Number.isFinite(current)) {
+      current = limit;
+      set(current);
+    }
+    if (state() === ownFit) return;
+    // Up from the current height only, unless the page is too tall (pane scroll positions stay).
+    let low = current;
+    let high = limit;
+    if (current > limit || height() > limit) {
+      low = 64;
+      high = Math.min(current, limit);
+    }
+    while (high - low > 4) {
+      const middle = Math.floor((low + high) / 2);
+      set(middle);
+      if (height() <= limit) low = middle;
+      else high = middle;
+    }
+    set(high);
+    if (height() > limit) set(low);
+    ownFit = state();
+  }
+  function queueOwnFit() {
+    if (ownQueued) return;
+    ownQueued = true;
+    setTimeout(fitOwnHeight, 30);
+  }
+  if (typeof ResizeObserver === "function") new ResizeObserver(queueOwnFit).observe(document.body);
+
+  showState("loading", "Connecting to the host", "");
+  Shell.connect({ name: "altium-copilot-kc Firmware pin map", version: "1.0.0" })
+    .then(() => {
+      if (!view.data) showState("loading", `Waiting for ${TOOL}`, "The pin map appears when the tool's result arrives.");
+    })
+    .catch((error) => showState("error", "This view needs a host that shows MCP Apps", error.message));
+})();
+</script>
+</body>
+</html>

@@ -401,6 +401,53 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
     host's message capability, or when it is declined, the sentence is shown to copy.
     The shared shell gains `canSendMessage` and `sendMessage`.
   - `check_release_readiness` and `project_tour` keep their text and link no view.
+- Firmware pin map view (roadmap #75): Claude Desktop (and other MCP Apps hosts) draws
+  `get_firmware_pin_map`'s result as an interactive pinout; its text result is unchanged,
+  byte for byte (only its `_meta` links the view), and Claude Code shows the text as before.
+  - The page (`server/ui/firmware_pins.html`, one `VIEWS` entry; the registry stays one tool
+    per view and no app-only tool is added) reads every page of the table, from offset 0
+    when the result is a later page; a `csv`, `c_header` or `devicetree` result is asked
+    again as the table (its own text page kept in the Outputs tab and shown there first),
+    or, where the host lets the view call no tools, shown as the tool wrote it, with the
+    reason. A data contract in the page is checked on every page, and a page of another
+    netlist (its `netlist_updated_utc`) is not merged. A read that stops (a failed page,
+    the 60-page budget) says why and offers Read the rest; after a netlist change, Read
+    again from offset 0. A result the host sends twice is read once.
+  - Pins: a sortable, filterable table (number, name and alternates, port and bit, type,
+    net, function with its basis, pull, parts reached) grouped by function, port or none,
+    function chips with counts, a column chooser, and the power and ground pins per net. A
+    candidate picker asks the tool again with `mcu=` when it ranked several processors or
+    one that `mcu=` did not map. The sort and the columns chosen stay across tabs and
+    layout changes.
+  - Package: a layout by pin number, labelled so and never drawn as a footprint: a ball
+    grid when ball names (A1, B12) name the pins, numbers 1 to N around four sides (QFP and
+    QFN order) or two, else a list; every pin is placed once or listed as not on the layout
+    (an odd last number such as a QFN's exposed pad, a name outside the scheme); a read
+    that stopped short of a part's pins draws no layout by number and says why. On request
+    the pad centres `get_component_placement` gives for the part (seen from the top, pin 1
+    marked, function codes or pin numbers in the pads; Retry when the call fails).
+    Colours by function from a validated categorical palette, with a code in each pin, a
+    legend and a dot for findings; the selection, the pins the Pins tab's filters fade
+    (said on the tab, with Show every pin) and the findings' severities are in each pin's
+    label too. Hover shows a pin; the keyboard (arrows to the nearest pin, Enter) and a
+    click select it in the table and the diagram alike.
+  - Findings grouped by check with their severities and links to their pins, with the debug
+    interfaces, boot and strap levels and external memories (a variant finding's parts
+    and values per part); a details pane per pin with `query_net` and `get_component`.
+    Outputs: the tool's own CSV, C header and devicetree text, asked with the map's
+    arguments, shown unchanged page by page in a read-only text area (no download, no
+    clipboard access).
+  - Read-only tools only (`get_firmware_pin_map`, `query_net`, `get_component`,
+    `get_component_placement`), one call at a time; states for no project, no netlist, no
+    processor, an unknown `mcu`, a partial read with its reason, a cancelled call and a
+    closed view.
+  - Tests (`tests/test_ui_firmware_pins.py`): the resource and link, the self-contained
+    page, the read-only rule, the contract and paging (every pin once) on the public
+    examples with processors (Mini PC WiFi and Motherboard, Bluetooth Sentinel,
+    SpiritLevel), the repo's fixture and synthetic processors (QFP-like and odd numbering,
+    ball names, many alternate functions, several candidates, several pages, variants that
+    change parts, a stopped read, another netlist), the layout rule, the outputs as the
+    tool's own text and the unchanged text results.
 - `trace_net_across_boards`, `check_multiboard` and `get_system_connections` (roadmap
   #54): multi-board systems (`.PrjMbd`) read offline; the loaded project is never
   changed and none of the three needs its netlist.
