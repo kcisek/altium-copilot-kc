@@ -4,8 +4,10 @@
    postMessage with window.parent: ui/initialize, ui/notifications/initialized, the
    tool-input, tool-input-partial, tool-result, tool-cancelled and host-context-changed
    notifications, ui/resource-teardown, tools/call with request ids and timeouts (only
-   when the host offers serverTools), and ui/notifications/size-changed when the
-   content's size changes, with the panes fitted to the host's containerDimensions.
+   when the host offers serverTools), ui/message (a user-role text message into the
+   conversation, only when the host offers message.text; a denial is an error), and
+   ui/notifications/size-changed when the content's size changes, with the panes fitted
+   to the host's containerDimensions.
    Theme: the host's theme and style variables (else prefers-color-scheme).
    Widgets: el/svg builders (text only, never HTML), a filter box, a sortable table with
    a column chooser, sticky header, collapsible groups with counts and keyboard focus that
@@ -141,6 +143,22 @@ const Shell = (() => {
     if (!canCallTools()) throw new Error("This host does not let the view call the server's tools.");
     const result = await request("tools/call", { name, arguments: args || {} }, timeoutMs);
     if (result && result.isError) throw new Error(resultText(result) || `${name} failed.`);
+    return result || {};
+  }
+
+  /** True when the host takes a text message into the conversation: hostCapabilities
+   *  .message.text (message: {} declares no content type, so it is not enough). */
+  function canSendMessage() {
+    return Boolean(capabilities.message && capabilities.message.text);
+  }
+
+  /** Send a user-role text message into the conversation (ui/message). The host may ask
+   *  the user first, hence the long wait. A denial, as a JSON-RPC error or as a result
+   *  with isError, throws. */
+  async function sendMessage(text, timeoutMs = 120000) {
+    if (!canSendMessage()) throw new Error("This host does not let the view send a message.");
+    const result = await request("ui/message", { role: "user", content: [{ type: "text", text: String(text) }] }, timeoutMs);
+    if (result && result.isError) throw new Error("The host did not deliver the message.");
     return result || {};
   }
 
@@ -999,7 +1017,8 @@ const Shell = (() => {
   }
 
   return {
-    PROTOCOL_VERSION, on, connect, request, notify, canCallTools, callTool, resultText, resultJson, log,
+    PROTOCOL_VERSION, on, connect, request, notify, canCallTools, callTool, canSendMessage, sendMessage,
+    resultText, resultJson, log,
     requestDisplayMode, canDisplay, context: () => context, capabilities: () => capabilities,
     el, svg, clear, append, matches, naturally, plural, filterBox, table, tabs, state, notice,
     levelBadge, chips, segmented, facts, keepFocus, focusMark, refocus, neighbour, announce, roomy,

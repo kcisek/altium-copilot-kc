@@ -120,6 +120,7 @@ WORKING_TOOL_CALLS = {
     # A library symbol needs no netlist: one installed library holding it.
     "check_pin_table": lambda: _check_pin_table(),
     "check_release_readiness": lambda: main.check_release_readiness(),
+    "get_project_dashboard": lambda: main.get_project_dashboard(),
     "release_review": lambda: main.release_review(),
     "run_review_checklist": lambda: main.run_review_checklist("pcb"),
     # The example pack: its select rules say netlist_required, its tool rule runs.

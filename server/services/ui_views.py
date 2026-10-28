@@ -67,6 +67,19 @@ context. A page or section argument on get_board_view would sit in every model's
 Text-only hosts still list the tool (the static tool list), so its description redirects
 to the model-facing tools and it needs get_board_view's rev. The registry stays one tool
 per view. APP_ONLY_TOOLS lists the tools pages may call that link no view.
+
+The project dashboard (#74) is linked from get_project_dashboard, a new model-visible,
+read-only tool. check_release_readiness and project_tour keep their text and link no
+view: every release check or tour would otherwise pop a 33-check panel, and project_tour
+returns a prompt, not data. The server runs the checks in-process with their default
+arguments and normalises each first page into a card (services/project_dashboard.py):
+one adapter set, in Python, tested on real output, and a compact text that is useful
+without the view (the cards' titles, groups and views are the page's: a test keeps its
+copy equal). The page calls only get_project_dashboard (checks=[one] fills a card), one
+call at a time.
+It opens the other views by asking the model through ui/message after a click (the spec
+defers view-to-view links, so only a tool call by the model makes the host draw a view);
+the message names tools only, never project data. The registry stays one tool per view.
 """
 
 from __future__ import annotations
@@ -219,6 +232,23 @@ VIEWS = (
             "its geometry read from get_board_view_geometry in pages; an Objects and a "
             "Parts table; and a details pane per object with get_component_placement, "
             "get_component, get_net_pcb and query_pcb_region."
+        ),
+    ),
+    View(
+        name="project-dashboard",
+        tool="get_project_dashboard",
+        file="project_dashboard.html",
+        title="Project dashboard",
+        description=(
+            "HTML page (MCP Apps view) that hosts showing MCP Apps draw next to "
+            "get_project_dashboard's result; not for reading as text. The release verdict "
+            "and its gates, the board and project facts, and one row per check (33 of "
+            "them) with its state, counts, what it examined, its first finding and when it "
+            "ran, grouped by domain or state with filters; the checks the first call left "
+            "out filled one get_project_dashboard call at a time (stopped on request or "
+            "when the files change); a details pane per check with its findings; and "
+            "buttons that ask Claude, through a message in the conversation, to open a "
+            "check's own view or explain its findings."
         ),
     ),
 )

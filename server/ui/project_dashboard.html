@@ -1,0 +1,1499 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!--@csp-->
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Project dashboard</title>
+<style>/*@shell.css*/</style>
+<style>
+/* Project dashboard (roadmap #74): get_project_dashboard's release verdict and gates, the
+   board and project facts, and one row per check with its state, counts, what it
+   examined and its first finding; the checks the first call left out are filled one
+   get_project_dashboard call at a time; links to the other views ask Claude through a
+   message in the conversation (ui/message), never with project data in it. */
+.head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 0 0 6px; }
+.head h1 { font-size: var(--fs-lg); margin: 0; font-weight: var(--fw-bold); }
+.head .meta { min-width: 0; overflow-wrap: anywhere; color: var(--c-text2); font-size: var(--fs-sm); }
+.head .grow { flex: 1 1 auto; }
+.argline { font-size: var(--fs-xs); color: var(--c-text3); margin: 0 0 8px; display: flex; flex-wrap: wrap;
+           gap: 4px 10px; align-items: center; }
+.block { border: 1px solid var(--c-line); border-radius: var(--radius); padding: 8px 12px; margin: 0 0 8px;
+         font-size: var(--fs-sm); }
+.block h2 { font-size: var(--fs-md); margin: 0; display: inline; }
+.block .row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.block .help { color: var(--c-text2); margin: 6px 0 0; overflow-wrap: anywhere; }
+.block ul { margin: 6px 0 0; padding-left: 18px; }
+.block li { margin: 3px 0; overflow-wrap: anywhere; }
+.block details > summary { cursor: pointer; color: var(--c-text2); margin-top: 6px; }
+.verdict { font-size: var(--fs-sm); padding: 1px 9px; line-height: 20px; }
+.gates { margin: 6px 0 0; padding: 0; list-style: none; }
+.gates li { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; padding: 2px 0;
+            border-bottom: 1px solid var(--c-line); }
+.gates .title { flex: 1 1 14em; min-width: 0; overflow-wrap: anywhere; }
+.chiprow { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 0; }
+/* The release block and the overview side by side where there is room. */
+.top { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 8px; align-items: start;
+       margin: 0 0 8px; }
+.top > .block { margin: 0; }
+@media (max-width: 980px) { .top { grid-template-columns: minmax(0, 1fr); } }
+.factgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(9.5em, 1fr)); gap: 4px 12px; margin: 6px 0 0; }
+.fact { min-width: 0; }
+.fact .k { display: block; font-size: var(--fs-xs); color: var(--c-text3); }
+.fact .v { overflow-wrap: anywhere; }
+.actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 0; align-items: flex-start; }
+.ask { display: inline-flex; flex-direction: column; gap: 2px; min-width: 0; max-width: 100%; }
+.ask label { display: flex; flex-direction: column; gap: 2px; min-width: 0; max-width: 100%; }
+.ask .ask-label { font-size: var(--fs-xs); color: var(--c-text2); }
+.ask input { border: 1px solid var(--c-border); border-radius: var(--radius-sm); background: var(--c-bg2);
+             padding: 3px 8px; font-size: var(--fs-sm); width: min(36em, 100%); max-width: 100%; }
+.ask .muted { font-size: var(--fs-xs); }
+.sent { font-size: var(--fs-xs); color: var(--c-text2); }
+.btn[aria-disabled="true"], .btn-link[aria-disabled="true"] { opacity: .5; cursor: default; }
+.filters { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; margin: 0 0 8px; }
+.fill { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; font-size: var(--fs-sm);
+        margin: 0 0 8px; }
+.fill progress { width: 8em; }
+.sumline { font-size: var(--fs-sm); color: var(--c-text2); margin: 0 0 6px; overflow-wrap: anywhere; }
+/* States: a word, a glyph and a border style each, never colour alone. */
+.badge.st { border: 1px solid transparent; }
+.badge.st-errors, .badge.st-failed, .badge.st-unreadable { border-style: solid; border-color: currentColor; }
+.badge.st-warnings { border-style: solid; border-color: currentColor; }
+.badge.st-notes { border-style: dotted; border-color: currentColor; }
+.badge.st-clean { border-style: solid; border-color: currentColor; }
+.badge.st-partial, .badge.st-not_verified, .badge.st-unavailable { border-style: dashed; border-color: currentColor; }
+.badge.st-nothing_to_check, .badge.st-not_applicable { border-style: dotted; }
+.badge.st-not_run, .badge.st-stale { border-style: dashed; }
+.badge.st-failed, .badge.st-unreadable { font-weight: var(--fw-bold); }
+.tbl tbody tr:has(.is-stale) td { opacity: .7; }
+.tbl tbody tr:has(.is-stale):focus-visible td, .tbl tbody tr:has(.is-stale):hover td { opacity: .9; }
+.tbl td.c-msg { min-width: 12em; }
+.cardname { font-weight: var(--fw-medium); }
+.tbl td.c-check { min-width: 8.5em; overflow-wrap: break-word; }
+.tags { display: inline-flex; flex-wrap: wrap; gap: 3px; margin-left: 4px; }
+.tags .badge { font-weight: normal; }
+.first { overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+         overflow: hidden; }
+.tbl td.num { white-space: nowrap; }
+.pane .summary { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
+.pane h2[tabindex="-1"]:focus { outline: none; }
+.pane h2[tabindex="-1"]:focus-visible { outline: 2px solid var(--c-ring); outline-offset: 2px; }
+.pane dl.facts { grid-template-columns: fit-content(40%) minmax(0, 1fr); margin-top: 8px; }
+.pane .tbl-wrap { max-height: none; }
+.foot { font-size: var(--fs-xs); color: var(--c-text3); margin: 8px 0 0; overflow-wrap: anywhere; }
+.section-gap { margin-top: 12px; }
+.mono { overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  .block { padding: 6px 8px; }
+  .head h1 { font-size: var(--fs-md); }
+  /* The heading and its buttons on one line, the project's line under them. */
+  .head .meta { order: 5; flex-basis: 100%; }
+}
+/* A short host: tighter blocks, so the checks table keeps its room. */
+#app.short .block { padding: 4px 8px; margin-bottom: 6px; }
+#app.short .top { margin-bottom: 6px; gap: 6px; }
+#app.short .head { margin-bottom: 2px; }
+#app.short .argline { margin-bottom: 4px; }
+#app.short .filters-box .sumline { margin: 6px 0 0; }
+</style>
+</head>
+<body>
+<main id="app"></main>
+<script type="application/json" id="data-contract">
+{
+  "tool": "get_project_dashboard",
+  "cards": 33,
+  "fill_timeout_s": 300,
+  "more_findings": 20,
+  "groups": {
+    "schematic": "Schematic",
+    "bom": "BOM and libraries",
+    "sync": "Schematic and PCB",
+    "pcb": "PCB",
+    "manufacturing": "Manufacturing and outputs",
+    "system": "System"
+  },
+  "states": ["errors", "warnings", "notes", "clean", "partial", "nothing_to_check", "not_verified",
+             "not_applicable", "unavailable", "failed", "unreadable", "not_run", "stale"],
+  "fact_tools": ["get_board_info", "list_variants"],
+  "catalogue": {
+    "run_erc": {"title": "ERC (offline)", "group": "schematic", "view": "run_erc", "grouped": true},
+    "check_project_integrity": {"title": "Project integrity", "group": "schematic"},
+    "get_power_tree": {"title": "Power tree", "group": "schematic", "view": "get_power_tree"},
+    "check_pull_resistors": {"title": "Pull resistors", "group": "schematic"},
+    "check_logic_levels": {"title": "Logic levels", "group": "schematic"},
+    "check_derating": {"title": "Derating", "group": "schematic"},
+    "check_decoupling": {"title": "Decoupling", "group": "schematic", "board": true},
+    "check_interfaces": {"title": "Interfaces and ESD", "group": "schematic", "board": true},
+    "check_bom": {"title": "BOM", "group": "bom", "view": "get_bom"},
+    "check_libraries": {"title": "Libraries", "group": "bom"},
+    "check_db_parameters": {"title": "Database parameters", "group": "bom"},
+    "check_sch_pcb_sync": {"title": "Schematic-PCB sync", "group": "sync"},
+    "check_directive_sync": {"title": "Directives", "group": "sync"},
+    "check_connectivity": {"title": "Connectivity", "group": "sync"},
+    "get_drc_report": {"title": "Batch DRC report", "group": "pcb", "view": "get_drc_report", "board": true, "grouped": true},
+    "check_pcb_health": {"title": "PCB health", "group": "pcb"},
+    "check_rule_compliance": {"title": "Rule compliance", "group": "pcb", "slow": true, "grouped": true},
+    "check_lengths": {"title": "Length rules", "group": "pcb", "grouped": true},
+    "check_diff_pairs": {"title": "Differential pairs", "group": "pcb"},
+    "check_diff_pair_geometry": {"title": "Diff-pair geometry", "group": "pcb", "slow": true},
+    "check_vias": {"title": "Vias", "group": "pcb"},
+    "check_return_path": {"title": "Return paths", "group": "pcb", "slow": true},
+    "check_power_paths": {"title": "Power paths", "group": "pcb", "slow": true},
+    "check_thermal": {"title": "Thermal", "group": "pcb", "slow": true},
+    "check_hv_clearance": {"title": "HV clearance", "group": "pcb"},
+    "check_dfm": {"title": "DFM and DFA", "group": "manufacturing", "board": true, "slow": true},
+    "check_testpoints": {"title": "Testpoints", "group": "manufacturing", "board": true},
+    "check_mechanical_fit": {"title": "Mechanical fit", "group": "manufacturing"},
+    "check_fab_drawing": {"title": "Fab drawing", "group": "manufacturing"},
+    "get_output_jobs": {"title": "Output jobs", "group": "manufacturing"},
+    "verify_outputs": {"title": "Generated outputs", "group": "manufacturing"},
+    "check_multiboard": {"title": "Multi-board", "group": "system"},
+    "run_custom_checks": {"title": "Team check packs", "group": "system"}
+  },
+  "shapes": {
+    "result": {
+      "required": ["project", "variant", "load", "pcb_doc", "args", "state", "release", "summary", "cards",
+                   "not_run", "budget", "notes"],
+      "optional": ["overview", "others", "excluded"]
+    },
+    "args": {"required": ["checks", "refresh"], "optional": []},
+    "state": {
+      "required": ["key", "as_of_utc", "cards_as_of_utc", "latest_save_utc", "netlist_updated_utc",
+                   "netlist_older_than_sheets", "folder_watched"],
+      "optional": ["netlist_note"]
+    },
+    "overview": {"required": ["sheets", "drawings"], "optional": ["board", "variants", "notes"]},
+    "release": {
+      "required": ["state", "current"],
+      "optional": ["verdict", "verdict_summary", "counts", "blocking_failed", "blocking_not_verified", "gates",
+                   "gates_total", "gates_note", "reason", "as_of", "ms", "was"]
+    },
+    "release.blocking_failed[]": {"required": ["id", "title", "evidence"], "optional": []},
+    "summary": {"required": ["cards", "current", "stale", "by_state", "in_checks_run"], "optional": []},
+    "cards[]": {
+      "required": ["tool", "state", "current"],
+      "optional": ["stale_because", "was_state", "counts", "subject", "judged", "not_checked", "findings",
+                   "findings_total", "first_note", "ids", "tags", "reason", "was", "facts", "as_of", "ms", "variant"]
+    },
+    "cards[].findings[]": {"required": ["sev", "check", "text"], "optional": ["at"]},
+    "others": {"required": ["current", "stale", "not_run"], "optional": []},
+    "not_run": {"required": ["checks", "reason", "next"], "optional": []},
+    "budget": {"required": ["limit_s", "spent_ms", "stopped_at"], "optional": []}
+  }
+}
+</script>
+<script>/*@shell.js*/</script>
+<script>
+(() => {
+  "use strict";
+  const { el, clear } = Shell;
+  const CONTRACT = JSON.parse(document.getElementById("data-contract").textContent);
+  const app = document.getElementById("app");
+
+  // The one tool the page calls (read-only): checks=[one] fills or refreshes a card.
+  const READ_ONLY_TOOLS = new Set(["get_project_dashboard"]);
+  // The tools a message to Claude may name: fixed sentences, never project data.
+  const MESSAGE_TOOLS = new Set([
+    "run_erc", "check_project_integrity", "get_power_tree", "check_pull_resistors", "check_logic_levels",
+    "check_derating", "check_decoupling", "check_interfaces", "check_bom", "check_libraries",
+    "check_db_parameters", "check_sch_pcb_sync", "check_directive_sync", "check_connectivity",
+    "get_drc_report", "check_pcb_health", "check_rule_compliance", "check_lengths", "check_diff_pairs",
+    "check_diff_pair_geometry", "check_vias", "check_return_path", "check_power_paths", "check_thermal",
+    "check_hv_clearance", "check_dfm", "check_testpoints", "check_mechanical_fit", "check_fab_drawing",
+    "get_output_jobs", "verify_outputs", "check_multiboard", "run_custom_checks",
+    "get_bom", "get_board_view", "compare_variants", "project_tour", "release_review", "get_project_dashboard",
+  ]);
+  const FILL_TIMEOUT_MS = CONTRACT.fill_timeout_s * 1000;
+  const MORE_FINDINGS = CONTRACT.more_findings;  // a card asked for alone lists this many
+  // Each card's title, group, view, whether the board view places its findings, whether
+  // it is slow and whether a row can group several counted items: the answer leaves these
+  // catalogue facts out (services/project_dashboard.py's CATALOGUE, kept equal by a test).
+  const CATALOGUE = CONTRACT.catalogue;
+  const FACT_TOOLS = new Set(CONTRACT.fact_tools);  // the overview's facts, fillable too
+  const GROUP_TITLES = CONTRACT.groups;
+  const GROUP_ORDER = Object.keys(GROUP_TITLES);
+  const LEVELS = ["error", "warning", "info"];
+  const LEVEL_WORD = { error: "error", warning: "warning", info: "note" };
+
+  // Each state: its word, glyph, badge class and rank (worst first).
+  const STATE = {
+    failed: { word: "Failed", glyph: "✕", cls: "fatal", rank: 0 },
+    unreadable: { word: "Unreadable", glyph: "✕", cls: "fatal", rank: 1 },
+    errors: { word: "Errors", glyph: "✕", cls: "error", rank: 2 },
+    warnings: { word: "Warnings", glyph: "!", cls: "warning", rank: 3 },
+    not_verified: { word: "Not verified", glyph: "?", cls: "warning", rank: 4 },
+    unavailable: { word: "Unavailable", glyph: "?", cls: "muted", rank: 5 },
+    notes: { word: "Notes", glyph: "i", cls: "info", rank: 6 },
+    partial: { word: "Partial", glyph: "◐", cls: "muted", rank: 7 },
+    stale: { word: "Stale", glyph: "↻", cls: "muted", rank: 8 },
+    not_run: { word: "Not run", glyph: "○", cls: "muted", rank: 9 },
+    nothing_to_check: { word: "Nothing to check", glyph: "∅", cls: "muted", rank: 10 },
+    not_applicable: { word: "N/A", glyph: "–", cls: "muted", rank: 11 },
+    clean: { word: "No findings", glyph: "✓", cls: "ok", rank: 12 },
+  };
+  // The state chips: which states each shows ("Not run or stale" also shows any card
+  // that is not current).
+  const CHIPS = [
+    { id: "errors", label: "Errors", states: ["errors"] },
+    { id: "warnings", label: "Warnings", states: ["warnings"] },
+    { id: "notes", label: "Notes", states: ["notes"] },
+    { id: "clean", label: "Clean", states: ["clean"] },
+    { id: "not_verified", label: "Not verified", states: ["not_verified"] },
+    { id: "quiet", label: "Partial, nothing to check, n/a", states: ["partial", "nothing_to_check", "not_applicable", "unavailable"] },
+    { id: "stale", label: "Not run or stale", states: ["not_run", "stale"] },
+    { id: "failed", label: "Failed", states: ["failed", "unreadable"] },
+  ];
+  // A short host shows what needs attention first.
+  const ATTENTION = ["errors", "warnings", "not_verified", "stale", "failed"];
+  const TAG_WORDS = {
+    advisory: "advisory (guidance, not a rule)",
+    heuristic: "heuristic (reads names and descriptions)",
+    offline_approximation: "offline approximation of Altium's ERC",
+    netlist_older_than_sheets: "netlist older than the sheets",
+    report_untrusted: "report not to be trusted",
+    at_least: "stopped at the violation limit: at least these counts",
+  };
+  const TAG_SHORT = {
+    advisory: "advisory", heuristic: "heuristic", offline_approximation: "offline",
+    netlist_older_than_sheets: "old netlist", report_untrusted: "untrusted", at_least: "at least",
+  };
+  const VERDICT = {
+    fail: { word: "FAIL", glyph: "✕", cls: "error" },
+    not_ready_unverified: { word: "NOT VERIFIED", glyph: "?", cls: "warning" },
+    pass: { word: "PASS on the gates checked", glyph: "✓", cls: "ok" },
+  };
+  const GATE_CLASS = { pass: "ok", fail: "error", warn: "warning", not_verified: "muted", not_applicable: "muted" };
+  const GATE_WORD = { pass: "pass", fail: "fail", warn: "warn", not_verified: "not verified", not_applicable: "n/a" };
+  const STOP_WORDS = {
+    user: "you pressed Stop",
+    closed: "the view was closed",
+    host: "this host does not let the view run checks",
+    changed: "the files changed while checking",
+  };
+
+  const view = {
+    args: {}, argsKnown: false, data: null, cards: new Map(), selected: null, query: "", groupBy: "group",
+    chipsOn: null, filtersOpen: null, overviewOpen: null, busy: "", closed: false, changed: false,
+    auto: { overview: true, filters: true, chips: true },  // set by the page, not the user yet
+    gatesOpen: false,
+    fill: { running: false, stopping: false, done: 0, total: 0, current: "", stopped: "", resumable: false, asked: new Set() },
+    answer: 0,            // the answer drawn: a fill of an older one stops
+    calls: 0,             // get_project_dashboard calls in flight: at most one at a time
+    fillWanted: false,    // a fill to start once the call in flight is answered
+    resultSig: "",        // the host's last tool-result (the same one again is not redrawn)
+    pending: new Map(),   // tool -> what is being asked for it ("more", "again", "retry")
+    cardErrors: new Map(),  // tool -> the last per-card call's error
+    messages: new Map(),  // message id -> {state: pending | sent | denied, error}
+    headError: "",        // the last Check again or Show all checks failure
+    noticeSig: "",        // the notices drawn (redrawn only when they change)
+    warnings: [],
+  };
+  const ui = {};
+
+  // ---------- helpers ----------
+
+  const canCall = () => Shell.canCallTools();
+  const plural = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
+  const singular = (noun) => (noun.endsWith("s") ? noun.slice(0, -1) : noun);
+  const nounCount = (count, noun) => `${count} ${count === 1 ? singular(noun) : noun}`;
+  const pad = (number) => String(number).padStart(2, "0");
+
+  function clock(iso) {
+    if (!iso) return "";
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return String(iso);
+    return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
+
+  function took(ms) {
+    if (ms === null || ms === undefined) return "";
+    return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;
+  }
+
+  const stateOf = (card) => STATE[card.state] || STATE.failed;
+  const worstLevel = (card) => LEVELS.find((level) => card.counts && card.counts[level]) || null;
+  const atLeast = (card) => (card.tags || []).includes("at_least");
+  const ran = (card) => card.state !== "not_run";
+  // A card that ran on files older than the answer's (not one that never ran).
+  const isStale = (card) => !card.current && ran(card);
+
+  /** One get_project_dashboard call may be in flight at a time (a fill, a card's button,
+   *  Check again): the server runs a check on its one loop, so a second call would only
+   *  queue behind it and hold up Claude. */
+  const busy = () => view.calls > 0 || view.pending.size > 0 || view.fill.running || Boolean(view.busy);
+
+  /** A card of an answer with the catalogue's facts the answer leaves out, and the time
+   *  and variant it ran under (the answer gives them only when they are not its own). */
+  function fullCard(card, answer) {
+    const spec = CATALOGUE[card.tool] || { title: card.tool, group: "system" };
+    const out = { ...spec, ...card };
+    if (ran(out)) {
+      if (!out.as_of) out.as_of = (answer.state && answer.state.cards_as_of_utc) || null;
+      if (!out.variant) out.variant = answer.variant || null;
+    }
+    return out;
+  }
+
+  /** "2 errors", "at least 25 errors" when the tool stopped at a limit. */
+  function countText(card, level) {
+    const count = (card.counts || {})[level] || 0;
+    return `${atLeast(card) && level === "error" ? "at least " : ""}${plural(count, LEVEL_WORD[level])}`;
+  }
+
+  function stateBadge(card) {
+    const info = stateOf(card);
+    const worst = worstLevel(card);
+    const count = worst && ["errors", "warnings", "notes"].includes(card.state) ? `: ${countText(card, worst)}` : "";
+    const word = card.state === "stale" && card.was_state === "clean" ? "Was clean" : info.word;
+    return el("span", { class: `badge st st-${card.state} ${info.cls}`, title: card.reason || null },
+      el("span", { "aria-hidden": "true", text: `${info.glyph} ` }), `${word}${count}`);
+  }
+
+  /** "57 nets", or "189 parts, 3 judged" when the check could judge fewer than it examined. */
+  function examined(card) {
+    if (!card.subject) return "";
+    const judged = typeof card.judged === "number" ? `, ${card.judged} judged` : "";
+    return `${nounCount(card.subject.count, card.subject.noun)}${judged}`;
+  }
+
+  // ---------- data contract ----------
+
+  function rowsAt(data, path) {
+    if (path === "result") return [data];
+    let rows = [data];
+    for (const part of path.split(".")) {
+      const key = part.replace(/\[\]$/, "");
+      rows = rows.flatMap((row) => {
+        const value = row && typeof row === "object" ? row[key] : undefined;
+        if (part.endsWith("[]")) return Array.isArray(value) ? value : [];
+        return value === undefined || value === null ? [] : [value];
+      });
+    }
+    return rows;
+  }
+
+  function checkContract(data) {
+    const problems = [];
+    for (const [path, shape] of Object.entries(CONTRACT.shapes)) {
+      for (const key of shape.required) {
+        const missing = rowsAt(data, path).filter((row) => !(key in row)).length;
+        if (missing) problems.push(`${path}: ${key} missing in ${missing} row(s)`);
+      }
+    }
+    return problems;
+  }
+
+  // ---------- tool calls ----------
+
+  // Teardown rejects every call still waiting: the closed view waits for no answer.
+  let closeCalls = () => {};
+  const whenClosed = new Promise((resolve, reject) => {
+    closeCalls = () => reject(new Error("the view was closed"));
+  });
+  whenClosed.catch(() => {});
+
+  /** Call the page's one read-only tool (through the shell, which checks serverTools). */
+  function call(tool, args, timeoutMs) {
+    if (!READ_ONLY_TOOLS.has(tool)) return Promise.reject(new Error(`The view does not call ${tool}.`));
+    if (view.closed) return Promise.reject(new Error("the view was closed"));
+    if (!canCall()) return Promise.reject(new Error(`this host does not let the view call ${tool}`));
+    return Promise.race([Shell.callTool(tool, args, timeoutMs), whenClosed]);
+  }
+
+  /** get_project_dashboard with these arguments, its answer read as JSON (an error
+   *  payload throws). Counted while in flight; a fill wanted meanwhile starts after it. */
+  async function ask(args) {
+    view.calls += 1;
+    try {
+      const answer = Shell.resultJson(await call("get_project_dashboard", args, FILL_TIMEOUT_MS));
+      if (!answer || typeof answer !== "object") throw new Error("The answer is not a dashboard.");
+      if (answer.error) throw new Error(answer.message || answer.error);
+      return answer;
+    } finally {
+      view.calls -= 1;
+      if (!view.calls && view.fillWanted) {
+        view.fillWanted = false;
+        // After the caller has drawn this answer.
+        setTimeout(startFill, 0);
+      }
+    }
+  }
+
+  // ---------- messages to Claude ----------
+
+  /** The fixed sentence a link sends: tool names from MESSAGE_TOOLS only, no project data
+   *  (no project, variant, file, designator or net). */
+  function sentence(kind, tool) {
+    if (tool && !MESSAGE_TOOLS.has(tool)) return "";
+    switch (kind) {
+      case "view":
+        if (tool === "run_erc") return "Show the ERC results in the ERC view (run_erc).";
+        if (tool === "get_drc_report") return "Show the batch DRC report in the DRC view (get_drc_report).";
+        if (tool === "check_bom") return "Show the BOM with its check_bom findings in the BOM view (get_bom).";
+        if (tool === "get_power_tree") return "Show the power tree view (get_power_tree).";
+        return "";
+      case "board":
+        return `Call ${tool} and show its findings on the board view (get_board_view with those findings and finding_tool ${tool}).`;
+      case "explain":
+        return `Explain the ${tool} findings for this project and what to fix first (call ${tool}).`;
+      case "tour": return "Give me a guided tour of this project (project_tour).";
+      case "boardview": return "Show the board view (get_board_view).";
+      case "variants": return "Compare the variants in the variant view (compare_variants).";
+      case "release": return "Run the release review (release_review).";
+      case "not_run": return "Run the checks the project dashboard did not run yet (get_project_dashboard with checks= its not_run list).";
+      default: return "";
+    }
+  }
+
+  /** Send a sentence into the conversation; called from click handlers only. A denial
+   *  or a host without messages leaves the sentence to copy, in a read-only field. */
+  async function askClaude(id, text) {
+    if (!text || view.closed) return;
+    const entry = view.messages.get(id);
+    if (entry && entry.state === "pending") return;
+    if (!Shell.canSendMessage()) {
+      view.messages.set(id, { state: "denied", error: "This host does not let the view send a message." });
+      redrawMessages(id);
+      return;
+    }
+    view.messages.set(id, { state: "pending" });
+    redrawMessages(id);
+    Shell.announce("Sending to the conversation");
+    try {
+      await Shell.sendMessage(text);
+      view.messages.set(id, { state: "sent" });
+      Shell.announce("Sent to the conversation");
+    } catch (error) {
+      view.messages.set(id, { state: "denied", error: error.message });
+      Shell.announce("The message was not sent: the sentence is there to ask Claude yourself");
+    }
+    redrawMessages(id);
+  }
+
+  /** A read-only field with the sentence, labelled "Ask Claude" (its label wraps it, so a
+   *  click on the label focuses it; selected on focus). */
+  function askField(text, note, id = null) {
+    const input = el("input", { type: "text", readonly: true, value: text, data: id ? { message: id } : null });
+    input.addEventListener("focus", () => input.select());
+    return el("span", { class: "ask" }, el("label", {}, el("span", { class: "ask-label", text: "Ask Claude" }), input),
+      note ? el("span", { class: "muted", text: note }) : null);
+  }
+
+  /** A link to another view or a prompt: a button that sends its sentence, or the sentence
+   *  to copy when the host takes no message (or did not deliver it). While the message is
+   *  pending the button is marked disabled but keeps keyboard focus. */
+  function messageControl(id, label, text, title = null) {
+    if (!text) return null;
+    if (view.closed) return askField(text, "The view was closed: ask Claude with this sentence.", id);
+    const entry = view.messages.get(id);
+    if (!Shell.canSendMessage()) return askField(text, null, id);
+    if (entry && entry.state === "denied") {
+      const why = entry.error && !/did not deliver/.test(entry.error) ? ` (${entry.error})` : "";
+      return askField(text, `The host did not deliver the message${why}: ask Claude with this sentence.`, id);
+    }
+    const pending = entry && entry.state === "pending";
+    const button = el("button", { type: "button", class: "btn", text: label,
+                                  title: title || `Sends to the conversation: ${text}`,
+                                  "aria-disabled": pending ? "true" : null, data: { message: id },
+                                  on: { click: () => askClaude(id, text) } });
+    return el("span", { class: "ask" }, button,
+      pending ? el("span", { class: "sent", text: "Sending to the conversation…" })
+        : entry && entry.state === "sent" ? el("span", { class: "sent", text: "Sent to the conversation" }) : null);
+  }
+
+  /** Redraw what shows a message's state; keyboard focus stays on its control (the
+   *  button, or the sentence that replaced it). */
+  function redrawMessages(id) {
+    const active = document.activeElement;
+    const had = Boolean(active && active.dataset && active.dataset.message === id);
+    renderHeadBlocks();
+    renderPane();
+    if (!had) return;
+    const target = [...app.querySelectorAll("[data-message]")].find((node) => node.dataset.message === id);
+    if (target && document.activeElement !== target) target.focus();
+  }
+
+  // ---------- loading ----------
+
+  function showState(kind, title, detail) {
+    clear(app).appendChild(Shell.state(kind, title, detail));
+  }
+
+  const ERROR_TITLES = {
+    no_project: "No project is loaded",
+    unknown_checks: "get_project_dashboard does not know these checks",
+  };
+
+  function showError(payload) {
+    clear(app).appendChild(Shell.state("error", ERROR_TITLES[payload.error] || "get_project_dashboard answered with an error",
+                                       payload.message || payload.error));
+    if (Array.isArray(payload.accepted)) {
+      app.appendChild(el("details", { class: "more section-gap" }, el("summary", { text: "Checks it knows" }),
+        el("p", { class: "small", text: payload.accepted.join(", ") })));
+    }
+  }
+
+  function loadAnswer(data) {
+    if (!data || typeof data !== "object" || !Array.isArray(data.cards)) throw new Error("The result is not a dashboard.");
+    view.data = data;
+    view.args = data.args || view.args;
+    view.cards = new Map(data.cards.map((card) => [card.tool, fullCard(card, data)]));
+    view.warnings = checkContract(data);
+    view.changed = false;
+    view.cardErrors = new Map();
+    view.headError = "";
+    view.answer += 1;
+    view.fill = { running: false, stopping: false, done: 0, total: 0, current: "", stopped: "", resumable: false, asked: new Set() };
+    if (view.selected && !view.cards.has(view.selected)) view.selected = null;
+  }
+
+  function loadResult(result) {
+    // A tool result the host marks as an error is drawn as one, never as a dashboard.
+    if (result && result.isError) {
+      showState("error", "get_project_dashboard failed", Shell.resultText(result).slice(0, 400) || "The host marked the result as an error.");
+      return;
+    }
+    let data;
+    try {
+      data = Shell.resultJson(result);
+    } catch (error) {
+      showState("error", "The dashboard could not be read", error.message);
+      return;
+    }
+    if (data && data.error) {
+      showError(data);
+      return;
+    }
+    // The same result again (a host may send it twice): the page keeps what it has drawn
+    // and filled since, and asks for nothing twice.
+    const sig = data && data.state ? `${data.state.key}|${data.state.as_of_utc}|${JSON.stringify(data.args)}` : "";
+    if (sig && sig === view.resultSig && view.data) return;
+    try {
+      loadAnswer(data);
+    } catch (error) {
+      showState("error", "The dashboard could not be read", error.message);
+      return;
+    }
+    view.resultSig = sig;
+    renderAll();
+    startFill();
+  }
+
+  /** A default call again (Show all checks, Check again): the page drawn so far stays
+   *  until the answer arrives. */
+  async function reloadAll(refresh) {
+    if (busy() || view.closed || !canCall()) return;
+    const mark = Shell.focusMark(app);
+    view.busy = refresh ? "Checking again: every check runs once more (about 20 s on a large board)…"
+      : "Asking for every check (the ones run already come from the server's cache)…";
+    view.headError = "";
+    renderHeadBlocks();
+    renderPane();
+    Shell.announce(view.busy);
+    try {
+      const answer = await ask(refresh ? { refresh: true } : {});
+      view.busy = "";
+      loadAnswer(answer);
+      renderAll();
+      Shell.announce(refresh ? "Every check ran again" : "Every check shown");
+      if (mark) Shell.refocus(app, mark, () => ui.headline);
+      startFill();
+    } catch (error) {
+      view.busy = "";
+      // After teardown the page only says the view was closed (teardown drew that).
+      if (!view.closed) view.headError = `${refresh ? "Check again" : "Show all checks"} failed: ${error.message}`;
+      renderHeadBlocks();
+      renderPane();
+      if (!view.closed) Shell.announce(view.headError);
+      if (mark) Shell.refocus(app, mark, () => ui.headline);
+    }
+  }
+
+  // ---------- merging an answer for one card ----------
+
+  /** Merge a narrowed answer's card. A state key other than the page's means the files
+   *  changed while checking: every other card is stale, and the fill stops. */
+  function mergeCard(answer, tool) {
+    let card = null;
+    if (FACT_TOOLS.has(tool)) {
+      // A fact tool's answer carries the overview, not a card.
+      if (!answer.overview) return null;
+      view.data = { ...view.data, overview: answer.overview };
+      card = { tool, fact: true, title: tool === "get_board_info" ? "Board facts" : "Variant facts" };
+    } else {
+      const row = (answer.cards || []).find((item) => item.tool === tool);
+      if (!row) return null;
+      card = fullCard(row, answer);
+      view.cards.set(tool, card);
+    }
+    const key = view.data && view.data.state && view.data.state.key;
+    if (answer.state && key && answer.state.key !== key && !view.changed) {
+      view.changed = true;
+      for (const [other, row] of view.cards) {
+        if (other === tool || !row.current) continue;
+        const stale = { ...row, current: false, stale_because: "files changed while checking" };
+        if (row.state === "clean") Object.assign(stale, { state: "stale", was_state: "clean" });
+        view.cards.set(other, stale);
+      }
+      if (view.data.release) view.data.release = { ...view.data.release, current: false };
+    }
+    return card;
+  }
+
+  // ---------- filling the cards the default call left ----------
+
+  /** What to fill: the server's not_run order (the overview's facts and the non-slow
+   *  checks first), then the other cards that are not current; never a failed card (it
+   *  has Retry), each at most once. */
+  function fillQueue() {
+    const data = view.data;
+    const queue = [...((data.not_run && data.not_run.checks) || [])];
+    for (const card of view.cards.values()) {
+      if (!card.current && !queue.includes(card.tool)) queue.push(card.tool);
+    }
+    return queue.filter((tool) => {
+      if (view.fill.asked.has(tool)) return false;
+      if (FACT_TOOLS.has(tool)) return true;
+      const card = view.cards.get(tool);
+      return card && !card.current && !["failed", "unreadable"].includes(card.state);
+    });
+  }
+
+  function startFill() {
+    const data = view.data;
+    if (!data || data.args.checks !== null || view.closed || view.fill.running) return;
+    if (!fillQueue().length) return;
+    if (!canCall()) {
+      view.fill.stopped = STOP_WORDS.host;
+      renderFill();
+      return;
+    }
+    if (view.calls || view.busy) {
+      // One call at a time: the fill starts once the call in flight is answered.
+      view.fillWanted = true;
+      return;
+    }
+    runFill();
+  }
+
+  async function runFill() {
+    const fill = view.fill;
+    const answer0 = view.answer;
+    const queue = fillQueue();
+    fill.running = true;
+    fill.stopping = false;
+    fill.stopped = "";
+    fill.resumable = false;
+    fill.total = fill.done + queue.length;
+    renderFill();
+    for (const tool of queue) {
+      if (view.answer !== answer0) return;  // a newer answer replaced this one
+      if (view.closed) { fill.stopped = STOP_WORDS.closed; break; }
+      if (fill.stopping) { fill.stopped = STOP_WORDS.user; fill.resumable = true; break; }
+      if (!canCall()) { fill.stopped = STOP_WORDS.host; break; }
+      if (view.changed) { fill.stopped = STOP_WORDS.changed; break; }
+      fill.current = tool;
+      fill.asked.add(tool);
+      renderFill();
+      let answer;
+      try {
+        answer = await ask({ checks: [tool] });
+      } catch (error) {
+        fill.current = "";
+        if (view.closed) {
+          fill.stopped = STOP_WORDS.closed;
+        } else {
+          fill.asked.delete(tool);  // Resume asks for it again
+          fill.stopped = /no answer from the host/.test(error.message)
+            ? `no answer in ${CONTRACT.fill_timeout_s} s (the server keeps the result when it finishes)`
+            : `the call failed: ${error.message}`;
+          fill.resumable = true;
+        }
+        break;
+      }
+      if (view.answer !== answer0) return;
+      if (view.closed) { fill.stopped = STOP_WORDS.closed; break; }
+      fill.done += 1;
+      fill.current = "";
+      const card = mergeCard(answer, tool);
+      redraw();
+      if (card) Shell.announce(`${card.fact ? card.title : tool}: ${announceText(card)} (${fill.done} of ${fill.total})`);
+      if (view.changed) { fill.stopped = STOP_WORDS.changed; break; }
+    }
+    fill.running = false;
+    fill.current = "";
+    if (!fill.stopped && fill.stopping) { fill.stopped = STOP_WORDS.user; fill.resumable = true; }
+    fill.stopping = false;
+    redraw();
+    if (fill.stopped) Shell.announce(`Filling the checks stopped: ${fill.stopped}`);
+    else if ([...view.cards.values()].every((card) => card.current)) Shell.announce(`All ${view.cards.size} checks current`);
+  }
+
+  function announceText(card) {
+    if (card.fact) return "read";
+    const worst = worstLevel(card);
+    if (worst && ["errors", "warnings", "notes"].includes(card.state)) return countText(card, worst);
+    return stateOf(card).word.toLowerCase();
+  }
+
+  function stopFill() {
+    if (!view.fill.running || view.fill.stopping) return;
+    view.fill.stopping = true;
+    renderFill();
+  }
+
+  function resumeFill() {
+    if (busy() || view.closed || !canCall()) return;
+    view.fill.stopped = "";
+    view.fill.resumable = false;
+    runFill();
+  }
+
+  // ---------- one card: more findings, run again, retry ----------
+
+  async function cardCall(tool, kind) {
+    if (busy() || view.closed || !canCall()) return;
+    view.pending.set(tool, kind);
+    view.cardErrors.delete(tool);
+    renderHeadBlocks();
+    renderPane();
+    Shell.announce(`Asking get_project_dashboard for ${tool}`);
+    try {
+      const answer = await ask(kind === "again" ? { checks: [tool], refresh: true } : { checks: [tool] });
+      const card = mergeCard(answer, tool);
+      view.pending.delete(tool);
+      redraw();
+      if (card) Shell.announce(`${tool}: ${announceText(card)}${kind === "more" ? `, ${plural((card.findings || []).length, "finding")} listed` : ""}`);
+    } catch (error) {
+      view.pending.delete(tool);
+      if (!view.closed) view.cardErrors.set(tool, error.message);
+      renderHeadBlocks();
+      renderPane();
+    }
+  }
+
+  // ---------- the checks table ----------
+
+  function category(card) {
+    const chip = CHIPS.find((item) => item.states.includes(card.state));
+    return chip ? chip.id : "failed";
+  }
+
+  function rowFilter(card) {
+    if (!view.chipsOn) return true;
+    return view.chipsOn.has(category(card)) || (!card.current && view.chipsOn.has("stale"));
+  }
+
+  /** Worst first: state rank, then errors, warnings and notes. */
+  function worse(a, b) {
+    const counts = (card) => card.counts || {};
+    return stateOf(a).rank - stateOf(b).rank || (counts(b).error || 0) - (counts(a).error || 0) ||
+      (counts(b).warning || 0) - (counts(a).warning || 0) || (counts(b).info || 0) - (counts(a).info || 0);
+  }
+
+  function sortedCards() {
+    return [...view.cards.values()].sort(worse);
+  }
+
+  function groupSpec() {
+    if (view.groupBy === "none") return null;
+    if (view.groupBy === "state") {
+      return {
+        key: (card) => card.state,
+        label: (key) => stateBadge({ state: key }),
+        count: (key, rows) => el("span", { class: "badge", text: plural(rows.length, "check") }),
+        order: (a, b) => (STATE[a] || STATE.failed).rank - (STATE[b] || STATE.failed).rank,
+      };
+    }
+    return {
+      key: (card) => card.group,
+      label: (key) => GROUP_TITLES[key] || key,
+      count: (key, rows) => groupCounts(rows),
+      order: (a, b) => GROUP_ORDER.indexOf(a) - GROUP_ORDER.indexOf(b),
+    };
+  }
+
+  function groupCounts(rows) {
+    const out = [];
+    const errors = rows.filter((card) => card.state === "errors").length;
+    const warnings = rows.filter((card) => card.state === "warnings").length;
+    if (errors) out.push(el("span", { class: "badge error", text: `${errors} with errors` }));
+    if (warnings) out.push(el("span", { class: "badge warning", text: `${warnings} with warnings` }));
+    out.push(el("span", { class: "badge", text: plural(rows.length, "check") }));
+    return out;
+  }
+
+  function firstFinding(card) {
+    const row = (card.findings || [])[0];
+    if (row) return `${row.check ? row.check + ": " : ""}${row.text}`;
+    return card.first_note || card.reason || "";
+  }
+
+  function narrowHost() {
+    return window.innerWidth <= 600;
+  }
+
+  /** True when the host gives the page at least this height, or sets no limit. Full screen
+   *  counts its own height too: a full screen 700 px high is short for the open blocks. */
+  function tall(height) {
+    const dims = Shell.context().containerDimensions || {};
+    const limit = Number(dims.height || dims.maxHeight) || 0;
+    return !limit || limit >= height;
+  }
+
+  /** A short or narrow host: the filters, the summary line and the overview wait behind
+   *  disclosures, so the checks table keeps its room within the host's height. */
+  const short = () => !Shell.roomy() || !tall(600);
+
+  /** The page's tables announce nothing themselves: their footers are rewritten on every
+   *  answer of a fill, and the page has one polite live region (Shell.announce). */
+  function quiet(table) {
+    for (const node of table.el.querySelectorAll("[aria-live]")) node.setAttribute("aria-live", "off");
+    return table;
+  }
+
+  function checksTable() {
+    const narrow = narrowHost();
+    const count = (level) => (card) => (card.counts ? card.counts[level] || 0 : null);
+    return quiet(Shell.table({
+      label: "Checks", ownFilter: false, rows: sortedCards(), group: groupSpec(), filter: rowFilter,
+      rowKey: (card) => card.tool, onActivate: (card) => select(card.tool),
+      empty: "No check in this answer.",
+      columns: [
+        { key: "check", label: "Check", value: (card) => card.title,
+          text: (card) => `${card.title} ${card.tool} ${(card.tags || []).join(" ")}${isStale(card) ? " stale" : ""}`,
+          cls: "c-check", render: (card) => el("span", { class: isStale(card) ? "is-stale" : null },
+            el("span", { class: "cardname", text: card.title }),
+            // A word, not a dimmed row alone: this card ran on older files.
+            isStale(card) || (card.tags || []).length ? el("span", { class: "tags" },
+              isStale(card) ? el("span", { class: "badge muted st-stale", text: "stale", title: `Ran on older files: ${card.stale_because || "the files changed"}` }) : null,
+              (card.tags || []).map((tag) =>
+                el("span", { class: "badge muted", text: TAG_SHORT[tag] || tag, title: TAG_WORDS[tag] || tag }))) : null) },
+        { key: "state", label: "State", value: (card) => -stateOf(card).rank, text: (card) => stateOf(card).word,
+          render: (card) => stateBadge(card) },
+        { key: "error", label: "Errors", numeric: true, hidden: narrow, value: count("error") },
+        { key: "warning", label: "Warnings", numeric: true, hidden: narrow, value: count("warning") },
+        { key: "info", label: "Notes", numeric: true, hidden: narrow, value: count("info") },
+        { key: "examined", label: "Examined", hidden: narrow, value: (card) => (card.subject ? card.subject.count : null),
+          text: examined, render: examined },
+        { key: "first", label: "First finding", cls: "c-msg", hidden: narrow, value: firstFinding,
+          render: (card) => el("span", { class: "first", text: firstFinding(card) }) },
+        { key: "as_of", label: "As of", hidden: narrow, value: (card) => card.as_of || "",
+          render: (card) => (ran(card) ? clock(card.as_of) : "") },
+        { key: "ms", label: "Took", numeric: true, hidden: narrow, value: (card) => card.ms, render: (card) => took(card.ms) },
+      ],
+    }));
+  }
+
+  function summaryLine() {
+    const cards = [...view.cards.values()];
+    if (!cards.length) return "This answer holds no check: checks= named only the release or the overview's facts (Show all checks).";
+    const by = (state) => cards.filter((card) => card.state === state).length;
+    const parts = [
+      [by("errors"), "with errors"], [by("warnings"), "with warnings"], [by("notes"), "with notes only"],
+      [by("clean"), "with no findings"], [by("partial"), "partial"], [by("nothing_to_check"), "with nothing to check"],
+      [by("not_verified"), "not verified"], [by("not_applicable"), "not applicable"], [by("unavailable"), "unavailable"],
+      [by("failed") + by("unreadable"), "failed"], [by("not_run"), "not run"], [by("stale"), "clean before the files changed"],
+    ].filter(([count]) => count).map(([count, words]) => `${count} ${words}`);
+    const old = cards.filter(isStale).length;
+    // The totals over the current cards drawn (the server's in_checks_run is the first
+    // answer's; the fill adds cards to it).
+    const totals = {};
+    let counted = 0;
+    for (const card of cards) {
+      if (!card.current || !card.counts) continue;
+      counted += 1;
+      for (const level of LEVELS) totals[level] = (totals[level] || 0) + (card.counts[level] || 0);
+    }
+    const narrowed = view.data.args.checks !== null ? ` (this answer holds ${plural(cards.length, "check")} of ${view.data.summary.cards})` : "";
+    const older = old ? ` ${old} of the ${plural(cards.length, "check")} ran on older files.` : "";
+    return `${plural(cards.length, "check")}${narrowed}: ${parts.join(", ") || "none"}.${older} ` +
+      `In the ${plural(counted, "current check")} that ran: ` +
+      `${plural(totals.error || 0, "error")}, ${plural(totals.warning || 0, "warning")}, ${plural(totals.info || 0, "note")} ` +
+      "(each tool counts its own way).";
+  }
+
+  // ---------- selection and the details pane ----------
+
+  function select(tool) {
+    view.selected = tool;
+    if (ui.table) ui.table.select((card) => card.tool === tool);
+    renderPane();
+    const card = tool && view.cards.get(tool);
+    if (card) Shell.announce(`Details: ${card.title}`);
+  }
+
+  /** Select a card from outside the table (a gate's button): a row the chips or the
+   *  filter text hide is shown first (its chip turned on, the text cleared), so the
+   *  selected row is on screen and keyboard focus lands on it. */
+  function revealCard(tool) {
+    const card = view.cards.get(tool);
+    if (!card || !ui.table) return;
+    if (!rowFilter(card)) {
+      view.chipsOn = new Set([...(view.chipsOn || []), category(card), ...(card.current ? [] : ["stale"])]);
+      view.auto.chips = false;
+      ui.table.setFilter(rowFilter);
+      renderChips();
+    }
+    const drawn = () => Boolean(ui.table.el.querySelector('tbody tr[aria-selected="true"]'));
+    select(tool);
+    if (!drawn() && view.query) {
+      view.query = "";
+      ui.table.setQuery("");
+      const box = ui.tools && ui.tools.querySelector("input[type=search]");
+      if (box) box.value = "";
+      ui.table.select((item) => item.tool === tool);
+    }
+    if (!drawn() && groupSpec()) {
+      ui.table.setGroup(groupSpec());  // its group was collapsed: the groups open again
+      ui.table.select((item) => item.tool === tool);
+    }
+    ui.table.focus((item) => item.tool === tool);
+  }
+
+  function closeDetails() {
+    const tool = view.selected;
+    const inPane = ui.pane && ui.pane.contains(document.activeElement);
+    select(null);
+    if (!inPane && document.activeElement && document.activeElement !== document.body) return;
+    if (ui.table) ui.table.focus((card) => card.tool === tool);
+  }
+
+  /** Focus for a pane button that is gone (Run again becoming "Asking…"): the pane's h2. */
+  const paneHeading = () => (ui.pane ? ui.pane.querySelector("h2") : null);
+
+  function renderPane() {
+    if (ui.pane) Shell.keepFocus(ui.pane, drawPane, paneHeading);
+  }
+
+  function linkControls(card) {
+    const out = [];
+    if (card.view) out.push(messageControl(`view:${card.tool}`, "Open the view", sentence("view", card.tool)));
+    if (card.board) out.push(messageControl(`board:${card.tool}`, "Show on the board", sentence("board", card.tool)));
+    if (!card.view && !card.board) out.push(messageControl(`explain:${card.tool}`, "Ask Claude", sentence("explain", card.tool)));
+    return out.filter(Boolean);
+  }
+
+  function findingsTable(card) {
+    const rows = card.findings || [];
+    if (!rows.length) return null;
+    return quiet(Shell.table({
+      label: `Findings of ${card.title}`, ownFilter: false, rows,
+      columns: [
+        { key: "sev", label: "Level", value: (row) => LEVELS.indexOf(row.sev), text: (row) => row.sev,
+          render: (row) => Shell.levelBadge(row.sev, LEVEL_WORD[row.sev] || row.sev) },
+        { key: "check", label: "Check", cls: "c-name" },
+        { key: "text", label: "Finding", cls: "c-msg" },
+        { key: "at", label: "At", cls: "c-name", value: (row) => anchorText(row.at) },
+      ],
+    })).el;
+  }
+
+  /** A button that asks get_project_dashboard: while any call is in flight it is marked
+   *  disabled (aria-disabled, so it keeps keyboard focus) and does nothing. */
+  function callButton(text, title, onClick) {
+    return el("button", { type: "button", class: "btn", text, title, "aria-disabled": busy() ? "true" : null,
+                          on: { click: () => { if (!busy()) onClick(); } } });
+  }
+
+  function anchorText(at) {
+    if (!at) return "";
+    return [...(at.parts || []), ...(at.nets || []), ...(at.sheets || [])].join(", ");
+  }
+
+  function drawPane() {
+    clear(ui.pane);
+    const tool = view.selected;
+    const card = tool && view.cards.get(tool);
+    ui.pane.classList.toggle("idle", !card);
+    if (!card) {
+      Shell.append(ui.pane, [
+        el("h2", { text: "Select a check", tabindex: "-1" }),
+        el("p", { class: "help", text: "Click a row (or move to it and press Enter) for its counts, what it examined, what it left out, its findings and when it ran." }),
+        el("p", { class: "help", text: view.closed ? "The view was closed: it asks the server nothing more."
+          : canCall() ? "Its buttons ask get_project_dashboard for more findings or to run the check again."
+            : "This host does not let the view run checks: ask Claude in the conversation." }),
+        el("p", { class: "help", text: "Keys: Up and Down move between rows and group headers, Enter selects or opens and closes a group, Left and Right close and open a group, Esc closes the details." }),
+      ]);
+      return;
+    }
+    const pending = view.pending.get(tool);
+    const error = view.cardErrors.get(tool);
+    const counts = card.counts;
+    const rows = card.findings || [];
+    const total = card.findings_total || rows.length;
+    const was = card.was && card.was.counts ? LEVELS.filter((level) => (card.was.counts[level] || 0) !== ((counts || {})[level] || 0))
+      .map((level) => `${countText(card, level)} (was ${(card.was.counts[level] || 0)})`).join(", ") : "";
+    const scope = card.not_checked ? `${card.not_checked.count} not checked by this tool${(card.not_checked.first || []).length ? `: ${card.not_checked.first.join("; ")}${card.not_checked.count > card.not_checked.first.length ? "; …" : ""}` : ""}` : "";
+    const buttons = [];
+    if (canCall() && !view.closed) {
+      if (["failed", "unreadable"].includes(card.state)) {
+        buttons.push(callButton(pending === "retry" ? "Asking…" : "Retry", `get_project_dashboard(checks=["${tool}"])`,
+                                () => cardCall(tool, "retry")));
+      } else if (!card.current) {
+        buttons.push(callButton(pending === "more" ? "Asking…" : "Run it now", `get_project_dashboard(checks=["${tool}"])`,
+                                () => cardCall(tool, "more")));
+      } else {
+        if (total > rows.length && rows.length < MORE_FINDINGS) {
+          buttons.push(callButton(pending === "more" ? "Asking…" : "Show more findings",
+                                  `get_project_dashboard(checks=["${tool}"]): up to 20 findings, from the server's cache while the files are unchanged`,
+                                  () => cardCall(tool, "more")));
+        }
+        buttons.push(callButton(pending === "again" ? "Asking…" : "Run again",
+                                `get_project_dashboard(checks=["${tool}"], refresh=true): runs ${tool} again`,
+                                () => cardCall(tool, "again")));
+      }
+    }
+    // Rows of some tools group several counted items (an ERC row per sheet, a DRC rule).
+    const unit = card.grouped ? "row" : "finding";
+    const why = !ran(card) && !view.closed && !canCall() ? `${card.reason ? `${card.reason}; ` : ""}${STOP_WORDS.host}` : card.reason;
+    Shell.append(ui.pane, [
+      el("div", { class: "row" }, el("h2", { text: card.title, tabindex: "-1" }),
+        el("button", { type: "button", class: "btn", text: "Close", on: { click: closeDetails } })),
+      el("div", { class: "summary" }, stateBadge(card), el("span", { class: "badge mono", text: tool }),
+        isStale(card) ? el("span", { class: "badge muted st-stale", text: "stale" }) : null,
+        (card.tags || []).map((tag) => el("span", { class: "badge muted", text: TAG_WORDS[tag] || tag }))),
+      Shell.facts([
+        ["Counts", counts ? LEVELS.map((level) => countText(card, level)).join(", ") : null],
+        ["Was", was || null],
+        ["Examined", examined(card) || (counts ? "not said by the tool" : null)],
+        ["Left out", scope || null],
+        ["Why", why || null],
+        ["Note", card.first_note || null],
+        ...((card.facts || []).map(([label, value]) => [label, String(value)])),
+        ["As of", ran(card) && card.as_of ? `${clock(card.as_of)}, ${card.variant ? `variant ${card.variant}` : "no variant"}, default arguments` : null],
+        ["Current", card.current ? "yes" : ran(card) ? `no: ${card.stale_because || "older files"}${card.was_state === "clean" ? " (it was clean before)" : ""}` : "no: not run"],
+        ["Took", took(card.ms) || null],
+      ]),
+      rows.length ? el("h3", { text: total > rows.length ? `First ${rows.length} of ${plural(total, unit)}` : plural(rows.length, unit) }) : null,
+      rows.length && card.grouped ? el("p", { class: "help", text: "A row can stand for several of the items the counts count." }) : null,
+      findingsTable(card),
+      error ? Shell.notice("error", `The call failed: ${error}`) : null,
+      pending ? el("p", { class: "muted", text: `Asking get_project_dashboard for ${tool}… a check runs to its end on the server once asked.` }) : null,
+      buttons.length ? el("div", { class: "btn-row" }, buttons) : null,
+      busy() && !pending && buttons.length ? el("p", { class: "muted small", text: "Another call is in flight: these buttons wait for it." }) : null,
+      el("div", { class: "actions" }, linkControls(card)),
+      counts ? el("p", { class: "foot", text: `page 1 of ${tool}; open its view or ask Claude for the rest.` }) : null,
+    ]);
+  }
+
+  // ---------- head blocks: header, notices, release, overview ----------
+
+  function argLabel() {
+    const args = view.data.args || {};
+    if (args.checks === null) return `default call${args.refresh ? ", refresh=true: every check ran again" : ""}`;
+    return `narrowed to ${plural(args.checks.length, "check")} by checks=${args.refresh ? " with refresh=true" : ""}`;
+  }
+
+  function renderHeader() {
+    const data = view.data;
+    const box = ui.header;
+    clear(box);
+    ui.displayButton = ui.displayButton || Shell.displayModeButton((error) => ui.notices && ui.notices.prepend(Shell.notice("error", error.message)));
+    const canAsk = canCall() && !view.closed;
+    ui.headline = el("h1", { text: "Project dashboard", tabindex: "-1" });
+    Shell.append(box, [
+      el("div", { class: "head" }, ui.headline,
+        el("span", { class: "meta", text: [data.project, data.variant ? `variant ${data.variant}` : null, data.load,
+                                           `as of ${clock(data.state.as_of_utc)}`].filter(Boolean).join(" · ") }),
+        el("span", { class: "grow" }),
+        // aria-disabled while a call is in flight: the button keeps keyboard focus.
+        canAsk ? el("button", { type: "button", class: "btn", text: "Check again", "aria-disabled": busy() ? "true" : null,
+                                title: "get_project_dashboard(refresh=true): runs every check again", on: { click: () => reloadAll(true) } }) : null,
+        ui.displayButton),
+      el("div", { class: "argline" }, el("span", { text: `Answer: ${argLabel()}.` }),
+        data.args.checks !== null && canAsk ? el("button", { type: "button", class: "btn-link", text: "Show all checks",
+          "aria-disabled": busy() ? "true" : null, title: "get_project_dashboard(): every check, from the server's cache where current",
+          on: { click: () => reloadAll(false) } }) : null,
+        canAsk && !short() ? el("span", { text: "Check again runs every check again." }) : null),
+      view.busy ? el("p", { class: "muted", text: view.busy }) : null,
+    ]);
+  }
+
+  /** The notices, redrawn only when what they say changes: a notice is a status (or, for
+   *  an error, an alert) region, and redrawing it on every answer of a fill would have it
+   *  read out again. */
+  function renderNotices() {
+    const data = view.data;
+    const list = [];
+    if (view.headError) list.push(["error", view.headError]);
+    if (data.state.netlist_older_than_sheets) {
+      list.push(["warning", `The netlist is older than the sheets${data.state.netlist_note ? `: ${data.state.netlist_note.replace(/\.$/, "")}` : ""}. The schematic checks read the netlist, so ask Claude to refresh the netlist after saving in Altium.`]);
+    }
+    if (!data.state.folder_watched) {
+      list.push(["info", "The project folder holds too many files to watch: a change to a file outside the design (an OutJob, a DRC report, an output) does not mark the checks stale. Check again after such a change."]);
+    }
+    if (view.changed) {
+      list.push(["warning", "The files changed while checking: the other checks are marked stale. Check again to see every check against the saved files."]);
+    }
+    if (view.closed) list.push(["info", "The view was closed: it sends no more requests, and its server buttons are gone."]);
+    else if (!canCall()) list.push(["info", "This host does not let the view run checks: the first answer is drawn; ask Claude for the rest."]);
+    if (view.warnings.length) list.push(["warning", `The result is not quite the shape this view reads: ${view.warnings.slice(0, 3).join("; ")}.`]);
+    // Unchanged: nothing redrawn (a notice the user dismissed stays dismissed).
+    const sig = JSON.stringify(list);
+    if (sig === view.noticeSig) return;
+    view.noticeSig = sig;
+    clear(ui.notices);
+    for (const [kind, text] of list) ui.notices.appendChild(Shell.notice(kind, text));
+  }
+
+  function gateRow(row) {
+    const [id, status, blocking, source, title] = row;
+    const card = source && view.cards.get(source);
+    return el("li", {},
+      el("span", { class: `badge ${GATE_CLASS[status] || "muted"}`, text: GATE_WORD[status] || status }),
+      el("span", { class: "title", text: title || id.replace(/_/g, " ") }),
+      blocking ? el("span", { class: "badge muted", text: "blocking" }) : null,
+      el("button", { type: "button", class: "btn-link", text: source ? `see ${source}` : "no check",
+                     disabled: !card, title: card ? `Select the ${card.title} check` : "This gate's source is not one of the checks here",
+                     on: { click: () => { if (card) revealCard(source); } } }));
+  }
+
+  function renderRelease() {
+    const box = ui.release;
+    clear(box);
+    const release = view.data.release || {};
+    const head = el("h2", { text: "Release readiness" });
+    if (release.state !== "ran") {
+      Shell.append(box, [el("div", { class: "row" }, head,
+        el("span", { class: "badge muted", text: release.state === "not_run" ? "not run in this answer" : stateOf(release).word })),
+        release.reason ? el("p", { class: "help", text: release.reason }) : null]);
+      return;
+    }
+    const verdict = VERDICT[release.verdict] || { word: release.verdict, glyph: "?", cls: "muted" };
+    const counts = release.counts || {};
+    const gates = release.gates || [];
+    // A narrow or short host: the verdict and the gate counts on one line, the rest
+    // behind "Show gates".
+    const compact = narrowHost() || !Shell.roomy() || !tall(900);
+    const statusChips = ["fail", "warn", "not_verified", "pass", "not_applicable"]
+      .filter((status) => counts[status]).map((status) => el("span", { class: `badge ${GATE_CLASS[status]}`, text: `${counts[status]} ${GATE_WORD[status]}` }));
+    const failed = (release.blocking_failed || []).map((row) => el("li", {},
+      el("strong", { text: row.title }), row.evidence ? `: ${row.evidence}` : ""));
+    const details = [
+      el("p", { class: "help", text: release.verdict_summary || "" }),
+      failed.length ? [el("p", { class: "help", text: "Blocking gates that failed:" }), el("ul", {}, failed)] : null,
+      (release.blocking_not_verified || []).length ? el("p", { class: "help", text: `Blocking gates not verified: ${release.blocking_not_verified.join(", ")}.` }) : null,
+    ];
+    const ercNote = release.verdict === "not_ready_unverified" || (release.blocking_not_verified || []).includes("erc")
+      ? el("p", { class: "help", text: "ERC is never verified offline (no ERC result is saved in the files): NOT VERIFIED is the best verdict the files can give, not a failure." }) : null;
+    const action = el("div", { class: "actions" }, messageControl("release", "Run the release review", sentence("release")));
+    // A narrowed answer gives the verdict only: the gates come with the default call.
+    const narrowedNote = !gates.length && view.data.args.checks !== null
+      ? el("p", { class: "help", text: "This answer was narrowed by checks=: the gates come with the default call (Show all checks)." }) : null;
+    // A narrow host keeps the gate counts behind the disclosure too: one line for the verdict.
+    const chipsInRow = compact && !narrowHost();
+    let gateList = null;
+    if (gates.length || compact) {
+      const gateItems = gates.length ? el("ul", { class: "gates" }, gates.map(gateRow)) : null;
+      gateList = el("details", { class: "gates-box", open: view.gatesOpen },
+        el("summary", { text: compact ? (gates.length ? "Show gates" : "Show more") : `All ${plural(gates.length, "gate")}` }),
+        compact && !chipsInRow ? el("div", { class: "chiprow" }, statusChips) : null,
+        compact ? [details, ercNote, narrowedNote, action] : null, gateItems,
+        release.gates_note ? el("p", { class: "help", text: release.gates_note }) : null);
+      // Its state survives the redraws of a fill.
+      gateList.addEventListener("toggle", () => { view.gatesOpen = gateList.open; });
+    }
+    Shell.append(box, [
+      el("div", { class: "row" }, head,
+        el("span", { class: `badge verdict ${verdict.cls}` }, el("span", { "aria-hidden": "true", text: `${verdict.glyph} ` }), verdict.word),
+        release.current ? null : el("span", { class: "badge muted", text: "stale" }),
+        chipsInRow ? statusChips : null),
+      compact ? null : details,
+      compact ? null : el("div", { class: "chiprow" }, statusChips),
+      gateList,
+      compact ? null : [ercNote, narrowedNote, action],
+    ]);
+  }
+
+  function boardFacts(board) {
+    if (!board) return [];
+    const size = board.board_mm ? `${board.board_mm[0]} × ${board.board_mm[1]} mm` : null;
+    return [
+      ["Copper layers", board.copper_layers === undefined ? null : String(board.copper_layers)],
+      ["Board size", size],
+      ["Parts", board.parts_top === undefined ? null : `${board.parts_top} top, ${board.parts_bottom || 0} bottom`],
+      ["Nets", board.nets === undefined ? null : String(board.nets)],
+      ["Vias", board.vias === undefined ? null : String(board.vias)],
+      ["Rules", board.rules === undefined ? null : String(board.rules)],
+      ["Diff pairs", board.diff_pairs === undefined ? null : String(board.diff_pairs)],
+      ["Board saved", board.last_saved_utc ? board.last_saved_utc.replace("T", " ").replace(/(\+00:00|Z)$/, " UTC") : null],
+    ];
+  }
+
+  function renderOverview() {
+    const box = ui.overview;
+    clear(box);
+    const data = view.data;
+    const overview = data.overview;
+    if (!overview) {
+      box.hidden = true;
+      return;
+    }
+    box.hidden = false;
+    const variants = overview.variants || {};
+    const pairs = [
+      ["Sheets", String(overview.sheets)], ["PcbDoc", data.pcb_doc || "none"], ["Drawings", String(overview.drawings)],
+      ...boardFacts(overview.board),
+      ["Variants defined", variants.defined === undefined ? null : String(variants.defined)],
+      ["Not Fitted in the active variant", variants.dnp === undefined || variants.dnp === null ? null : plural(variants.dnp, "part")],
+    ];
+    const actions = el("div", { class: "actions" },
+      messageControl("tour", "Take the project tour", sentence("tour")),
+      data.pcb_doc ? messageControl("boardview", "Open the board view", sentence("boardview")) : null,
+      (variants.defined || 0) >= 2 ? messageControl("variants", "Compare variants", sentence("variants")) : null);
+    // Open where it costs the checks table no room: beside the release block, or a tall host.
+    if (view.overviewOpen === null) view.overviewOpen = !short() && (window.innerWidth > 980 || tall(1100));
+    const grid = el("div", { class: "factgrid", role: "list" }, pairs.filter(([, value]) => value !== null && value !== undefined && value !== "")
+      .map(([label, value]) => el("div", { class: "fact", role: "listitem" }, el("span", { class: "k", text: label }), el("span", { class: "v", text: value }))));
+    const body = [grid,
+      (overview.notes || []).map((note) => el("p", { class: "help", text: note })), actions];
+    const disclosure = el("details", { open: view.overviewOpen }, el("summary", {}, el("h2", { text: "Overview" })), body);
+    disclosure.addEventListener("toggle", () => {
+      if (disclosure.open === view.overviewOpen) return;  // drawn so, not the user's toggle
+      view.overviewOpen = disclosure.open;
+      view.auto.overview = false;
+    });
+    box.appendChild(disclosure);
+  }
+
+  /** Where keyboard focus goes when its control is gone (Stop becoming Run the N not run):
+   *  the first control left in the same box, else the page's heading. */
+  const nearby = (box) => () => box.querySelector("button:not([disabled]), input, summary") || ui.headline;
+
+  function renderHeadBlocks() {
+    if (!view.data || !ui.header) return;
+    for (const [box, draw] of [[ui.header, renderHeader], [ui.notices, renderNotices], [ui.release, renderRelease],
+                               [ui.overview, renderOverview], [ui.fillBox, renderFillBox]]) {
+      Shell.keepFocus(box, draw, nearby(box));
+    }
+  }
+
+  // ---------- fill status ----------
+
+  function renderFillBox() {
+    const box = ui.fillBox;
+    clear(box);
+    const fill = view.fill;
+    const data = view.data;
+    const notCurrent = [...view.cards.values()].filter((card) => !card.current).length;
+    if (fill.running) {
+      // Stop first, where it stays put while the text after it changes.
+      Shell.append(box, [
+        el("button", { type: "button", class: "btn", text: "Stop", "aria-disabled": fill.stopping ? "true" : null,
+                       title: "Stop after the check in progress (it finishes on the server)", on: { click: stopFill } }),
+        narrowHost() ? null : el("progress", { max: String(Math.max(fill.total, 1)), value: String(fill.done), "aria-label": "Checks filled" }),
+        el("span", { text: narrowHost() ? `Filling: ${fill.done} of ${fill.total}${fill.current ? ` (${fill.current})` : ""}.`
+          : `Filling the checks: ${fill.done} of ${fill.total}${fill.current ? ` (running ${fill.current})` : ""}.` }),
+        fill.stopping ? el("span", { class: "muted", text: "Stopping: the check in progress finishes on the server; no other is asked for." }) : null,
+      ]);
+      return;
+    }
+    if (fill.stopped) {
+      const canResume = fill.resumable && canCall() && !view.closed && fillQueue().length;
+      Shell.append(box, [
+        canResume ? callButton(fill.stopped === STOP_WORDS.user ? `Run the ${fillQueue().length} not run` : "Resume",
+                               "One get_project_dashboard call per check, one at a time", resumeFill) : null,
+        fill.stopped === STOP_WORDS.changed && canCall() && !view.closed
+          ? callButton("Check again", "get_project_dashboard(refresh=true): runs every check again", () => reloadAll(true)) : null,
+        el("span", { text: `Stopped: ${fill.stopped}. ${plural(notCurrent, "check")} not current.` }),
+        !canCall() || view.closed ? messageControl("not_run", "Ask Claude to run them", sentence("not_run")) : null,
+      ]);
+      return;
+    }
+    if (notCurrent && data.args.checks === null && canCall() && !view.closed && fillQueue().length) {
+      Shell.append(box, [
+        callButton(`Run the ${fillQueue().length} not run`, "One get_project_dashboard call per check, one at a time", resumeFill),
+        el("span", { text: `${plural(fillQueue().length, "check")} not run yet.` })]);
+      return;
+    }
+    if (notCurrent && (!canCall() || view.closed)) {
+      Shell.append(box, [el("span", { text: `${plural(notCurrent, "check")} not current: ${view.closed ? "the view was closed" : STOP_WORDS.host}.` }),
+        messageControl("not_run", "Ask Claude to run them", sentence("not_run"))]);
+    }
+  }
+
+  function renderFill() {
+    if (ui.fillBox) Shell.keepFocus(ui.fillBox, renderFillBox, nearby(ui.fillBox));
+    if (ui.header) Shell.keepFocus(ui.header, renderHeader, nearby(ui.header));
+    renderPane();
+  }
+
+  // ---------- the page ----------
+
+  function chipRow() {
+    const cards = [...view.cards.values()];
+    const items = CHIPS.map((chip) => ({
+      id: chip.id, label: chip.label,
+      count: cards.filter((card) => category(card) === chip.id || (chip.id === "stale" && !card.current && category(card) !== "stale")).length,
+    })).filter((item) => item.count);
+    if (!items.length) return null;
+    return Shell.chips({ label: "Show", items, selected: view.chipsOn || items.map((item) => item.id),
+      onChange: (on) => {
+        view.chipsOn = on;
+        view.auto.chips = false;
+        if (ui.table) ui.table.setFilter(rowFilter);
+        ui.filteredBadge.hidden = !(view.chipsOn && view.chipsOn.size < CHIPS.length);
+      } }).el;
+  }
+
+  function regroup(id) {
+    view.groupBy = id;
+    if (ui.table) ui.table.setGroup(groupSpec());
+  }
+
+  /** Redraw after an answer: the head blocks, the table's rows and the pane, keyboard
+   *  focus kept where it was. */
+  function redraw() {
+    if (!ui.table) {
+      renderAll();
+      return;
+    }
+    renderHeadBlocks();
+    ui.table.setRows(sortedCards());
+    if (view.selected) ui.table.select((card) => card.tool === view.selected);
+    Shell.keepFocus(ui.chips, renderChips, () => ui.headline);
+    if (ui.sumline) ui.sumline.textContent = summaryLine();
+    renderPane();
+  }
+
+  function renderTools() {
+    clear(ui.tools);
+    const filter = Shell.filterBox({
+      placeholder: "Filter checks", label: "Filter the checks", value: view.query,
+      onInput: (text) => {
+        view.query = text;
+        if (ui.table) ui.table.setQuery(text);
+      },
+    });
+    const switcher = Shell.segmented({ label: "Group by", items: [
+      { id: "group", label: "Domain" }, { id: "state", label: "State" }, { id: "none", label: "None" }],
+    current: view.groupBy, onChange: regroup });
+    if (view.filtersOpen === null) view.filtersOpen = !short();
+    const filtered = view.chipsOn && view.chipsOn.size < CHIPS.length;
+    ui.chips = el("div", {});
+    ui.filteredBadge = el("span", { class: "badge info", text: "filtered", hidden: !filtered });
+    const box = el("details", { class: "filters-box", open: view.filtersOpen },
+      el("summary", { text: short() ? "Summary, filter and group" : "Filter and group" }, ui.filteredBadge),
+      el("div", { class: "filters" }, filter, switcher.el), ui.chips,
+      // A short host: the summary line waits here too.
+      short() ? ui.sumline : null);
+    box.addEventListener("toggle", () => {
+      if (box.open === view.filtersOpen) return;
+      view.filtersOpen = box.open;
+      view.auto.filters = false;
+    });
+    ui.tools.appendChild(box);
+    renderChips();
+  }
+
+  function renderChips() {
+    clear(ui.chips);
+    const row = chipRow();
+    if (row) ui.chips.appendChild(row);
+    ui.filteredBadge.hidden = !(view.chipsOn && view.chipsOn.size < CHIPS.length);
+  }
+
+  function renderAll() {
+    const data = view.data;
+    ui.header = el("div", {});
+    ui.notices = el("div", {});
+    ui.release = el("section", { class: "block", "aria-label": "Release readiness" });
+    ui.overview = el("section", { class: "block", "aria-label": "Overview" });
+    ui.tools = el("div", {});
+    ui.fillBox = el("div", { class: "fill" });
+    ui.sumline = el("p", { class: "sumline" });
+    // A short or narrow host shows what needs attention first (the chips say so).
+    if (view.chipsOn === null && view.auto.chips && short()) view.chipsOn = new Set(ATTENTION);
+    app.classList.toggle("short", short());
+    ui.table = checksTable();
+    ui.table.setQuery(view.query);
+    // Not a live region: the pane is rebuilt on each answer; Shell.announce says what changed.
+    ui.pane = el("aside", { class: "pane", "aria-label": "Details" });
+    const content = el("div", { class: "content" }, ui.table.el);
+    clear(app).append(ui.header, ui.notices, el("div", { class: "top" }, ui.release, ui.overview),
+      el("h2", { class: "sr-only", text: "Checks" }), ui.tools, ui.fillBox, ui.sumline,
+      el("div", { class: "split" }, content, ui.pane));
+    renderHeader();
+    view.noticeSig = "";  // a new, empty notices box
+    renderNotices();
+    renderRelease();
+    renderOverview();
+    renderTools();
+    renderFillBox();
+    ui.sumline.textContent = summaryLine();
+    if (view.selected) ui.table.select((card) => card.tool === view.selected);
+    renderPane();
+    if (data.args.checks !== null && !view.selected && data.cards.length === 1) select(data.cards[0].tool);
+    wasLayout = layout();  // drawn for this layout: a context change to the same one redraws nothing
+  }
+
+  // ---------- host ----------
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && view.selected && !event.defaultPrevented) closeDetails();
+  });
+  Shell.on("toolInput", (args) => {
+    view.args = args || {};
+    view.argsKnown = true;
+    if (!view.data) {
+      const narrowed = Array.isArray(view.args.checks) && view.args.checks.length;
+      showState("loading", "Checking the project", narrowed
+        ? `get_project_dashboard is reading ${plural(view.args.checks.length, "check")} asked for by checks=.`
+        : "Checking the project: release gates first, then up to 33 checks (about 20 s on a large board).");
+    }
+  });
+  Shell.on("toolInputPartial", () => {
+    if (!view.data) showState("loading", "Checking the project", "Waiting for the tool's arguments.");
+  });
+  Shell.on("toolResult", (result) => loadResult(result));
+  Shell.on("toolCancelled", (reason) => {
+    if (!view.data) showState("info", "The get_project_dashboard call was cancelled", reason || "No result to show.");
+  });
+  Shell.on("teardown", () => {
+    view.closed = true;
+    view.fillWanted = false;
+    closeCalls();
+    if (view.fill.running) {
+      view.fill.stopped = STOP_WORDS.closed;
+      view.fill.stopping = true;
+    }
+    view.busy = "";
+    Shell.announce("The view was closed: it asks the server nothing more");
+    if (view.data && ui.header) {
+      renderHeadBlocks();
+      renderPane();
+    } else if (!view.data) {
+      showState("info", "The view was closed", "It asks the server nothing more, and no dashboard was read before it closed.");
+    }
+  });
+  // The host's size or display mode changed: the narrow layout (columns, release block)
+  // may too, and full screen restores the full layout (the disclosures and chips the user
+  // has not set themselves open again).
+  const layout = () => `${narrowHost()}|${Shell.context().displayMode}|${tall(900)}|${tall(1100)}|${short()}`;
+  let wasLayout = layout();
+  function onLayoutChange() {
+    if (!view.data || !ui.table) return;
+    if (layout() === wasLayout) return;
+    wasLayout = layout();
+    if (view.auto.overview) view.overviewOpen = null;
+    if (view.auto.filters) view.filtersOpen = null;
+    if (view.auto.chips) view.chipsOn = null;
+    const mark = Shell.focusMark(app);
+    renderAll();
+    if (mark) Shell.refocus(app, mark, () => ui.headline);
+  }
+  Shell.on("context", onLayoutChange);
+  window.addEventListener("resize", onLayoutChange);
+
+  showState("loading", "Connecting to the host", "");
+  Shell.connect({ name: "altium-copilot-kc Project dashboard", version: "1.0.0" })
+    .then(() => {
+      if (!view.data) showState("loading", "Waiting for get_project_dashboard", "The dashboard appears when the tool's result arrives.");
+    })
+    .catch((error) => showState("error", "This view needs a host that shows MCP Apps", error.message));
+})();
+</script>
+</body>
+</html>

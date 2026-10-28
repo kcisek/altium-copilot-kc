@@ -171,6 +171,7 @@ try:
     from services import multiboard
     from services import board_view
     from services import ui_views
+    from services import project_dashboard
     from services import settings as app_settings
     from parsers.pin_table import PinTableError, parse_pin_file, parse_pin_text
     from services.pin_table import (
@@ -347,6 +348,7 @@ except ImportError:
     from server.services import multiboard
     from server.services import board_view
     from server.services import ui_views
+    from server.services import project_dashboard
     from server.services import settings as app_settings
     from server.parsers.pin_table import PinTableError, parse_pin_file, parse_pin_text
     from server.services.pin_table import (
@@ -709,6 +711,16 @@ never invent a mating.
   evidence cites run_erc's offline counts, which never make it pass).
 - release_review — a guided go / no-go: the gates, the causes from each source_tool, then
   the blocking items, what was not verified and the warnings.
+
+## Project Dashboard
+
+- get_project_dashboard — "status?", "give me an overview / a dashboard", "what is left?",
+  before a design review or a release; not at session start. The release verdict, board
+  facts and every check's state and counts in one call (about 20 s on a large board, then
+  reused until the files change). Lead with the release verdict and the checks with
+  errors; a card is clean only when its check ran on the current files and found
+  nothing. When not_run lists checks, call its next to run them; for one check's
+  details call that check's own tool.
 
 ## Review Checklists
 
@@ -9975,6 +9987,83 @@ def check_release_readiness(offset: int = 0) -> str:
         if len(rendered) <= QUERY_NET_MAX_RESULT_SIZE_CHARS:
             break
     return rendered
+
+
+# ---------- get_project_dashboard (roadmap #74) ----------
+
+DASHBOARD_CACHE_SIZE = 4  # projects whose cards are kept
+_dashboard_cache = project_dashboard.DashboardCache(DASHBOARD_CACHE_SIZE)
+
+
+def _load_mode(netlist: dict | None) -> str:
+    if netlist is None:
+        return "netlist_free"
+    return "offline_netlist" if _offline(netlist) else "netlist"
+
+
+def _netlist_freshness(project: dict, netlist: dict | None) -> tuple[bool, str | None]:
+    """Whether files were saved after the loaded netlist was compiled, by the release gate
+    netlist_fresh's rule (refresh_netlist's file set), with a note naming them."""
+    compiled = (netlist or {}).get("net_file_mtime")
+    if not compiled or not project.get("sheets"):
+        return False, None
+    sheets, others = _saved_after_netlist(project, compiled)
+    if not (sheets or others):
+        return False, None
+    what = ([f"{len(sheets)} sheet{'' if len(sheets) == 1 else 's'} ({', '.join(sheets[:3])}"
+             f"{', ...' if len(sheets) > 3 else ''})"] if sheets else []) + others[:3]
+    return True, f"{'; '.join(what)} saved after the netlist was compiled ({_utc(compiled)})"
+
+
+@mcp.tool(
+    title="Project Dashboard",
+    annotations=ToolAnnotations(readOnlyHint=True),
+    meta=ui_views.link_meta("get_project_dashboard",
+                            {"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS}),
+)
+def get_project_dashboard(checks: list[str] | None = None, refresh: bool = False) -> str:
+    """One overview of the loaded project: the release gates (check_release_readiness),
+    board and project facts, and for each of 33 checks (run_erc, get_drc_report,
+    get_power_tree, get_output_jobs, verify_outputs, run_custom_checks and the check_*
+    tools) its counts, what it examined and its first findings, as of the saved files.
+    Call when the user asks for status, an overview or a dashboard, before a design
+    review or a release, or "what is left?". Not at session start.
+
+    It takes about 20 s on a large board such as Altium's Mini PC example; later calls
+    reuse the results until a design file, the project folder, the Git state, the
+    netlist, the variant, the settings or the check packs change (each card says when it
+    is stale and why). not_run lists the checks the time budget left out, with the call that runs them.
+    checks= (tool names) runs or reads exactly those cards, without the budget, with up
+    to 20 findings each for three names or fewer; refresh=true runs them again (inputs
+    outside the project folder: global libraries, databases).
+
+    clean means the check ran on the current files and found nothing in N things it
+    examined (and, where it needs a voltage, a dissipation, a current or a rule it can
+    evaluate, could judge some). The other states are never clean: partial,
+    nothing_to_check, not_verified, not_applicable, unavailable, failed, unreadable,
+    not_run and stale. Counts are each tool's own totals; findings are the first of its
+    page 1. For one check's details, call that check's own tool."""
+    try:
+        project, netlist, variant_state = _require_project(netlist=False)
+    except ProjectNotReady as e:
+        return json.dumps(e.payload)
+    settings = app_settings.current()
+    inputs = project_dashboard.Inputs(
+        project=project,
+        netlist=netlist,
+        load=_load_mode(netlist),
+        variant=variant_state.active.name if variant_state.variants else None,
+        defined_variants=defined_variant_count(variant_state.variants),
+        netlist_updated_utc=_netlist_last_updated,
+        tools=_review_tools(),
+        netlist_tools=NETLIST_TOOLS,
+        settings=[app_settings.file_signature(settings),
+                  json.dumps(settings.applied(), sort_keys=True, default=str)],
+        packs=pack_signature(project.get("root_dir")),
+        netlist_freshness=lambda: _netlist_freshness(project, netlist),
+    )
+    return project_dashboard.render(
+        project_dashboard.build(inputs, _dashboard_cache, checks, refresh))
 
 
 # ---------- run_review_checklist (roadmap #46) ----------

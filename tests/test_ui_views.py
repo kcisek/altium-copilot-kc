@@ -242,12 +242,21 @@ def test_the_shell_speaks_the_spec_messages():
                    "ui/notifications/tool-input", "ui/notifications/tool-input-partial",
                    "ui/notifications/tool-result", "ui/notifications/tool-cancelled",
                    "ui/notifications/host-context-changed", "ui/resource-teardown",
-                   "ui/notifications/size-changed", "ui/request-display-mode", "tools/call"):
+                   "ui/notifications/size-changed", "ui/request-display-mode", "tools/call",
+                   "ui/message"):
         assert f'"{method}"' in shell, method
     # Messages go to the host only and are taken from the host only.
     assert shell.count("postMessage(") == 1 and "event.source !== host" in shell
     # tools/call only when the host offers serverTools (an optional host capability).
     assert "capabilities.serverTools" in shell and "if (!canCallTools()) throw" in shell
+    # ui/message only when the host takes text messages (hostCapabilities.message.text:
+    # message: {} declares no content type); a denial is an error or a result with isError.
+    assert "return Boolean(capabilities.message && capabilities.message.text);" in shell
+    send = shell.split("async function sendMessage(", 1)[1].split("\n  }\n", 1)[0]
+    assert "if (!canSendMessage()) throw" in send
+    assert '{ role: "user", content: [{ type: "text", text: String(text) }] }' in send
+    assert "if (result && result.isError) throw" in send
+    assert "ui/open-link" not in shell and "ui/update-model-context" not in shell
     # The page is measured with its scrollbar shown, so a height that fits never leaves it
     # stuck taller than the host's limit with a scrollbar that narrows it (text wraps more).
     measure = shell.split("function contentHeight() {", 1)[1].split("\n  }\n", 1)[0]
