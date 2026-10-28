@@ -240,6 +240,59 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
     line's BomDoc lines found designator by designator (a line spread over several
     numbered, unnumbered or mixed BomDoc lines, parts on none, ten calls at a time), and
     unchanged text results.
+- Board view with net and finding highlight (roadmap #63): `get_board_view` says where
+  nets, parts, pads, a spot or the objects of findings lie on the board, as a small JSON
+  text for every host; Claude Desktop (and other MCP Apps hosts) also draws the board.
+  No existing tool's result changes.
+  - `get_board_view` (read-only, linked to `server/ui/board.html`): nets by name,
+    differential pair or regex (20 at most), parts by PCB, netlist or logical designator
+    (every channel instance), pads as `U3-4` or `U3.4`, a spot (x and y, absolute, in the
+    call's units, with the nets and parts within a radius; a designator or pin name
+    holding `-` or `.` is found too), findings from
+    `get_drc_report`, `check_dfm`, `check_testpoints`, `check_decoupling` and
+    `check_interfaces` passed unchanged with `finding_tool` (their coordinates placed in
+    the frame each tool's code uses: DRC locations absolute, DFM and testpoint examples
+    relative to the origin; DFM objects such as `Pad U3-12 (GND)` read; decoupling and
+    TVS findings measured pad edge to pad edge as the tools measure, decoupling from the
+    IC's power pins as `check_decoupling` does; placeholders such as `(no net)` skipped,
+    and a finding nothing could be read from named), the layers shown first and the side
+    viewed from. Each object with its layers, counts, extents, side,
+    position (absolute and from the origin), rotation and Not Fitted state, and the
+    board third it lies in; marks off the board with a hint when the other frame would
+    put them on it; what was not found with up to 5 suggestions (a part in the schematic
+    but not on the board says so); lists capped and shrunk to fit, each with its total
+    (what a cap leaves out counts in the total and is named as too many).
+  - `get_board_view_geometry`, the first app-only tool (`_meta.ui.visibility ["app"]`):
+    the board as compact JSON pages of at most 55,000 characters (integer coordinates in
+    0.1 mil from a base, rotations in 0.01 degree, arcs in 0.001 degree), built once per
+    loaded board and kept with it, without `structuredContent`; page 0 carries a small
+    header, the page plan and the active variant's Not Fitted parts (the outline, the
+    cutouts and the schematic designators come as chunks, so a long outline or many
+    cutouts cannot push page 0 past the limit); tracks are chained into polylines, arcs
+    rebuilt from their chords, areas sent with their holes, and every long ring
+    (outline, cutout, area, pour outline) in pieces; poured copper is read automatically
+    when the board fits 16 pages, else per layer when asked; at most 128 pages are sent
+    (what lies beyond is named). A board saved again since `get_board_view` answered
+    (another `rev`) is `board_changed`. Its description tells text-only hosts, which
+    list it, to use the model-facing tools instead.
+  - The view: two canvases (the board, and the highlight, selection, marks and
+    measures over it), no library; overlapping copper filled (nonzero, holes wound
+    against their outline); layer toggles and presets, zoom, pan, pinch, fit, flip, a
+    find box, keyboard control, hit testing on each pad's own shape with a details pane
+    and the Objects and Parts tabs; a channel instance highlighted by its schematic
+    designator; pages added to the drawing as they arrive, so reading poured copper or
+    showing a layer never rebuilds the drawing from scratch; paging with the stop
+    reason, Retry, a Reload when the board changed, and a sketch from the text where the
+    host does not let the view call tools; on a short host the notes, the legend and
+    the less used tools fold, so the page keeps within the host's height.
+  - `ui_views`: the View entry, `APP_ONLY_TOOLS` and `app_only_meta`; the registry stays
+    one tool per view. `pcb_doc.read_board_cutouts` is shared by the DFM edge checks and
+    the view. `PcbSession.loaded` names the board read.
+  - Tests (`tests/test_board_view.py`, `tests/test_ui_board.py`): every primitive rebuilt
+    from the pages by a reference decoder on synthetic boards and the six public PcbDocs
+    (Mini PC Motherboard, SODIMM and WiFi with its panel, SpiritLevel, Bluetooth
+    Sentinel), page sizes and the plan, the page budgets, the locator text and its
+    errors, one finding round trip per tool, and the page's contract and read-only rule.
 - `trace_net_across_boards`, `check_multiboard` and `get_system_connections` (roadmap
   #54): multi-board systems (`.PrjMbd`) read offline; the loaded project is never
   changed and none of the three needs its netlist.

@@ -1,0 +1,3408 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!--@csp-->
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Board view</title>
+<style>/*@shell.css*/</style>
+<style>
+/* Board view (roadmap #63): get_board_view's locator drawn on the board, whose geometry
+   the view reads from get_board_view_geometry in pages. The board canvas is always dark
+   (Altium's layer colours wash out on white); the chrome follows the host theme. */
+.head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 0 0 6px; }
+.head h1 { font-size: var(--fs-lg); margin: 0; font-weight: var(--fw-bold); }
+.head > .muted { min-width: 0; overflow-wrap: anywhere; }
+.summary { display: flex; flex-wrap: wrap; gap: 4px; }
+.asked { font-size: var(--fs-xs); color: var(--c-text3); margin: 0 0 6px; overflow-wrap: anywhere; }
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 10px; align-items: start; }
+@media (max-width: 980px) {
+  .layout { grid-template-columns: minmax(0, 1fr); }
+  .layout > .pane.idle { display: none; }
+  /* A short host: the details take the board's place (Back brings it back). */
+  .layout.solo > .content { display: none; }
+}
+.board { position: relative; height: var(--pane-height); min-height: 64px; background: #0d1117;
+         border: 1px solid var(--c-line); border-radius: var(--radius); overflow: hidden;
+         touch-action: none; cursor: grab; outline: none; }
+.board:focus-visible { box-shadow: 0 0 0 2px var(--c-ring); }
+.board.dragging { cursor: grabbing; }
+.board canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: block;
+                transform-origin: 0 0; }
+.board .hint { position: absolute; left: 50%; top: 10px; transform: translateX(-50%);
+               background: rgba(13, 17, 23, .88); color: #e6edf3; border: 1px solid #30363d;
+               border-radius: 999px; padding: 3px 12px; font-size: var(--fs-xs); pointer-events: none; }
+.board .progress { position: absolute; left: 8px; bottom: 8px; background: rgba(13, 17, 23, .85);
+                   color: #c9d1d9; border-radius: var(--radius-sm); padding: 2px 8px;
+                   font-size: var(--fs-xs); pointer-events: none; }
+.readout { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin: 4px 2px 0;
+           font-size: var(--fs-xs); color: var(--c-text3); }
+.readout .coords { font-family: var(--mono); font-variant-numeric: tabular-nums; min-width: 14em; }
+.scalebar { display: inline-flex; align-items: center; gap: 6px; }
+.scalebar .bar { display: inline-block; height: 6px; border: 1px solid var(--c-text3); border-top: 0; width: 60px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: var(--fs-xs); color: var(--c-text3);
+          margin: 4px 2px 0; }
+.legend-keys { display: contents; }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px;
+      vertical-align: -1px; border: 1px solid rgba(127, 127, 127, .5); }
+.sw.l-top { background: #e04040; } .sw.l-bottom { background: #4f7dff; }
+.sw.l-multi { background: #c0c0c0; } .sw.l-overlay-top { background: #f2d64b; }
+.sw.l-overlay-bottom { background: #9a9a3a; } .sw.l-board { background: #141a22; }
+.sw.l-mark { background: #ffb000; border-radius: 50%; } .sw.l-measure { background: #3fd0ff; }
+.sw.l-hatch { background: repeating-linear-gradient(45deg, #888 0 2px, transparent 2px 5px); }
+.sw.l-i0 { background: #e0a040; } .sw.l-i1 { background: #40c080; } .sw.l-i2 { background: #c060e0; }
+.sw.l-i3 { background: #40c0d0; } .sw.l-i4 { background: #d0d040; } .sw.l-i5 { background: #e070a0; }
+.sw.l-i6 { background: #80a0ff; } .sw.l-i7 { background: #a0e060; }
+.sw + .sw { margin-left: -2px; }
+.sw.h-0 { background: #ffffff; } .sw.h-1 { background: #3fd0ff; } .sw.h-2 { background: #ff5fd2; }
+.sw.h-3 { background: #8be04f; } .sw.h-4 { background: #ffa040; } .sw.h-5 { background: #b28cff; }
+.layers { border: 1px solid var(--c-line); border-radius: var(--radius); padding: 6px 10px; margin: 0 0 8px;
+          font-size: var(--fs-sm); }
+.layer-groups { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px 14px; }
+.layer-groups h3 { font-size: var(--fs-xs); color: var(--c-text3); margin: 4px 0 2px; font-weight: var(--fw-medium); }
+.layer-groups .many { grid-column: span 2; }
+.layer-groups .many .rows { columns: 2 200px; column-gap: 14px; }
+@media (max-width: 600px) { .layer-groups .many { grid-column: auto; } }
+.layer-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0 6px; padding: 1px 0; min-width: 0;
+             break-inside: avoid; }
+.layer-row label { display: inline-flex; align-items: center; gap: 4px; min-width: 0; flex: 1 1 auto; }
+.layer-row .name { min-width: 0; overflow-wrap: break-word; }
+.layer-row .btn-link { font-size: var(--fs-xs); }
+.layer-row .load { flex-basis: 100%; padding-left: 36px; }
+.toolbar .zoom { font-size: var(--fs-xs); color: var(--c-text3); min-width: 3.5em; text-align: center;
+                 font-variant-numeric: tabular-nums; }
+.find { min-width: 140px; flex: 1 1 160px; max-width: 260px; }
+.section-gap { margin-top: 12px; }
+.status { font-size: var(--fs-xs); color: var(--c-text3); }
+.small-list { margin: 4px 0; padding-left: 18px; }
+.small-list li { overflow-wrap: anywhere; }
+.pane .btn-row .btn { white-space: normal; text-align: left; max-width: 100%; overflow-wrap: anywhere; }
+.pane dl.facts { grid-template-columns: fit-content(45%) minmax(0, 1fr); }
+.content > .tbl-block .tbl-wrap { max-height: var(--pane-height); }
+details.layers-box { margin: 0 0 8px; }
+details.more-tools > summary { list-style: none; }
+details.more-tools > summary::-webkit-details-marker { display: none; }
+details.more-tools[open] { flex-basis: 100%; }
+details.more-tools > .toolbar { margin: 6px 0 0; }
+details.layers-box > summary { cursor: pointer; color: var(--c-text2); font-size: var(--fs-sm); margin: 0 0 6px; }
+/* A short host: one line for the file and the arguments, the legend in the readout's line. */
+main.short .asked { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 4px; }
+main.short .head { margin-bottom: 2px; }
+main.short details.layers-box > summary { margin-bottom: 4px; }
+details.legend-box[open] { flex-basis: 100%; }
+/* The details in the board's place (a short, narrow host): the board's tools hide. */
+main.solo-details > .board-tools, main.solo-details > .layers-box, main.solo-details > .tabs { display: none; }
+@media (max-width: 600px) {
+  .readout .coords { min-width: 0; }
+}
+</style>
+</head>
+<body>
+<main id="app"></main>
+<script type="application/json" id="data-contract">
+{
+  "tool": "get_board_view",
+  "geometry_tool": "get_board_view_geometry",
+  "format": 1,
+  "page_chars": 55000,
+  "auto_pages": 16,
+  "session_pages": 128,
+  "text_only": ["note"],
+  "shapes": {
+    "result": {
+      "required": ["pcb_doc", "units", "frame", "origin_*", "board_extents_*", "copper_layers", "variant",
+                   "asked", "highlight", "view", "note"],
+      "optional": ["notes"]
+    },
+    "highlight": {
+      "required": ["nets", "nets_total", "parts", "parts_total", "pads", "pads_total", "marks", "marks_total",
+                   "measures", "measures_total", "findings", "findings_total", "not_found", "not_found_total"],
+      "optional": []
+    },
+    "highlight.nets[]": {
+      "required": ["net", "from", "layers", "pads", "vias", "tracks", "arcs", "areas", "pours", "parts_total",
+                   "parts", "where"],
+      "optional": ["extents_*"]
+    },
+    "highlight.parts[]": {
+      "required": ["designator", "from", "side", "rotation", "pads", "dnp", "where"],
+      "optional": ["sch_refdes", "at_*", "from_origin_*", "extents_*"]
+    },
+    "highlight.pads[]": {"required": ["pad", "from", "net", "layer", "at_*", "where"], "optional": []},
+    "highlight.marks[]": {
+      "required": ["label", "from", "at_*", "from_origin_*", "on_board", "near", "where"],
+      "optional": ["layer", "frame_hint"]
+    },
+    "highlight.measures[]": {
+      "required": ["from_pad", "to_pad", "distance_*", "from_at_*", "to_at_*", "basis", "from"],
+      "optional": ["net"]
+    },
+    "highlight.findings[]": {"required": ["finding", "tool", "frame", "read", "ignored", "marks"], "optional": []},
+    "highlight.not_found[]": {"required": ["kind", "asked", "why"], "optional": ["suggestions", "from"]},
+    "view": {
+      "required": ["side", "layers_on", "window_*", "geometry_rev", "poured_copper", "not_drawn"],
+      "optional": []
+    }
+  },
+  "pages": {
+    "first": {
+      "required": ["geometry", "rev", "page", "pages", "auto_pages", "has_more", "next_offset", "q", "base_mil",
+                   "origin_mil", "layers", "plan", "counts", "variant", "dnp", "notes", "paging",
+                   "embedded_boards", "chunks"],
+      "optional": []
+    },
+    "later": {"required": ["geometry", "rev", "page", "pages", "has_more", "next_offset", "chunks"], "optional": []},
+    "layers[]": {"required": ["id", "name", "kind", "order"], "optional": []},
+    "plan[]": {"required": ["page", "auto", "chars", "chunks"], "optional": []},
+    "chunks[]": {"required": ["k", "l", "rows"], "optional": ["first", "s"]}
+  },
+  "kinds": {"board": "arrays", "nets": "strings", "stacks": 8, "viatypes": 4, "sch": 2, "parts": 9, "pads": 6,
+            "vias": 4, "tracks": "arrays", "arcs": 7, "areas": "arrays", "pours": "arrays", "silk": "arrays",
+            "silkarcs": 6, "poured_areas": "arrays", "poured_tracks": "arrays", "poured_arcs": 7},
+  "pad_shapes": {"1": "round", "2": "rectangle", "3": "octagonal", "9": "rounded rectangle"},
+  "hole_shapes": {"0": "round", "1": "square", "2": "slot"}
+}
+</script>
+<script>/*@shell.js*/</script>
+<script>
+(() => {
+  "use strict";
+  const { el, clear } = Shell;
+  const CONTRACT = JSON.parse(document.getElementById("data-contract").textContent);
+  const app = document.getElementById("app");
+
+  // The only tools this page calls, all read-only: it never calls a tool that changes
+  // the server's state.
+  const READ_ONLY_TOOLS = new Set(["get_board_view", "get_board_view_geometry", "get_component_placement",
+                                   "get_component", "get_net_pcb", "query_pcb_region"]);
+  const GEOMETRY_TOOL = CONTRACT.geometry_tool;
+  const AUTO_PAGES = CONTRACT.auto_pages;
+  const SESSION_PAGES = CONTRACT.session_pages;
+  const MM = 0.0254;  // mm per mil
+  const TOP = 1, BOTTOM = 32, TOP_OVERLAY = 33, BOTTOM_OVERLAY = 34, MULTI = 74;
+  const COLORS = {
+    background: "#0d1117", board: "#141a22", outline: "#c8c8c8", top: "#e04040", bottom: "#4f7dff",
+    multi: "#c0c0c0", hole: "#1a1a1a", topOverlay: "#f2d64b", bottomOverlay: "#9a9a3a",
+    inner: ["#e0a040", "#40c080", "#c060e0", "#40c0d0", "#d0d040", "#e070a0", "#80a0ff", "#a0e060"],
+    halo: ["#ffffff", "#3fd0ff", "#ff5fd2", "#8be04f", "#ffa040", "#b28cff"],
+    mark: "#ffb000", measure: "#3fd0ff", part: "#8b949e", text: "#c9d1d9",
+  };
+  // Other layer-like toggles beside the copper and overlay layers.
+  const OTHER = [
+    { id: "multi", label: "Multi-Layer pads" }, { id: "vias", label: "Vias" },
+    { id: "pours", label: "Pour outlines" }, { id: "poured", label: "Poured copper" },
+    { id: "boxes", label: "Part boxes" }, { id: "names", label: "Designators" },
+  ];
+  const SHAPE_NAME = CONTRACT.pad_shapes;
+  const HALO_PADS = 300;  // a net's pads (or vias) on one layer that still get a halo each
+  const HOLE_NAME = CONTRACT.hole_shapes;
+  const STATE_TEXT = { loading: "Reading the board", stopped: "Board partly read" };
+  const KEY_HELP = "Keys on the board: arrows pan (Shift for larger steps), + and − zoom, 0 fits the board, H fits the highlight, F flips, L opens the layers, N and P step through the highlighted objects, Enter opens details, Escape clears the selection.";
+
+  const view = {
+    args: {}, argsKnown: false, data: null, units: "mil", errorPayload: null, busy: false, closed: false,
+    warning: "", side: "top", on: new Map(), other: new Set(["multi", "vias", "pours", "poured", "boxes", "names"]),
+    scale: 0, cx: 0, cy: 0, fitScale: 1, dim: true, tab: "board", selected: null, cycle: [], cycleAt: null,
+    local: { nets: new Set(), parts: new Set() }, cleared: false, stepAt: -1, asked: [], readoutUnits: null,
+    stopReason: "", changed: false, reading: false, layersUser: null, layersSet: false, wheelHint: false, solo: false,
+    readQueue: [], loadedPages: new Set(), pulse: 0,
+  };
+  const ui = {};
+  const details = Shell.toolCache((tool, args, entry) => {
+    renderPane();
+    if (entry && !entry.loading) Shell.announce(`${tool} ${entry.error ? "failed" : "answered"}`);
+  });
+  let geo = null;
+  let generation = 0;  // a new tool-result starts again; stale work checks this
+
+  // ---------- helpers ----------
+
+  const canCall = () => Shell.canCallTools();
+  const plural = Shell.plural;
+  const round = (value, digits = 4) => (typeof value === "number" ? +value.toFixed(digits) : value);
+  const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
+  const unitsOf = (data) => (data && data.units === "mm" ? "mm" : "mil");
+  const toMil = (value, units) => (units === "mm" ? value / MM : value);
+  const fromMil = (value, units) => (units === "mm" ? value * MM : value);
+
+  /** The value of a key whose name ends in _mil or _mm (stem given as "at"). */
+  function unitKey(row, stem) {
+    if (!row || typeof row !== "object") return undefined;
+    if (row[`${stem}_mil`] !== undefined) return row[`${stem}_mil`];
+    return row[`${stem}_mm`];
+  }
+
+  /** A point {x, y} in mil from {x_mil, y_mil} or {x_mm, y_mm}. */
+  function point(value) {
+    if (!value || typeof value !== "object") return null;
+    if (typeof value.x_mil === "number" && typeof value.y_mil === "number") return { x: value.x_mil, y: value.y_mil };
+    if (typeof value.x_mm === "number" && typeof value.y_mm === "number") return { x: value.x_mm / MM, y: value.y_mm / MM };
+    return null;
+  }
+
+  /** A box {minx, miny, maxx, maxy} in mil from *_mil or *_mm keys. */
+  function box(value) {
+    if (!value || typeof value !== "object") return null;
+    const pick = (name) => (typeof value[`${name}_mil`] === "number" ? value[`${name}_mil`]
+      : typeof value[`${name}_mm`] === "number" ? value[`${name}_mm`] / MM : null);
+    const out = { minx: pick("minx"), miny: pick("miny"), maxx: pick("maxx"), maxy: pick("maxy") };
+    return Object.values(out).every((item) => typeof item === "number") ? out : null;
+  }
+
+  /** A length in mil as text in units (the result's, or the readout's). */
+  function lengthText(mil, units = view.units) {
+    return units === "mm" ? `${round(mil * MM, 3)} mm` : `${round(mil, 1)} mil`;
+  }
+
+  function pointText(x, y, units = view.units) {
+    const digits = units === "mm" ? 3 : 1;
+    return `${round(fromMil(x, units), digits)}, ${round(fromMil(y, units), digits)} ${units}`;
+  }
+
+  function fromOriginText(x, y, units = view.units) {
+    const origin = geo ? geo.origin : view.origin || { x: 0, y: 0 };
+    return pointText(x - origin.x, y - origin.y, units);
+  }
+
+  const naturally = Shell.naturally;
+
+  // ---------- data contract ----------
+
+  function rowsAt(data, path) {
+    if (path === "result") return [data];
+    let rows = [data];
+    for (const part of path.split(".")) {
+      const key = part.replace(/\[\]$/, "");
+      rows = rows.flatMap((row) => {
+        const value = row && typeof row === "object" ? row[key] : undefined;
+        if (part.endsWith("[]")) return Array.isArray(value) ? value : [];
+        return value === undefined || value === null ? [] : [value];
+      });
+    }
+    return rows;
+  }
+
+  /** A contract key: "at_*" stands for at_mil or at_mm (the result's units). */
+  function hasKey(row, key) {
+    if (!row || typeof row !== "object") return false;
+    if (key.endsWith("_*")) {
+      const stem = key.slice(0, -2);
+      return `${stem}_mil` in row || `${stem}_mm` in row;
+    }
+    return key in row;
+  }
+
+  /** The first key the contract needs that the data lacks, or "". */
+  function missingKey(shapes, data, base = "result") {
+    for (const [path, shape] of Object.entries(shapes)) {
+      const rows = path === base ? [data] : rowsAt(data, path.replace(/^(first|later)$/, "result"));
+      for (const key of shape.required) {
+        if (rows.some((row) => !hasKey(row, key))) return `${path}: ${key}`;
+      }
+    }
+    return "";
+  }
+
+  function pageProblem(page, first) {
+    const shapes = first ? { first: CONTRACT.pages.first, "layers[]": CONTRACT.pages["layers[]"],
+                             "plan[]": CONTRACT.pages["plan[]"], "chunks[]": CONTRACT.pages["chunks[]"] }
+      : { later: CONTRACT.pages.later, "chunks[]": CONTRACT.pages["chunks[]"] };
+    for (const [path, shape] of Object.entries(shapes)) {
+      const rows = path === "first" || path === "later" ? [page] : rowsAt(page, path);
+      for (const key of shape.required) if (rows.some((row) => !hasKey(row, key))) return `${path}: ${key}`;
+    }
+    for (const chunk of page.chunks || []) {
+      if (!(chunk.k in CONTRACT.kinds)) return `chunk kind ${chunk.k}`;
+      const stride = CONTRACT.kinds[chunk.k];
+      if (typeof stride === "number" ? chunk.s !== stride : chunk.s !== undefined) return `the stride of ${chunk.k}`;
+    }
+    return "";
+  }
+
+  // ---------- tool calls ----------
+
+  // Teardown rejects every call still waiting: the closed view waits for no answer.
+  let closeCalls = () => {};
+  const whenClosed = new Promise((resolve, reject) => {
+    closeCalls = () => reject(new Error("the view was closed"));
+  });
+  whenClosed.catch(() => {});
+
+  /** Call one of the page's read-only tools (through the shell, which checks serverTools). */
+  function call(tool, args) {
+    if (!READ_ONLY_TOOLS.has(tool)) return Promise.reject(new Error(`The view does not call ${tool}.`));
+    if (view.closed) return Promise.reject(new Error("the view was closed"));
+    if (!canCall()) return Promise.reject(new Error(`this host does not let the view call ${tool}`));
+    return Promise.race([Shell.callTool(tool, args), whenClosed]);
+  }
+
+  /** A details call, asked once (the shell's cache never keeps a failure). */
+  function ask(tool, args, label) {
+    if (!READ_ONLY_TOOLS.has(tool)) return;
+    if (!canCall() || view.closed) return;
+    const key = JSON.stringify([tool, args]);
+    view.asked = [[tool, args, label], ...view.asked.filter(([other, otherArgs]) => JSON.stringify([other, otherArgs]) !== key)];
+    renderPane();
+    details.load(tool, args);
+  }
+
+  function argsText(args) {
+    return Object.entries(args).map(([key, value]) => `${key} ${typeof value === "number" ? round(value, 3) : value}`).join(", ");
+  }
+
+  // ---------- states ----------
+
+  function showState(kind, title, detail) {
+    clear(app).appendChild(Shell.state(kind, title, detail));
+  }
+
+  const ERROR_TITLES = {
+    no_project: "No project is loaded",
+    netlist_required: "The project's netlist is not loaded",
+    no_pcb_document: "The project has no PCB document",
+    pcb_file_missing: "The PCB document is not on disk",
+    pcb_parse_failed: "The PCB document could not be read",
+    invalid_units: "get_board_view did not accept units",
+    invalid_coordinate: "get_board_view did not accept x and y",
+    invalid_radius: "get_board_view did not accept radius",
+    invalid_findings: "get_board_view did not accept findings",
+  };
+
+  function showError(payload) {
+    dropAnswer();
+    view.errorPayload = payload;
+    clear(app).appendChild(Shell.state("error", ERROR_TITLES[payload.error] || "get_board_view answered with an error",
+                                       payload.message || payload.error));
+  }
+
+  /** A result the view cannot draw replaces the answer shown: the previous answer, its
+   *  geometry and any reading of it are dropped (a later host change does not draw them
+   *  over the error, and no request for them follows). */
+  function dropAnswer() {
+    generation += 1;
+    view.data = null;
+    view.errorPayload = null;
+    view.reading = false;
+    geo = null;
+  }
+
+  // ---------- the result (the locator text) ----------
+
+  function onResult(result) {
+    let data;
+    try {
+      data = Shell.resultJson(result);
+    } catch (error) {
+      dropAnswer();
+      showState("error", "The board view could not read the result", error.message);
+      return;
+    }
+    loadResult(data);
+  }
+
+  function loadResult(data) {
+    generation += 1;
+    view.errorPayload = null;
+    if (!data || typeof data !== "object") {
+      dropAnswer();
+      showState("error", "The board view could not read the result", "It is not a JSON object.");
+      return;
+    }
+    if (data.error) {
+      showError(data);
+      return;
+    }
+    const missing = missingKey(CONTRACT.shapes, data);
+    if (missing) {
+      dropAnswer();
+      showState("error", `This view does not understand the result: ${missing}`,
+                "get_board_view answered in a shape this view does not read; its text answer is still in the conversation.");
+      return;
+    }
+    const previous = view.data;
+    view.data = data;
+    view.units = unitsOf(data);
+    view.readoutUnits = view.readoutUnits || view.units;
+    view.origin = point(unitKey(data, "origin")) || { x: 0, y: 0 };
+    view.side = data.view.side === "bottom" ? "bottom" : "top";
+    view.selected = null;
+    view.asked = [];
+    view.local = { nets: new Set(), parts: new Set() };
+    view.cleared = false;
+    view.stopReason = "";
+    view.changed = false;
+    view.stepAt = -1;
+    view.loadedPages = new Set();
+    view.readQueue = [];
+    view.messages = new Map([...(view.messages || new Map())].filter(([key]) => key === "reload" || key === "display"));
+    view.padMemo = new Map();
+    resetCycle();
+    view.warning = previous && previous.pcb_doc !== data.pcb_doc ? `The new answer is for another board: ${data.pcb_doc} (was ${previous.pcb_doc}).` : "";
+    geo = null;
+    view.scale = 0;
+    view.pulse = Date.now();
+    view.userMoved = false;
+    buildTargets();
+    renderAll();
+    fitWindow();
+    if (canCall() && !view.closed) loadGeometry(generation);
+  }
+
+  // ---------- what the text highlights ----------
+
+  /** The text's highlights as targets: nets, parts, pads, marks and measures, in mil. */
+  function buildTargets() {
+    const h = view.data.highlight;
+    const targets = [];
+    h.nets.forEach((row, index) => targets.push({ kind: "net", name: row.net, row, box: box(unitKey(row, "extents")), color: COLORS.halo[index] || COLORS.halo[0], order: index }));
+    for (const row of h.parts) targets.push({ kind: "part", name: row.designator, row, box: box(unitKey(row, "extents")), at: point(unitKey(row, "at")) });
+    for (const row of h.pads) targets.push({ kind: "pad", name: row.pad, row, at: point(unitKey(row, "at")) });
+    for (const row of h.marks) targets.push({ kind: "mark", name: row.label, row, at: point(unitKey(row, "at")) });
+    h.measures.forEach((row, index) => targets.push({ kind: "measure", name: `${row.from_pad} to ${row.to_pad}`, row, index,
+      from: point(unitKey(row, "from_at")), to: point(unitKey(row, "to_at")), distance: toMil(unitKey(row, "distance") || 0, view.units) }));
+    view.targets = targets;
+    const on = new Set(view.data.view.layers_on || []);
+    view.layersOnNames = on;
+  }
+
+  function netColor(netId) {
+    if (!geo) return COLORS.halo[0];
+    const name = geo.nets[netId];
+    const target = view.targets.find((item) => item.kind === "net" && item.name === name);
+    return target ? target.color : COLORS.halo[0];
+  }
+
+  const HALO_NAMES = ["white", "cyan", "magenta", "lime", "orange", "violet"];
+
+  /** A halo colour's name (the Objects table and the legend say which net has which). */
+  function haloName(color) {
+    const index = COLORS.halo.indexOf(color);
+    return index >= 0 ? HALO_NAMES[index] : "white";
+  }
+
+  /** Net ids, part indices and pad references highlighted (the text's and the view's own). */
+  function highlightSets() {
+    const nets = new Set();
+    const parts = new Set();
+    const pads = [];
+    if (!geo) return { nets, parts, pads };
+    if (!view.cleared) {
+      for (const target of view.targets) {
+        if (target.kind === "net") {
+          const id = geo.netIndex.get(target.name);
+          if (id !== undefined) nets.add(id);
+        } else if (target.kind === "part") {
+          for (const index of partsOf(target)) parts.add(index);
+        } else if (target.kind === "pad") {
+          const found = findPad(target.name, target.at);
+          if (found) pads.push(found);
+        }
+      }
+    }
+    for (const id of view.local.nets) nets.add(id);
+    for (const index of view.local.parts) parts.add(index);
+    return { nets, parts, pads };
+  }
+
+  /** The geometry's parts a text part names: by its PCB designator, then the instance
+   *  its schematic designator (a channel's) or its position names, as the text found it. */
+  function partsOf(target) {
+    if (!geo) return [];
+    const memo = target.memo || (target.memo = {});
+    if (memo.parts && memo.version === geo.version) return memo.parts;
+    const row = target.row || {};
+    const all = (geo.partsByPcb.get(String(target.name).toLowerCase()) || []).filter((index) => geo.parts[index]);
+    let list = all;
+    if (row.sch_refdes) {
+      const sch = String(row.sch_refdes).toLowerCase();
+      list = all.filter((index) => String(geo.sch[String(index)] || geo.parts[index].name).toLowerCase() === sch);
+    }
+    if ((!row.sch_refdes || !list.length) && all.length > 1 && target.at) {
+      list = all.filter((index) => Math.hypot(geo.parts[index].x - target.at.x, geo.parts[index].y - target.at.y) <= 1);
+    }
+    if (!list.length) list = all;
+    memo.parts = list;
+    memo.version = geo.version;
+    return list;
+  }
+
+  /** The parts a typed name names: PCB designators first, else schematic ones. */
+  function partsNamed(name) {
+    if (!geo) return [];
+    const key = String(name).toLowerCase();
+    return geo.partsByPcb.get(key) || geo.partsBySch.get(key) || [];
+  }
+
+  /** A pad "U3-4" in the geometry: by its part's designator and pin (a designator or a
+   *  pin may hold "-" or "." itself, so each split is tried), the nearest to at. */
+  function findPad(name, at) {
+    if (!geo) return null;
+    const text = String(name);
+    const memoKey = `${text}|${at ? `${at.x},${at.y}` : ""}|${geo.version}`;
+    const memo = view.padMemo || (view.padMemo = new Map());
+    if (memo.has(memoKey)) return memo.get(memoKey);
+    let best = null;
+    for (let cut = text.length - 1; cut > 0 && !best; cut -= 1) {
+      if (text[cut] !== "-" && text[cut] !== ".") continue;
+      const owners = new Set(partsNamed(text.slice(0, cut)));
+      const pin = text.slice(cut + 1).toLowerCase();
+      if (!owners.size || !pin) continue;
+      for (const [layer, list] of geo.pads) {
+        for (const pad of list) {
+          if (!owners.has(pad.part) || String(pad.pin).toLowerCase() !== pin) continue;
+          const distance = at ? Math.hypot(pad.x - at.x, pad.y - at.y) : 0;
+          if (!best || distance < best.distance) best = { layer, pad, distance };
+        }
+      }
+    }
+    if (memo.size > 500) memo.clear();
+    memo.set(memoKey, best);
+    return best;
+  }
+
+  // ---------- geometry: reading the pages ----------
+
+  function emptyGeo(first) {
+    const q = first.q || 10;
+    const [bx, by] = first.base_mil;
+    unitShapes.clear();  // pad stack shapes belong to one geometry
+    const g = {
+      rev: first.rev, q, bx, by, origin: { x: first.origin_mil[0], y: first.origin_mil[1] },
+      pages: first.pages, autoPages: first.auto_pages, plan: first.plan, counts: first.counts || {}, sch: {},
+      dnp: new Set(first.dnp || []), notes: first.notes || [], paging: first.paging || "", variant: first.variant,
+      embedded: first.embedded_boards, layers: first.layers, layerById: new Map(first.layers.map((layer) => [layer.id, layer])),
+      nets: [], netIndex: new Map(), stacks: [], viatypes: [], parts: [], partsByPcb: new Map(), partsBySch: new Map(),
+      pads: new Map(), vias: [], tracks: new Map(), arcs: new Map(), areas: new Map(), pours: new Map(),
+      silk: new Map(), silkarcs: new Map(), poured: new Map(), byNet: new Map(), layerVersion: new Map(),
+      outline: null, cutouts: [], rings: new Map(),
+      // Decoded objects not in the drawing batches yet ([kind, layer, object]); the
+      // batches only grow, so a page read while drawing costs its own objects only.
+      batches: null, pending: [], viasDirty: true, viaPaths: null,
+      grid: null, version: 0, highlightCache: new Map(), partCache: null,
+    };
+    g.decodeRing = (values) => {
+      const pts = new Float64Array(values.length);
+      let x = values[0];
+      let y = values[1];
+      pts[0] = bx + x / q;
+      pts[1] = by + y / q;
+      for (let i = 2; i < values.length; i += 2) {
+        x += values[i];
+        y += values[i + 1];
+        pts[i] = bx + x / q;
+        pts[i + 1] = by + y / q;
+      }
+      return pts;
+    };
+    return g;
+  }
+
+  const listOf = (map, key) => {
+    if (!map.has(key)) map.set(key, []);
+    return map.get(key);
+  };
+
+  /** Twice a ring's signed area (counter-clockwise positive, +Y up). */
+  function signedArea(pts) {
+    let sum = 0;
+    for (let i = 0, j = pts.length - 2; i < pts.length; j = i, i += 2) sum += pts[j] * pts[i + 1] - pts[i] * pts[j + 1];
+    return sum;
+  }
+
+  /** A ring wound counter-clockwise (ccw true) or clockwise: outlines one way, holes the
+   *  other, so one nonzero fill per layer fills overlapping shapes and leaves holes open. */
+  function wound(pts, ccw) {
+    if ((signedArea(pts) >= 0) === ccw) return pts;
+    const out = new Float64Array(pts.length);
+    for (let i = 0, j = pts.length - 2; i < pts.length; i += 2, j -= 2) {
+      out[i] = pts[j];
+      out[i + 1] = pts[j + 1];
+    }
+    return out;
+  }
+
+  /** A ring row in pieces ([...head, piece, pieces, x0, y0, ...]): the ring once every
+   *  piece of it has arrived, else null. key names the ring across pages. */
+  function ringOf(g, key, piece, pieces, values) {
+    if (pieces <= 1) return g.decodeRing(values);
+    let slot = g.rings.get(key);
+    if (!slot) g.rings.set(key, slot = []);
+    slot[piece] = g.decodeRing(values);
+    if (slot.filter(Boolean).length < pieces) return null;
+    g.rings.delete(key);
+    return joinPieces(slot);
+  }
+
+  /** The objects of a net on a layer (for the highlight), filled as pages arrive. */
+  function byNetOf(g, layer, net) {
+    let layerMap = g.byNet.get(layer);
+    if (!layerMap) g.byNet.set(layer, layerMap = new Map());
+    let entry = layerMap.get(net);
+    if (!entry) layerMap.set(net, entry = { tracks: [], arcs: [], areas: [], pads: [], pours: [], pouredAreas: [], pouredTracks: [], pouredArcs: [] });
+    return entry;
+  }
+
+  function addPartName(g, map, name, index) {
+    if (!name) return;
+    const key = String(name).toLowerCase();
+    if (!map.has(key)) map.set(key, []);
+    if (!map.get(key).includes(index)) map.get(key).push(index);
+  }
+
+  /** Decode one page's chunks into geo (coordinates to mil). */
+  function decodePage(page) {
+    const started = performance.now();
+    const g = geo;
+    const { q, bx, by } = g;
+    const X = (value) => bx + value / q;
+    const Y = (value) => by + value / q;
+    const fresh = (kind, layer, object) => g.pending.push([kind, layer, object]);
+    const bump = (layer) => g.layerVersion.set(layer, (g.layerVersion.get(layer) || 0) + 1);
+    for (const chunk of page.chunks) {
+      const rows = chunk.rows;
+      const layer = chunk.l;
+      const first = chunk.first || 0;
+      switch (chunk.k) {
+        case "board":
+          for (const row of rows) {
+            const [role, id, piece, pieces] = row;
+            const pts = ringOf(g, `board|${role}|${id}`, piece, pieces, row.slice(4));
+            if (!pts || pts.length < 6) continue;
+            if (role === 0) g.outline = wound(pts, true);
+            else g.cutouts.push(wound(pts, true));
+          }
+          break;
+        case "nets":
+          rows.forEach((name, i) => {
+            g.nets[first + i] = name;
+            if (!g.netIndex.has(name)) g.netIndex.set(name, first + i);
+          });
+          break;
+        case "stacks":
+          for (let i = 0, n = first; i < rows.length; i += 8, n += 1) {
+            g.stacks[n] = { shape: rows[i], w: rows[i + 1] / q, h: rows[i + 2] / q, rot: rows[i + 3] / 100,
+                            corner: rows[i + 4] / q, hole: rows[i + 5] / q, holeShape: rows[i + 6], slot: rows[i + 7] / q };
+          }
+          break;
+        case "viatypes":
+          for (let i = 0, n = first; i < rows.length; i += 4, n += 1) {
+            g.viatypes[n] = { d: rows[i] / q, hole: rows[i + 1] / q, from: rows[i + 2], to: rows[i + 3] };
+          }
+          break;
+        case "sch":
+          for (let i = 0; i < rows.length; i += 2) {
+            g.sch[String(rows[i])] = rows[i + 1];
+            addPartName(g, g.partsBySch, rows[i + 1], rows[i]);
+          }
+          break;
+        case "parts":
+          for (let i = 0, n = first; i < rows.length; i += 9, n += 1) {
+            const part = { index: n, name: rows[i], x: X(rows[i + 1]), y: Y(rows[i + 2]), rot: rows[i + 3] / 100,
+                           side: rows[i + 4], minx: X(rows[i + 5]), miny: Y(rows[i + 6]), maxx: X(rows[i + 7]), maxy: Y(rows[i + 8]) };
+            g.parts[n] = part;
+            addPartName(g, g.partsByPcb, part.name, n);
+          }
+          break;
+        case "pads": {
+          const list = listOf(g.pads, layer);
+          for (let i = 0; i < rows.length; i += 6) {
+            const pad = { x: X(rows[i]), y: Y(rows[i + 1]), stack: rows[i + 2], net: rows[i + 3], part: rows[i + 4], pin: rows[i + 5] };
+            list.push(pad);
+            fresh("pad", layer, pad);
+            if (pad.net >= 0) byNetOf(g, layer, pad.net).pads.push(pad);
+          }
+          bump(layer);
+          break;
+        }
+        case "vias":
+          for (let i = 0; i < rows.length; i += 4) g.vias.push({ x: X(rows[i]), y: Y(rows[i + 1]), type: rows[i + 2], net: rows[i + 3] });
+          g.viasDirty = true;
+          bump("vias");
+          break;
+        case "tracks":
+        case "poured_tracks": {
+          const poured = chunk.k === "poured_tracks";
+          const list = poured ? pouredOf(layer).tracks : listOf(g.tracks, layer);
+          for (const row of rows) {
+            const track = { w: row[0] / q, net: row[1], pts: g.decodeRing(row.slice(2)) };
+            list.push(track);
+            fresh(poured ? "poured_track" : "track", layer, track);
+            if (track.net >= 0) byNetOf(g, layer, track.net)[poured ? "pouredTracks" : "tracks"].push(track);
+          }
+          bump(layer);
+          break;
+        }
+        case "silk": {
+          const list = listOf(g.silk, layer);
+          for (const row of rows) {
+            const line = { w: row[0] / q, pts: g.decodeRing(row.slice(1)) };
+            list.push(line);
+            fresh("silk", layer, line);
+          }
+          break;
+        }
+        case "arcs":
+        case "poured_arcs":
+        case "silkarcs": {
+          const stride = chunk.k === "silkarcs" ? 6 : 7;
+          const list = chunk.k === "arcs" ? listOf(g.arcs, layer) : chunk.k === "silkarcs" ? listOf(g.silkarcs, layer) : pouredOf(layer).arcs;
+          const kind = chunk.k === "arcs" ? "arc" : chunk.k === "silkarcs" ? "silkarc" : "poured_arc";
+          for (let i = 0; i < rows.length; i += stride) {
+            const arc = { cx: X(rows[i]), cy: Y(rows[i + 1]), r: rows[i + 2] / q, a0: rows[i + 3] / 1000, sweep: rows[i + 4] / 1000,
+                          w: rows[i + 5] / q, net: stride === 7 ? rows[i + 6] : -1 };
+            list.push(arc);
+            fresh(kind, layer, arc);
+            if (arc.net >= 0 && kind !== "silkarc") byNetOf(g, layer, arc.net)[kind === "arc" ? "arcs" : "pouredArcs"].push(arc);
+          }
+          bump(layer);
+          break;
+        }
+        case "areas":
+        case "poured_areas": {
+          const poured = chunk.k === "poured_areas";
+          const store = poured ? pouredOf(layer).areas : listOf(g.areas, layer);
+          const byId = store.byId || (store.byId = new Map());
+          for (const row of rows) {
+            const [id, net, part, rings, ring, piece, pieces] = row;
+            let area = byId.get(id);
+            if (!area) {
+              area = { id, net, part, rings: Array.from({ length: rings }, () => null), done: false };
+              byId.set(id, area);
+            }
+            const pts = ringOf(g, `${chunk.k}|${layer}|${id}|${ring}`, piece, pieces, row.slice(7));
+            if (pts) area.rings[ring] = wound(pts, ring === 0);  // the outline one way, holes the other
+            if (!area.done && area.rings.every(Boolean)) {
+              area.done = true;
+              store.push(area);
+              fresh(poured ? "poured_area" : "area", layer, area);
+              if (area.net >= 0) byNetOf(g, layer, area.net)[poured ? "pouredAreas" : "areas"].push(area);
+            }
+          }
+          bump(layer);
+          break;
+        }
+        case "pours": {
+          const list = listOf(g.pours, layer);
+          for (const row of rows) {
+            const [id, net, style, piece, pieces] = row;
+            const pts = ringOf(g, `pours|${layer}|${id}`, piece, pieces, row.slice(5));
+            if (!pts) continue;
+            const pour = { pour: id, net, style, pts: wound(pts, true) };
+            list.push(pour);
+            fresh("pour", layer, pour);
+            if (net >= 0) byNetOf(g, layer, net).pours.push(pour);
+          }
+          bump(layer);
+          break;
+        }
+        default:
+          break;
+      }
+    }
+    g.grid = null;
+    g.version += 1;
+    view.decodeMs = (view.decodeMs || 0) + performance.now() - started;
+  }
+
+  function pouredOf(layer) {
+    if (!geo.poured.has(layer)) geo.poured.set(layer, { areas: [], tracks: [], arcs: [] });
+    return geo.poured.get(layer);
+  }
+
+  /** A ring's pieces joined: each later piece starts at the previous piece's last point. */
+  function joinPieces(pieces) {
+    if (pieces.length === 1) return pieces[0];
+    const total = pieces.reduce((sum, piece, index) => sum + piece.length - (index ? 2 : 0), 0);
+    const out = new Float64Array(total);
+    let at = 0;
+    pieces.forEach((piece, index) => {
+      const part = index ? piece.subarray(2) : piece;
+      out.set(part, at);
+      at += part.length;
+    });
+    return out;
+  }
+
+  async function geometryPage(offset, rev) {
+    const page = Shell.resultJson(await call(GEOMETRY_TOOL, { rev, offset }));
+    if (page && page.error === "board_changed") {
+      view.changed = true;
+      throw new Error("the board changed since this answer (saved again, or another board loaded)");
+    }
+    if (page && page.error) throw new Error(page.message || page.error);
+    const problem = pageProblem(page, offset === 0);
+    if (problem) throw new Error(`this view does not understand the page: ${problem}`);
+    if (page.geometry !== CONTRACT.format) throw new Error(`the page is in format ${page.geometry}, this view reads ${CONTRACT.format}`);
+    if (page.page !== offset) throw new Error(`page ${offset} came back as page ${page.page}`);
+    if (page.has_more !== (page.page < page.pages - 1) || (page.has_more && page.next_offset !== page.page + 1)) {
+      throw new Error(`page ${offset} does not agree with the page count (${page.pages})`);
+    }
+    return page;
+  }
+
+  /** The auto pages after the first, those on hidden copper layers last. */
+  function autoQueue() {
+    const hidden = (entry) => entry.chunks.length > 0 && entry.chunks.every(([, layer]) => layer !== null && isCopperId(layer) && !layerVisible(layer));
+    const pages = geo.plan.filter((entry) => entry.page > 0 && entry.auto && !view.loadedPages.has(entry.page));
+    return [...pages.filter((entry) => !hidden(entry)), ...pages.filter(hidden)].map((entry) => entry.page);
+  }
+
+  async function loadGeometry(run) {
+    const rev = view.data.view.geometry_rev;
+    view.reading = true;
+    view.sessionBudget = Shell.pageBudget(SESSION_PAGES, 1);
+    Shell.announce("Reading the board's geometry");
+    setProgress("Reading the board: page 1");
+    let first;
+    try {
+      first = await geometryPage(0, rev);
+    } catch (error) {
+      if (run !== generation) return;
+      view.reading = false;
+      stopped(`page 1 of ${GEOMETRY_TOOL} could not be read: ${error.message}`, [0]);
+      return;
+    }
+    if (run !== generation) return;
+    geo = emptyGeo(first);
+    decodePage(first);
+    view.loadedPages.add(0);
+    applyDefaultLayers();
+    renderAll();
+    if (!view.userMoved) fitWindow();
+    await readQueue(run, autoQueue(), Shell.pageBudget(AUTO_PAGES, 1), "auto");
+  }
+
+  /** Read pages through readPages, from a queue (plan order), within a budget. */
+  async function readQueue(run, queue, budget, why) {
+    if (!geo || run !== generation) return;
+    view.reading = true;
+    view.readQueue = [...queue];
+    const total = view.readQueue.length;
+    let done = 0;
+    let lastDraw = 0;
+    const next = () => (view.readQueue.length ? view.readQueue[0] : null);
+    const rev = geo.rev;
+    let failed = null;  // the page that could not be read, named by its own number
+    const read = await Shell.readPages({
+      first: null, tool: GEOMETRY_TOOL, budget, closed: () => view.closed || run !== generation,
+      pageOffset: next,
+      progress: () => setProgress(why === "auto" ? `Reading the board: page ${done + 2} of ${Math.min(geo.autoPages, AUTO_PAGES)}`
+        : `Reading the board (${why}): page ${done + 1} of ${total}`),
+      getPage: async (offset) => {
+        if (view.sessionBudget.left <= 0) throw new Error(`the view reads at most ${SESSION_PAGES} pages for one answer`);
+        view.sessionBudget.left -= 1;
+        try {
+          return await geometryPage(offset, rev);
+        } catch (error) {
+          failed = { offset, message: error.message };
+          throw error;
+        }
+      },
+      onPage: (page) => {
+        if (run !== generation) return;
+        view.readQueue.shift();
+        done += 1;
+        decodePage(page);
+        view.loadedPages.add(page.page);
+        const now = Date.now();
+        if (now - lastDraw > 250) {
+          lastDraw = now;
+          scheduleDraw(true);
+        }
+      },
+    });
+    if (run !== generation) return;
+    view.reading = false;
+    setProgress("");
+    if (read.stopped) {
+      stopped(failed ? `page ${failed.offset + 1} of ${geo.pages} of ${GEOMETRY_TOOL} could not be read: ${failed.message}`
+        : read.stopped, view.readQueue);
+    }
+    else if (!view.stopReason) Shell.announce(`The board is drawn: ${plural(view.loadedPages.size, "page")} read.`);
+    scheduleDraw(true);
+    renderNotices();
+    renderLayers();
+    if (view.tab === "parts") renderTab();
+  }
+
+  function stopped(reason, queue) {
+    view.reading = false;
+    view.stopReason = reason;
+    view.readQueue = [...queue];
+    setProgress("");
+    renderNotices();
+    Shell.announce(`Reading the board stopped: ${reason}`);
+  }
+
+  function retry() {
+    if (!canCall() || view.closed || view.reading) return;
+    view.stopReason = "";
+    renderNotices();
+    if (!geo) {
+      loadGeometry(generation);
+      return;
+    }
+    const left = Math.max(0, Math.min(view.sessionBudget.left, view.readQueue.length));
+    readQueue(generation, view.readQueue, Shell.pageBudget(left, 0), "retry");
+  }
+
+  /** Poured copper on request: one layer's pages, or every layer's. */
+  function loadPoured(layer) {
+    if (!geo || view.reading || !canCall() || view.closed) return;
+    const pages = geo.plan.filter((entry) => !entry.auto && !view.loadedPages.has(entry.page) &&
+      entry.chunks.some(([kind, id]) => kind.startsWith("poured_") && (layer === null || id === layer))).map((entry) => entry.page);
+    if (!pages.length) return;
+    view.other.add("poured");
+    const left = Math.min(view.sessionBudget.left, pages.length);
+    readQueue(generation, pages, Shell.pageBudget(left, 0), layer === null ? "poured copper" : `poured copper on ${layerName(layer)}`);
+  }
+
+  async function reload() {
+    if (view.reading || !canCall() || view.closed) return;
+    const args = view.argsKnown ? { ...view.args } : askedArgs();
+    const mark = Shell.focusMark(app);
+    setProgress(`Calling get_board_view (${argsText(args) || "no arguments"})`);
+    try {
+      const data = Shell.resultJson(await call("get_board_view", args));
+      // An error answer leaves the board drawn: the notice says what get_board_view said.
+      if (data && data.error) throw new Error(data.message || data.error);
+      view.args = args;
+      if (view.messages) view.messages.delete("reload");
+      loadResult(data);
+    } catch (error) {
+      setProgress("");
+      message("reload", "error", `Reload failed: ${error.message}`);
+    }
+    if (mark) Shell.refocus(app, mark, () => ui.board);
+  }
+
+  /** The arguments the answer was asked under, as text (findings as a count). */
+  function askedLabel() {
+    const args = { ...(view.argsKnown ? view.args : view.data.asked) };
+    if (args.findings !== undefined && args.findings !== null) {
+      const count = Array.isArray(args.findings) ? args.findings.length
+        : typeof args.findings === "object" && "count" in args.findings ? args.findings.count : 1;
+      args.findings = plural(count, "finding");
+    }
+    return argsText(args);
+  }
+
+  /** The call's arguments from the result's asked echo (findings cannot be repeated). */
+  function askedArgs() {
+    const asked = { ...(view.data && view.data.asked) };
+    delete asked.findings;
+    delete asked.finding_tool;
+    return asked;
+  }
+
+  function setProgress(text) {
+    if (!ui.progress) return;
+    ui.progress.textContent = text;
+    ui.progress.hidden = !text;
+  }
+
+  // ---------- layers ----------
+
+  const isCopperId = (id) => (id >= 1 && id <= 32) || (id >= 39 && id <= 54);
+
+  function layerName(id) {
+    const layer = geo && geo.layerById.get(id);
+    return layer ? layer.name : `layer ${id}`;
+  }
+
+  function layerColor(id) {
+    if (id === TOP) return COLORS.top;
+    if (id === BOTTOM) return COLORS.bottom;
+    if (id === MULTI) return COLORS.multi;
+    if (id === TOP_OVERLAY) return COLORS.topOverlay;
+    if (id === BOTTOM_OVERLAY) return COLORS.bottomOverlay;
+    return COLORS.inner[innerIndex(id) % COLORS.inner.length];
+  }
+
+  /** An inner layer's (or plane's) place among the inner layers, top down: the colours
+   *  go round COLORS.inner in that order, the first inner layer taking the first. */
+  function innerIndex(id) {
+    if (!geo) return 0;
+    if (!geo.innerIndex) {
+      const inner = geo.layers.filter((layer) => layer.kind === "inner" || layer.kind === "plane")
+        .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+      geo.innerIndex = new Map(inner.map((layer, index) => [layer.id, index]));
+    }
+    return geo.innerIndex.has(id) ? geo.innerIndex.get(id) : Math.abs(id);
+  }
+
+  function swatchClass(id) {
+    if (id === TOP) return "l-top";
+    if (id === BOTTOM) return "l-bottom";
+    if (id === MULTI) return "l-multi";
+    if (id === TOP_OVERLAY) return "l-overlay-top";
+    if (id === BOTTOM_OVERLAY) return "l-overlay-bottom";
+    return `l-i${innerIndex(id) % COLORS.inner.length}`;
+  }
+
+  function layerVisible(id) {
+    return view.on.get(id) === true;
+  }
+
+  /** The layers shown first: the result's layers_on for copper, overlays on, planes off. */
+  function applyDefaultLayers() {
+    view.on = new Map();
+    const names = view.layersOnNames;
+    for (const layer of geo.layers) {
+      if (layer.kind === "overlay") view.on.set(layer.id, true);
+      else if (layer.kind === "multi") view.on.set(layer.id, true);
+      else view.on.set(layer.id, names.has(layer.name));
+    }
+    geo.viasDirty = true;
+  }
+
+  function setLayer(id, value) {
+    view.on.set(id, value);
+    changedLayers();
+  }
+
+  function changedLayers() {
+    if (geo) {
+      geo.viasDirty = true;  // only the vias' batch depends on what is shown
+      geo.grid = null;
+    }
+    resetCycle();
+    scheduleDraw(true);
+    syncLayerBoxes();
+    updateBoardLabel();
+  }
+
+  function preset(name) {
+    if (!geo) return;
+    const highlighted = new Set();
+    for (const target of view.targets) {
+      if (target.kind === "net") for (const layerName_ of target.row.layers || []) highlighted.add(layerName_);
+    }
+    for (const layer of geo.layers) {
+      if (layer.kind === "overlay") view.on.set(layer.id, name === "all" || (name === "top" ? layer.id === TOP_OVERLAY : name === "bottom" ? layer.id === BOTTOM_OVERLAY : true));
+      else if (layer.kind === "multi") continue;
+      else if (name === "top") view.on.set(layer.id, layer.id === TOP);
+      else if (name === "bottom") view.on.set(layer.id, layer.id === BOTTOM);
+      else if (name === "highlighted") view.on.set(layer.id, highlighted.has(layer.name));
+      else view.on.set(layer.id, layer.kind !== "plane");
+    }
+    if (name === "bottom" && view.side !== "bottom") setSide("bottom");
+    if (name === "top" && view.side !== "top") setSide("top");
+    changedLayers();
+  }
+
+  function only(id) {
+    if (!geo) return;
+    for (const layer of geo.layers) if (layer.kind !== "multi") view.on.set(layer.id, layer.id === id);
+    changedLayers();
+  }
+
+  // ---------- drawing ----------
+
+  let drawQueued = false;
+  let baseDirty = true;
+
+  /** Draw on the next animation frame, or a timer (a hidden pane holds frames back). */
+  function scheduleDraw(base = false) {
+    if (base) baseDirty = true;
+    if (drawQueued) return;
+    drawQueued = true;
+    const run = () => {
+      if (!drawQueued) return;
+      drawQueued = false;
+      draw();
+    };
+    requestAnimationFrame(run);
+    setTimeout(run, 60);
+  }
+
+  function canvasSize() {
+    const board = ui.board;
+    if (!board) return null;
+    const width = board.clientWidth;
+    const height = board.clientHeight;
+    return width && height ? { width, height } : null;
+  }
+
+  function sizeCanvases() {
+    const size = canvasSize();
+    if (!size) return null;
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    for (const canvas of [ui.base, ui.over]) {
+      const width = Math.round(size.width * dpr);
+      const height = Math.round(size.height * dpr);
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+        baseDirty = true;
+      }
+    }
+    return { ...size, dpr };
+  }
+
+  /** Board coordinates (mil) to CSS pixels on the canvas, and back. */
+  function toScreen(x, y, size) {
+    const flip = view.side === "bottom" ? -1 : 1;
+    return [(x - view.cx) * view.scale * flip + size.width / 2, -(y - view.cy) * view.scale + size.height / 2];
+  }
+
+  function toBoard(sx, sy, size) {
+    const flip = view.side === "bottom" ? -1 : 1;
+    return [(sx - size.width / 2) / (view.scale * flip) + view.cx, -(sy - size.height / 2) / view.scale + view.cy];
+  }
+
+  function setBoardTransform(ctx, size) {
+    const flip = view.side === "bottom" ? -1 : 1;
+    const s = view.scale * size.dpr;
+    ctx.setTransform(s * flip, 0, 0, -s, (size.width / 2 - view.cx * view.scale * flip) * size.dpr,
+                     (size.height / 2 + view.cy * view.scale) * size.dpr);
+  }
+
+  /** The extents to fit: the board outline, else the result's board extents. */
+  function boardBox() {
+    if (geo && geo.outline) {
+      const pts = geo.outline;
+      let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+      for (let i = 0; i < pts.length; i += 2) {
+        minx = Math.min(minx, pts[i]); maxx = Math.max(maxx, pts[i]);
+        miny = Math.min(miny, pts[i + 1]); maxy = Math.max(maxy, pts[i + 1]);
+      }
+      return { minx, miny, maxx, maxy };
+    }
+    return view.data ? box(unitKey(view.data, "board_extents")) : null;
+  }
+
+  function fitBox(target, margin = 0.04) {
+    const size = canvasSize();
+    if (!size || !target) {
+      view.pendingFit = target;
+      retrySize();
+      return;
+    }
+    view.pendingFit = null;
+    // Kept, so a board resized before the user moves it (the host fitting the panes)
+    // shows the same box again.
+    view.fitTarget = { target, margin };
+    view.userMoved = false;
+    applyFit(target, margin, size);
+    scheduleDraw(true);
+    updateZoomLabel();
+  }
+
+  function applyFit(target, margin, size) {
+    const width = Math.max(target.maxx - target.minx, 1);
+    const height = Math.max(target.maxy - target.miny, 1);
+    const board = boardBox() || target;
+    view.fitScale = Math.min(size.width / Math.max(board.maxx - board.minx, 1), size.height / Math.max(board.maxy - board.miny, 1)) * (1 - 2 * margin);
+    view.scale = clamp(Math.min(size.width / width, size.height / height) * (1 - 2 * margin), view.fitScale * 0.5, 20);
+    view.cx = (target.minx + target.maxx) / 2;
+    view.cy = (target.miny + target.maxy) / 2;
+  }
+
+  function fitWindow() {
+    fitBox(box(unitKey(view.data.view, "window")) || boardBox());
+  }
+
+  function fitBoard() {
+    fitBox(boardBox());
+  }
+
+  function fitHighlight() {
+    const target = highlightBox();
+    fitBox(target || boardBox());
+  }
+
+  /** Re-measure the board while it has no size (a frame not laid out yet). */
+  function retrySize() {
+    clearTimeout(ui.sizeTimer);
+    ui.sizeTries = (ui.sizeTries || 0) + 1;
+    if (ui.sizeTries > 60) return;
+    ui.sizeTimer = setTimeout(() => {
+      if (!canvasSize()) {
+        retrySize();
+        return;
+      }
+      ui.sizeTries = 0;
+      if (view.pendingFit) fitBox(view.pendingFit);
+      else scheduleDraw(true);
+    }, Math.min(1000, 60 * ui.sizeTries));
+  }
+
+  function zoomAt(factor, sx, sy) {
+    const size = canvasSize();
+    if (!size || !view.scale) return;
+    view.userMoved = true;
+    const [bx, by] = toBoard(sx === undefined ? size.width / 2 : sx, sy === undefined ? size.height / 2 : sy, size);
+    const scale = clamp(view.scale * factor, view.fitScale * 0.5, 20);
+    const applied = scale / view.scale;
+    view.scale = scale;
+    view.cx = bx - (bx - view.cx) / applied;
+    view.cy = by - (by - view.cy) / applied;
+    scheduleDraw(true);
+    updateZoomLabel();
+  }
+
+  function pan(dx, dy) {
+    view.userMoved = true;
+    const flip = view.side === "bottom" ? -1 : 1;
+    view.cx -= dx / view.scale * flip;
+    view.cy += dy / view.scale;
+    scheduleDraw(true);
+  }
+
+  function updateZoomLabel() {
+    if (ui.zoom) ui.zoom.textContent = `${Math.round((view.scale / (view.fitScale || 1)) * 100)}%`;
+    updateScaleBar();
+  }
+
+  function draw() {
+    const size = sizeCanvases();
+    if (!size || !view.data) {
+      if (view.data) retrySize();
+      return;
+    }
+    if (!view.scale) {
+      fitWindow();
+      return;
+    }
+    const sizeKey = `${size.width}x${size.height}`;
+    if (view.sizeKey !== sizeKey) {
+      if (view.sizeKey && !view.userMoved && view.fitTarget) {
+        applyFit(view.fitTarget.target, view.fitTarget.margin, size);
+        updateZoomLabel();
+      }
+      view.sizeKey = sizeKey;
+      baseDirty = true;
+    }
+    const started = performance.now();
+    if (baseDirty) {
+      drawBase(size);
+      baseDirty = false;
+      view.lastBaseMs = performance.now() - started;
+    }
+    drawOverlay(size);
+    view.lastDrawMs = performance.now() - started;
+    resetGesture();
+  }
+
+  function drawBase(size) {
+    const ctx = ui.base.getContext("2d");
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = COLORS.background;
+    ctx.fillRect(0, 0, ui.base.width, ui.base.height);
+    setBoardTransform(ctx, size);
+    const px = 1 / view.scale;  // one CSS pixel in mil
+    if (!geo) {
+      drawSketchBoard(ctx, px);
+      return;
+    }
+    if (!geo.batches || geo.pending.length || geo.viasDirty) buildBatches();
+    // The board: its outline filled, the cutouts (their union) cut out of it.
+    const edges = new Path2D();
+    if (geo.outline) {
+      const shape = new Path2D();
+      ringPath(shape, geo.outline);
+      ringPath(edges, geo.outline);
+      ctx.fillStyle = COLORS.board;
+      ctx.fill(shape);
+    } else {
+      const extents = boardBox();
+      if (extents) {
+        ctx.fillStyle = COLORS.board;
+        ctx.fillRect(extents.minx, extents.miny, extents.maxx - extents.minx, extents.maxy - extents.miny);
+      }
+    }
+    if (geo.cutouts.length) {
+      const holes = new Path2D();
+      for (const cutout of geo.cutouts) {
+        ringPath(holes, cutout);
+        ringPath(edges, cutout);
+      }
+      ctx.fillStyle = COLORS.background;
+      ctx.fill(holes);
+    }
+    for (const layer of drawOrder()) {
+      drawLayer(ctx, layer, px);
+      if (view.profiling) {
+        ctx.getImageData(0, 0, 1, 1);
+        view.profiling.push([layer, Math.round(performance.now() - view.profileStart)]);
+      }
+    }
+    // The board's edges over the copper, as Altium draws them.
+    ctx.strokeStyle = COLORS.outline;
+    ctx.lineWidth = 1.2 * px;
+    ctx.stroke(edges);
+    if (view.other.has("boxes") || view.other.has("names")) drawParts(ctx, size, px);
+  }
+
+  /** Layers from the far side to the near one: bottom overlay, bottom copper, inner layers
+   *  bottom-up, top copper, Multi-Layer pads, vias, top overlay (reversed when flipped). */
+  function drawOrder() {
+    const copper = geo.layers.filter((layer) => isCopperId(layer.id)).sort((a, b) => (a.order ?? 0) - (b.order ?? 0)).map((layer) => layer.id);
+    const order = [BOTTOM_OVERLAY, ...[...copper].reverse(), MULTI, "vias", TOP_OVERLAY];
+    if (view.side === "bottom") {
+      return [TOP_OVERLAY, ...copper, MULTI, "vias", BOTTOM_OVERLAY];
+    }
+    return order;
+  }
+
+  function ringPath(path, pts) {
+    path.moveTo(pts[0], pts[1]);
+    for (let i = 2; i < pts.length; i += 2) path.lineTo(pts[i], pts[i + 1]);
+    path.closePath();
+  }
+
+  function polyPath(path, pts) {
+    path.moveTo(pts[0], pts[1]);
+    for (let i = 2; i < pts.length; i += 2) path.lineTo(pts[i], pts[i + 1]);
+  }
+
+  function arcPath(path, arc) {
+    const a0 = arc.a0 * Math.PI / 180;
+    const a1 = (arc.a0 + arc.sweep) * Math.PI / 180;
+    path.moveTo(arc.cx + arc.r * Math.cos(a0), arc.cy + arc.r * Math.sin(a0));
+    path.arc(arc.cx, arc.cy, arc.r, a0, a1, false);
+  }
+
+  const unitShapes = new Map();
+
+  /** A pad stack's copper (or hole) at the origin, rotated. */
+  function stackPath(index, hole) {
+    const key = `${index}|${hole ? 1 : 0}`;
+    if (unitShapes.has(key)) return unitShapes.get(key);
+    const stack = geo.stacks[index];
+    const shape = new Path2D();
+    if (stack) {
+      if (hole) {
+        const d = stack.hole;
+        if (stack.holeShape === 2 && stack.slot > d) roundedRect(shape, stack.slot, d, d / 2);
+        else if (stack.holeShape === 1) shape.rect(-d / 2, -d / 2, d, d);
+        else { shape.moveTo(d / 2, 0); shape.arc(0, 0, d / 2, 0, Math.PI * 2); }
+      } else if (stack.shape === 2) {
+        shape.rect(-stack.w / 2, -stack.h / 2, stack.w, stack.h);
+      } else if (stack.shape === 3) {
+        const c = Math.min(stack.w, stack.h) / 4;
+        const w = stack.w / 2;
+        const h = stack.h / 2;
+        shape.moveTo(-w + c, -h); shape.lineTo(w - c, -h); shape.lineTo(w, -h + c); shape.lineTo(w, h - c);
+        shape.lineTo(w - c, h); shape.lineTo(-w + c, h); shape.lineTo(-w, h - c); shape.lineTo(-w, -h + c); shape.closePath();
+      } else if (stack.shape === 9) {
+        roundedRect(shape, stack.w, stack.h, stack.corner);
+      } else {
+        roundedRect(shape, stack.w, stack.h, Math.min(stack.w, stack.h) / 2);
+      }
+    }
+    const rotated = new Path2D();
+    rotated.addPath(shape, new DOMMatrix().rotateSelf(stack ? stack.rot : 0));
+    unitShapes.set(key, rotated);
+    return rotated;
+  }
+
+  function roundedRect(path, w, h, r) {
+    const radius = Math.max(0, Math.min(r, w / 2, h / 2));
+    const x = -w / 2;
+    const y = -h / 2;
+    path.moveTo(x + radius, y);
+    path.lineTo(x + w - radius, y);
+    path.arc(x + w - radius, y + radius, radius, -Math.PI / 2, 0);
+    path.lineTo(x + w, y + h - radius);
+    path.arc(x + w - radius, y + h - radius, radius, 0, Math.PI / 2);
+    path.lineTo(x + radius, y + h);
+    path.arc(x + radius, y + h - radius, radius, Math.PI / 2, Math.PI);
+    path.lineTo(x, y + radius);
+    path.arc(x + radius, y + radius, radius, Math.PI, Math.PI * 1.5);
+    path.closePath();
+  }
+
+  const mapOf = (map, key, make) => {
+    if (!map.has(key)) map.set(key, make());
+    return map.get(key);
+  };
+
+  const newPath = () => new Path2D();
+
+  /** Path2D batches per layer: areas, pours, poured copper, tracks and arcs per width,
+   *  pads and holes, silkscreen per width. They only grow: each decoded object is added
+   *  once (geo.pending), so reading more pages, or showing and hiding layers, never
+   *  rebuilds the board's batches. Only the vias' batch follows the visible layers. */
+  function buildBatches() {
+    const started = performance.now();
+    if (!geo.batches) geo.batches = new Map();
+    const batch = (layer) => mapOf(geo.batches, layer, () => ({
+      areas: new Path2D(), pours: new Path2D(), poured: new Path2D(), pouredStroke: new Map(),
+      strokes: new Map(), pads: new Path2D(), holes: new Path2D(), silk: new Map() }));
+    const pending = geo.pending;
+    geo.pending = [];
+    for (const [kind, layer, object] of pending) {
+      const b = batch(layer);
+      switch (kind) {
+        case "area": for (const ring of object.rings) ringPath(b.areas, ring); break;
+        case "poured_area": for (const ring of object.rings) ringPath(b.poured, ring); break;
+        case "pour": ringPath(b.pours, object.pts); break;
+        case "track": polyPath(mapOf(b.strokes, object.w, newPath), object.pts); break;
+        case "arc": arcPath(mapOf(b.strokes, object.w, newPath), object); break;
+        case "poured_track": polyPath(mapOf(b.pouredStroke, object.w, newPath), object.pts); break;
+        case "poured_arc": arcPath(mapOf(b.pouredStroke, object.w, newPath), object); break;
+        case "silk": polyPath(mapOf(b.silk, object.w, newPath), object.pts); break;
+        case "silkarc": arcPath(mapOf(b.silk, object.w, newPath), object); break;
+        case "pad": {
+          const matrix = new DOMMatrix([1, 0, 0, 1, object.x, object.y]);
+          b.pads.addPath(stackPath(object.stack, false), matrix);
+          const stack = geo.stacks[object.stack];
+          if (stack && stack.hole > 0) b.holes.addPath(stackPath(object.stack, true), matrix);
+          break;
+        }
+        default: break;
+      }
+    }
+    if (geo.viasDirty) buildVias();
+    view.lastBatchMs = performance.now() - started;
+  }
+
+  /** Vias: drawn when their span holds a visible copper layer. */
+  function buildVias() {
+    const vias = new Path2D();
+    const holes = new Path2D();
+    for (const via of geo.vias) {
+      if (!viaVisible(via)) continue;
+      const type = geo.viatypes[via.type];
+      if (!type) continue;
+      vias.moveTo(via.x + type.d / 2, via.y);
+      vias.arc(via.x, via.y, type.d / 2, 0, Math.PI * 2);
+      if (type.hole > 0) {
+        holes.moveTo(via.x + type.hole / 2, via.y);
+        holes.arc(via.x, via.y, type.hole / 2, 0, Math.PI * 2);
+      }
+    }
+    geo.viaPaths = { vias, holes };
+    geo.viasDirty = false;
+  }
+
+  /** The copper layers a via spans, in stack order. */
+  function viaSpan(via) {
+    const type = geo.viatypes[via.type];
+    if (!type) return [];
+    const spans = geo.viaSpans || (geo.viaSpans = new Map());
+    if (spans.has(via.type)) return spans.get(via.type);
+    const copper = geo.layers.filter((layer) => isCopperId(layer.id)).sort((a, b) => a.order - b.order);
+    const from = copper.findIndex((layer) => layer.id === type.from);
+    const to = copper.findIndex((layer) => layer.id === type.to);
+    const span = (from < 0 || to < 0 ? copper : copper.slice(Math.min(from, to), Math.max(from, to) + 1)).map((layer) => layer.id);
+    spans.set(via.type, span);
+    return span;
+  }
+
+  function viaVisible(via) {
+    return view.other.has("vias") && viaSpan(via).some((id) => layerVisible(id));
+  }
+
+  function drawLayer(ctx, layer, px) {
+    if (layer === "vias") {
+      if (!view.other.has("vias") || !geo.viaPaths) return;
+      ctx.fillStyle = COLORS.multi;
+      ctx.fill(geo.viaPaths.vias);
+      ctx.fillStyle = COLORS.hole;
+      ctx.fill(geo.viaPaths.holes);
+      return;
+    }
+    if (layer === MULTI ? !view.other.has("multi") : !layerVisible(layer)) return;
+    const b = geo.batches.get(layer);
+    if (!b) return;
+    const color = layerColor(layer);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    if (layer === TOP_OVERLAY || layer === BOTTOM_OVERLAY) {
+      ctx.strokeStyle = color;
+      for (const [width, path] of b.silk) {
+        ctx.lineWidth = Math.max(width, px);
+        ctx.stroke(path);
+      }
+      return;
+    }
+    // Fills are nonzero: outlines wound one way and holes the other, so overlapping
+    // areas (or pours) stay filled where they overlap and holes stay open.
+    const pouredLoaded = geo.poured.has(layer);
+    if (view.other.has("poured") && pouredLoaded) {
+      ctx.fillStyle = color;
+      ctx.fill(b.poured);
+      ctx.strokeStyle = color;
+      for (const [width, path] of b.pouredStroke) {
+        ctx.lineWidth = Math.max(width, px);
+        ctx.stroke(path);
+      }
+    }
+    if (view.other.has("pours")) {
+      ctx.globalAlpha = 0.25;
+      ctx.fillStyle = color;
+      if (!(view.other.has("poured") && pouredLoaded)) ctx.fill(b.pours);
+      ctx.globalAlpha = 0.6;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = px;
+      ctx.stroke(b.pours);
+      ctx.globalAlpha = 1;
+    }
+    ctx.fillStyle = color;
+    ctx.fill(b.areas);
+    ctx.strokeStyle = color;
+    for (const [width, path] of b.strokes) {
+      ctx.lineWidth = Math.max(width, px * 0.75);
+      ctx.stroke(path);
+    }
+    ctx.fillStyle = layer === MULTI ? COLORS.multi : color;
+    ctx.fill(b.pads);
+    ctx.fillStyle = COLORS.hole;
+    ctx.fill(b.holes);
+  }
+
+  /** Part boxes (Not Fitted ones hatched) and designators, unmirrored and horizontal. */
+  function drawParts(ctx, size, px) {
+    const parts = geo.parts.filter((part) => part && part.side !== 2 && sideShown(part.side));
+    if (view.other.has("boxes")) {
+      ctx.lineWidth = px;
+      ctx.strokeStyle = "rgba(139, 148, 158, 0.55)";
+      const boxes = new Path2D();  // one stroke for every box
+      for (const part of parts) boxes.rect(part.minx, part.miny, part.maxx - part.minx, part.maxy - part.miny);
+      ctx.stroke(boxes);
+      for (const part of parts) {
+        if (geo.dnp.has(part.index)) hatch(ctx, part, px * 5, "rgba(139, 148, 158, 0.6)", px);
+      }
+    }
+    if (!view.other.has("names")) return;
+    ctx.save();
+    ctx.setTransform(size.dpr, 0, 0, size.dpr, 0, 0);
+    ctx.fillStyle = COLORS.text;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for (const part of parts) {
+      const long = Math.max(part.maxx - part.minx, part.maxy - part.miny) * view.scale;
+      if (long < 24 || !part.name) continue;
+      const short = Math.min(part.maxx - part.minx, part.maxy - part.miny) * view.scale;
+      const font = clamp(Math.min(short * 0.6, long / Math.max(part.name.length, 1) * 1.6), 9, 14);
+      if (part.name.length * font * 0.6 > long * 1.05) continue;
+      ctx.font = `${font}px ui-monospace, Consolas, monospace`;
+      const [sx, sy] = toScreen((part.minx + part.maxx) / 2, (part.miny + part.maxy) / 2, size);
+      if (sx < -50 || sy < -20 || sx > size.width + 50 || sy > size.height + 20) continue;
+      ctx.fillText(part.name, sx, sy);
+    }
+    ctx.restore();
+  }
+
+  /** A part on the side drawn: both sides' parts when viewed from either (top parts first). */
+  function sideShown(side) {
+    return side === 0 ? layerVisible(TOP_OVERLAY) || layerVisible(TOP) : layerVisible(BOTTOM_OVERLAY) || layerVisible(BOTTOM);
+  }
+
+  function hatch(ctx, part, step, color, px) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(part.minx, part.miny, part.maxx - part.minx, part.maxy - part.miny);
+    ctx.clip();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = px;
+    ctx.beginPath();
+    const width = part.maxx - part.minx;
+    const height = part.maxy - part.miny;
+    for (let d = -height; d < width; d += step) {
+      ctx.moveTo(part.minx + d, part.miny);
+      ctx.lineTo(part.minx + d + height, part.maxy);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /** Before the geometry (or without it): the board's extents and origin. */
+  function drawSketchBoard(ctx, px) {
+    const extents = boardBox();
+    if (!extents) return;
+    ctx.fillStyle = COLORS.board;
+    ctx.fillRect(extents.minx, extents.miny, extents.maxx - extents.minx, extents.maxy - extents.miny);
+    ctx.strokeStyle = COLORS.outline;
+    ctx.setLineDash([6 * px, 4 * px]);
+    ctx.lineWidth = 1.2 * px;
+    ctx.strokeRect(extents.minx, extents.miny, extents.maxx - extents.minx, extents.maxy - extents.miny);
+    ctx.setLineDash([]);
+    const origin = view.origin;
+    ctx.strokeStyle = "rgba(200, 200, 200, 0.7)";
+    ctx.beginPath();
+    ctx.moveTo(origin.x - 10 * px, origin.y);
+    ctx.lineTo(origin.x + 10 * px, origin.y);
+    ctx.moveTo(origin.x, origin.y - 10 * px);
+    ctx.lineTo(origin.x, origin.y + 10 * px);
+    ctx.stroke();
+  }
+
+  // ---------- the overlay: dimming, highlight, selection, marks, measures ----------
+
+  function drawOverlay(size) {
+    const ctx = ui.over.getContext("2d");
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, ui.over.width, ui.over.height);
+    setBoardTransform(ctx, size);
+    const px = 1 / view.scale;
+    const sets = highlightSets();
+    const any = sets.nets.size || sets.parts.size || sets.pads.length;
+    const pulse = view.pulse && !reducedMotion() ? Math.max(0, 1 - (Date.now() - view.pulse) / 900) : 0;
+    if (geo && any && view.dim) {
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = "rgba(13, 17, 23, 0.82)";
+      ctx.fillRect(0, 0, ui.over.width, ui.over.height);
+      ctx.restore();
+    }
+    if (geo) {
+      drawNetHighlight(ctx, sets.nets, px, pulse);
+      drawPartHighlight(ctx, sets.parts, sets.pads, px, size);
+    } else if (view.data) {
+      drawSketchTargets(ctx, px);
+    }
+    const placed = [];  // the label pills drawn, so later ones do not cover them
+    drawMeasures(ctx, size, px, placed);
+    drawMarks(ctx, size, px, placed);
+    view.labels = placed;
+    drawSelection(ctx, size, px);
+    if (pulse > 0) setTimeout(() => scheduleDraw(false), 60);
+  }
+
+  function reducedMotion() {
+    return window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  }
+
+  /** The highlighted nets' copper on visible layers as paths, one item per layer and net,
+   *  each built once and kept while that layer's pages and the poured copper and pour
+   *  toggles stay as they were: showing a layer or reading another layer's pages builds
+   *  only what changed. */
+  function netHighlightPaths(nets) {
+    const started = performance.now();
+    const cache = geo.highlightCache;
+    const items = [];
+    const toggles = `${view.other.has("poured") ? 1 : 0}${view.other.has("pours") ? 1 : 0}`;
+    for (const layer of drawOrder()) {
+      if (layer === "vias") {
+        if (!view.other.has("vias")) continue;
+        const shown = geo.layers.filter((item) => isCopperId(item.id) && layerVisible(item.id)).map((item) => item.id).join(",");
+        for (const net of nets) {
+          const key = `vias|${net}|${geo.layerVersion.get("vias") || 0}|${shown}`;
+          if (!cache.has(key)) cache.set(key, viaHighlight(net));
+          const item = cache.get(key);
+          if (item) items.push(item);
+        }
+        continue;
+      }
+      if (layer === TOP_OVERLAY || layer === BOTTOM_OVERLAY) continue;
+      if (layer === MULTI ? !view.other.has("multi") : !layerVisible(layer)) continue;
+      for (const net of nets) {
+        const key = `${layer}|${net}|${geo.layerVersion.get(layer) || 0}|${toggles}`;
+        if (!cache.has(key)) cache.set(key, layerHighlight(layer, net));
+        const item = cache.get(key);
+        if (item) items.push(item);
+      }
+    }
+    if (cache.size > 4000) cache.clear();
+    view.lastHighlightMs = performance.now() - started;
+    return items;
+  }
+
+  /** One net's vias whose span shows a visible layer, with their holes. */
+  function viaHighlight(net) {
+    const path = new Path2D();
+    const holes = new Path2D();
+    let count = 0;
+    for (const via of geo.vias) {
+      if (via.net !== net || !viaVisible(via)) continue;
+      const type = geo.viatypes[via.type];
+      const r = type ? type.d / 2 : 5;
+      path.moveTo(via.x + r, via.y);
+      path.arc(via.x, via.y, r, 0, Math.PI * 2);
+      if (type && type.hole > 0) {
+        holes.moveTo(via.x + type.hole / 2, via.y);
+        holes.arc(via.x, via.y, type.hole / 2, 0, Math.PI * 2);
+      }
+      count += 1;
+    }
+    return count ? { layer: "vias", net, color: COLORS.multi, strokes: new Map(), copper: null, pads: path, holes,
+                     pours: null, halos: count <= HALO_PADS } : null;
+  }
+
+  /** One net's copper on one layer: tracks and arcs by width, areas, poured copper (when
+   *  shown), pads with their holes, and pour outlines (when shown). */
+  function layerHighlight(layer, net) {
+    const own = geo.byNet.get(layer) && geo.byNet.get(layer).get(net);
+    if (!own) return null;
+    const copper = new Path2D();
+    const strokes = new Map();
+    const stroke = (width) => mapOf(strokes, width, newPath);
+    let any = false;
+    for (const track of own.tracks) { polyPath(stroke(track.w), track.pts); any = true; }
+    for (const arc of own.arcs) { arcPath(stroke(arc.w), arc); any = true; }
+    if (view.other.has("poured")) {
+      for (const track of own.pouredTracks) { polyPath(stroke(track.w), track.pts); any = true; }
+      for (const arc of own.pouredArcs) { arcPath(stroke(arc.w), arc); any = true; }
+      for (const area of own.pouredAreas) { for (const ring of area.rings) ringPath(copper, ring); any = true; }
+    }
+    for (const area of own.areas) { for (const ring of area.rings) ringPath(copper, ring); any = true; }
+    const pads = new Path2D();
+    const holes = new Path2D();
+    for (const pad of own.pads) {
+      const matrix = new DOMMatrix([1, 0, 0, 1, pad.x, pad.y]);
+      pads.addPath(stackPath(pad.stack, false), matrix);
+      const stack = geo.stacks[pad.stack];
+      if (stack && stack.hole > 0) holes.addPath(stackPath(pad.stack, true), matrix);
+      any = true;
+    }
+    let pours = null;
+    if (view.other.has("pours") && own.pours.length) {
+      pours = new Path2D();
+      for (const pour of own.pours) ringPath(pours, pour.pts);
+      any = true;
+    }
+    return any ? { layer, net, color: layer === MULTI ? COLORS.multi : layerColor(layer), strokes, copper, pads, holes, pours,
+                   halos: own.pads.length <= HALO_PADS } : null;
+  }
+
+  /** The highlighted nets' copper in its layer colour, at least 2 px wide, over a 4 px
+   *  halo in the net's colour (white, cyan, magenta, lime, orange, violet). */
+  function drawNetHighlight(ctx, nets, px, pulse) {
+    if (!nets.size) return;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    for (const item of netHighlightPaths(nets)) {
+      const halo = netColor(item.net);
+      ctx.strokeStyle = halo;
+      ctx.globalAlpha = 0.55 + 0.45 * pulse;
+      for (const [width, path] of item.strokes) {
+        ctx.lineWidth = Math.max(width, 2 * px) + 8 * px;
+        ctx.stroke(path);
+      }
+      // Pads get the halo; areas and poured copper are filled bright without one (a wide
+      // stroke along a pour's many vertices costs more than the whole board).
+      if (item.halos) {
+        ctx.lineWidth = 8 * px;
+        ctx.stroke(item.pads);
+      }
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = item.color;
+      if (item.copper) ctx.fill(item.copper);  // nonzero: overlapping copper stays filled
+      ctx.strokeStyle = item.color;
+      for (const [width, path] of item.strokes) {
+        ctx.lineWidth = Math.max(width, 2 * px);
+        ctx.stroke(path);
+      }
+      ctx.fill(item.pads);
+      if (item.holes) {
+        ctx.fillStyle = COLORS.hole;
+        ctx.fill(item.holes);
+      }
+      if (item.pours) {
+        ctx.strokeStyle = halo;
+        ctx.lineWidth = 2 * px;
+        ctx.setLineDash([6 * px, 4 * px]);
+        ctx.stroke(item.pours);
+        ctx.setLineDash([]);
+      }
+    }
+  }
+
+  /** The highlighted parts' pads per visible layer, built once per highlight. */
+  function partHighlightPaths(parts) {
+    const shown = [...view.on].filter(([, value]) => value).map(([id]) => id).join(",");
+    const key = `${[...parts].sort((a, b) => a - b).join(",")}|${shown}|${view.other.has("multi")}|${geo.version}`;
+    if (geo.partCache && geo.partCache.key === key) return geo.partCache.items;
+    const items = [];
+    for (const [layer, list] of geo.pads) {
+      if (layer === MULTI ? !view.other.has("multi") : !layerVisible(layer)) continue;
+      const path = new Path2D();
+      let any = false;
+      for (const pad of list) {
+        if (parts.has(pad.part)) {
+          path.addPath(stackPath(pad.stack, false), new DOMMatrix([1, 0, 0, 1, pad.x, pad.y]));
+          any = true;
+        }
+      }
+      if (any) items.push({ layer, path, color: layer === MULTI ? COLORS.multi : layerColor(layer) });
+    }
+    geo.partCache = { key, items };
+    return items;
+  }
+
+  function drawPartHighlight(ctx, parts, pads, px, size) {
+    for (const item of partHighlightPaths(parts)) {
+      ctx.fillStyle = item.color;
+      ctx.fill(item.path);
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 1.2 * px;
+      ctx.stroke(item.path);
+    }
+    for (const index of parts) {
+      const part = geo.parts[index];
+      if (!part) continue;
+      ctx.strokeStyle = "#ffffff";
+      ctx.setLineDash([5 * px, 3 * px]);
+      ctx.lineWidth = 1.5 * px;
+      const grow = 4 * px;
+      ctx.strokeRect(part.minx - grow, part.miny - grow, part.maxx - part.minx + 2 * grow, part.maxy - part.miny + 2 * grow);
+      ctx.setLineDash([]);
+    }
+    for (const found of pads) {
+      const path = new Path2D();
+      path.addPath(stackPath(found.pad.stack, false), new DOMMatrix([1, 0, 0, 1, found.pad.x, found.pad.y]));
+      ctx.fillStyle = found.layer === MULTI ? COLORS.multi : layerColor(found.layer);
+      ctx.fill(path);
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 2 * px;
+      ctx.stroke(path);
+      ring(ctx, found.pad.x, found.pad.y, 10 * px, "#ffffff", px);
+    }
+  }
+
+  function ring(ctx, x, y, r, color, px) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2 * px;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  /** Without geometry: the highlighted nets' and parts' extents, and pads, from the text. */
+  function drawSketchTargets(ctx, px) {
+    if (view.cleared) return;
+    for (const target of view.targets) {
+      if ((target.kind === "net" || target.kind === "part") && target.box) {
+        ctx.strokeStyle = target.kind === "net" ? target.color : "#ffffff";
+        ctx.lineWidth = 1.5 * px;
+        ctx.setLineDash(target.kind === "net" ? [] : [5 * px, 3 * px]);
+        ctx.strokeRect(target.box.minx, target.box.miny, target.box.maxx - target.box.minx, target.box.maxy - target.box.miny);
+        ctx.setLineDash([]);
+      } else if (target.kind === "pad" && target.at) {
+        ring(ctx, target.at.x, target.at.y, 8 * px, "#ffffff", px);
+      }
+    }
+  }
+
+  /** A label pill near (sx, sy) in CSS pixels: the first of a few places beside the
+   *  point that overlaps no pill drawn before it (placed), else none (the Objects tab
+   *  lists every mark and measure). */
+  function pill(ctx, size, text, sx, sy, color, placed = [], dark = true) {
+    ctx.save();
+    ctx.setTransform(size.dpr, 0, 0, size.dpr, 0, 0);
+    ctx.font = "11px system-ui, sans-serif";
+    const width = ctx.measureText(text).width + 10;
+    const spots = [[sx, sy], [sx, sy + 44], [sx - width - 36, sy], [sx - width - 36, sy + 44], [sx, sy - 20], [sx, sy + 64]];
+    const overlaps = (x, y) => placed.some((box) => x < box.x + box.w + 2 && box.x < x + width + 2 && y < box.y + 18 && box.y < y + 18);
+    let x = null;
+    let y = null;
+    for (const [px_, py_] of spots) {
+      const cx = clamp(px_, 2, size.width - width - 2);
+      const cy = clamp(py_, 2, size.height - 18);
+      if (!overlaps(cx, cy)) {
+        x = cx;
+        y = cy;
+        break;
+      }
+    }
+    if (x === null) {
+      ctx.restore();
+      return false;
+    }
+    placed.push({ x, y, w: width });
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.roundRect ? ctx.roundRect(x, y, width, 16, 8) : ctx.rect(x, y, width, 16);
+    ctx.fill();
+    ctx.fillStyle = dark ? "#111111" : "#ffffff";
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "left";
+    ctx.fillText(text, x + 5, y + 8.5);
+    ctx.restore();
+    return true;
+  }
+
+  function drawMarks(ctx, size, px, placed) {
+    if (view.cleared) return;
+    for (const target of view.targets) {
+      if (target.kind !== "mark" || !target.at) continue;
+      const { x, y } = target.at;
+      const r = 14 * px;
+      ctx.strokeStyle = COLORS.mark;
+      ctx.lineWidth = 2 * px;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.moveTo(x - r * 1.6, y);
+      ctx.lineTo(x - r * 0.4, y);
+      ctx.moveTo(x + r * 0.4, y);
+      ctx.lineTo(x + r * 1.6, y);
+      ctx.moveTo(x, y - r * 1.6);
+      ctx.lineTo(x, y - r * 0.4);
+      ctx.moveTo(x, y + r * 0.4);
+      ctx.lineTo(x, y + r * 1.6);
+      ctx.stroke();
+      const [sx, sy] = toScreen(x, y, size);
+      const off = target.row.on_board === false;
+      pill(ctx, size, `${off ? "⚠ " : ""}${target.name}`, sx + 18, sy - 26, off ? "#ff8a3d" : COLORS.mark, placed);
+    }
+  }
+
+  function drawMeasures(ctx, size, px, placed) {
+    if (view.cleared) return;
+    for (const target of view.targets) {
+      if (target.kind !== "measure" || !target.from || !target.to) continue;
+      ctx.strokeStyle = COLORS.measure;
+      ctx.lineWidth = 1.5 * px;
+      ctx.setLineDash([6 * px, 4 * px]);
+      ctx.beginPath();
+      ctx.moveTo(target.from.x, target.from.y);
+      ctx.lineTo(target.to.x, target.to.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      const dx = target.to.x - target.from.x;
+      const dy = target.to.y - target.from.y;
+      const length = Math.hypot(dx, dy) || 1;
+      const nx = -dy / length * 6 * px;
+      const ny = dx / length * 6 * px;
+      ctx.beginPath();
+      for (const end of [target.from, target.to]) {
+        ctx.moveTo(end.x - nx, end.y - ny);
+        ctx.lineTo(end.x + nx, end.y + ny);
+      }
+      ctx.stroke();
+      const [sx, sy] = toScreen((target.from.x + target.to.x) / 2, (target.from.y + target.to.y) / 2, size);
+      pill(ctx, size, `${lengthText(target.distance)}, pad edge to pad edge`, sx + 8, sy + 6, COLORS.measure, placed);
+    }
+  }
+
+  function drawSelection(ctx, size, px) {
+    const item = view.selected;
+    if (!item) return;
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 2 * px;
+    if (item.box) {
+      const grow = 6 * px;
+      ctx.strokeRect(item.box.minx - grow, item.box.miny - grow, item.box.maxx - item.box.minx + 2 * grow, item.box.maxy - item.box.miny + 2 * grow);
+    } else if (item.at) {
+      ring(ctx, item.at.x, item.at.y, 18 * px, "#ffffff", px);
+    }
+    if (item.path) {
+      ctx.lineWidth = 2.5 * px;
+      ctx.stroke(item.path);
+    }
+  }
+
+  // ---------- gestures: pan, zoom, pinch ----------
+
+  const gesture = { timer: null };
+  let drawn = null;  // the view the bitmaps were drawn at: {cx, cy, scale, side}
+
+  /** During a drag, pinch or wheel the last bitmaps are moved and scaled to the new view
+   *  (a CSS transform); the full redraw follows after 120 ms at rest. */
+  function previewGesture() {
+    view.userMoved = true;
+    const size = canvasSize();
+    if (!size || !drawn || drawn.side !== view.side) {
+      scheduleDraw(true);
+      return;
+    }
+    const flip = view.side === "bottom" ? -1 : 1;
+    const k = view.scale / drawn.scale;
+    const tx = size.width / 2 * (1 - k) + (drawn.cx - view.cx) * view.scale * flip;
+    const ty = size.height / 2 * (1 - k) - (drawn.cy - view.cy) * view.scale;
+    const transform = `translate(${tx}px, ${ty}px) scale(${k})`;
+    ui.base.style.transform = transform;
+    ui.over.style.transform = transform;
+    clearTimeout(gesture.timer);
+    gesture.timer = setTimeout(() => scheduleDraw(true), 120);
+  }
+
+  function resetGesture() {
+    drawn = { cx: view.cx, cy: view.cy, scale: view.scale, side: view.side };
+    if (ui.base) {
+      ui.base.style.transform = "";
+      ui.over.style.transform = "";
+    }
+  }
+
+  const pointers = new Map();
+  let press = null;
+
+  function onPointerDown(event) {
+    if (event.button !== undefined && event.button !== 0) return;
+    ui.board.focus({ preventScroll: true });
+    ui.over.setPointerCapture(event.pointerId);
+    pointers.set(event.pointerId, { x: event.offsetX, y: event.offsetY });
+    if (pointers.size === 1) press = { x: event.offsetX, y: event.offsetY, moved: false, cx: view.cx, cy: view.cy };
+    else press = null;
+  }
+
+  function onPointerMove(event) {
+    const size = canvasSize();
+    if (size && geo !== undefined && view.scale) {
+      const [x, y] = toBoard(event.offsetX, event.offsetY, size);
+      updateReadout(x, y);
+    }
+    if (!pointers.has(event.pointerId)) return;
+    const before = pointers.get(event.pointerId);
+    pointers.set(event.pointerId, { x: event.offsetX, y: event.offsetY });
+    if (pointers.size === 2) {
+      const [a, b] = [...pointers.values()];
+      const others = [...pointers.entries()].find(([id]) => id !== event.pointerId);
+      const other = others ? others[1] : a;
+      const old = Math.hypot(before.x - other.x, before.y - other.y) || 1;
+      const now = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+      zoomAtQuiet(now / old, (a.x + b.x) / 2, (a.y + b.y) / 2);
+      previewGesture();
+      updateZoomLabel();
+      return;
+    }
+    if (!press) return;
+    const dx = event.offsetX - press.x;
+    const dy = event.offsetY - press.y;
+    if (!press.moved && Math.hypot(dx, dy) < 3) return;
+    press.moved = true;
+    ui.board.classList.add("dragging");
+    const flip = view.side === "bottom" ? -1 : 1;
+    view.cx = press.cx - dx / view.scale * flip;
+    view.cy = press.cy + dy / view.scale;
+    previewGesture();
+  }
+
+  function onPointerUp(event) {
+    const was = press;
+    pointers.delete(event.pointerId);
+    ui.board.classList.remove("dragging");
+    if (pointers.size === 0) press = null;
+    if (was && !was.moved && event.type === "pointerup") clickAt(event.offsetX, event.offsetY);
+    if (was && was.moved) scheduleDraw(true);
+  }
+
+  /** Zoom in about the cursor. The double-click's second click does not step the click
+   *  cycle on: the first click's selection is put back. */
+  function onDoubleClick(event) {
+    if (typeof view.cycleBefore === "number") {
+      view.cycleIndex = view.cycleBefore;
+      view.cycleBefore = null;
+      const item = view.cycle[view.cycleIndex];
+      if (item) select(selectionOf(item));
+    }
+    zoomAt(2, event.offsetX, event.offsetY);
+  }
+
+  function onWheel(event) {
+    const zoomKey = event.ctrlKey || event.metaKey;
+    const focused = document.activeElement === ui.board;
+    const fullscreen = Shell.context().displayMode === "fullscreen";
+    if (!zoomKey && !focused && !fullscreen) {
+      // A plain wheel scrolls the conversation: say once how to zoom.
+      if (!view.wheelHint) {
+        view.wheelHint = true;
+        ui.hint.textContent = "Ctrl + wheel to zoom";
+        ui.hint.hidden = false;
+        setTimeout(() => { ui.hint.hidden = true; }, 2500);
+      }
+      return;
+    }
+    event.preventDefault();
+    const factor = Math.exp(-clamp(event.deltaY, -120, 120) / 300);
+    if (!canvasSize()) return;
+    // The last bitmaps are scaled about the cursor, then redrawn at rest.
+    zoomAtQuiet(factor, event.offsetX, event.offsetY);
+    previewGesture();
+    updateZoomLabel();
+  }
+
+  function zoomAtQuiet(factor, sx, sy) {
+    const size = canvasSize();
+    if (!size || !view.scale) return;
+    const [bx, by] = toBoard(sx, sy, size);
+    const scale = clamp(view.scale * factor, view.fitScale * 0.5, 20);
+    const applied = scale / view.scale;
+    view.scale = scale;
+    view.cx = bx - (bx - view.cx) / applied;
+    view.cy = by - (by - view.cy) / applied;
+  }
+
+  function onKey(event) {
+    if (event.target !== ui.board) return;
+    const step = event.shiftKey ? 200 : 60;
+    const keys = {
+      ArrowLeft: () => pan(step, 0), ArrowRight: () => pan(-step, 0), ArrowUp: () => pan(0, step), ArrowDown: () => pan(0, -step),
+      "+": () => zoomAt(1.25), "=": () => zoomAt(1.25), "-": () => zoomAt(0.8), "_": () => zoomAt(0.8),
+      "0": fitBoard, h: fitHighlight, H: fitHighlight, f: () => setSide(view.side === "top" ? "bottom" : "top"),
+      F: () => setSide(view.side === "top" ? "bottom" : "top"), l: openLayers, L: openLayers,
+      n: () => stepTarget(1), N: () => stepTarget(1), p: () => stepTarget(-1), P: () => stepTarget(-1),
+      Enter: () => { if (view.selected) openDetails(); else stepTarget(1); },
+    };
+    if (event.key === "Escape") {
+      if (view.selected) {
+        event.preventDefault();
+        select(null);
+      }
+      return;
+    }
+    const action = keys[event.key];
+    if (!action || event.ctrlKey || event.metaKey || event.altKey) return;
+    event.preventDefault();
+    action();
+  }
+
+  function openLayers() {
+    if (ui.layersBox) {
+      view.layersUser = true;
+      view.layersSet = true;
+      ui.layersBox.open = true;
+      const first = ui.layersBox.querySelector("input");
+      if (first) first.focus();
+    }
+  }
+
+  function setSide(side) {
+    view.side = side;
+    if (ui.sideSwitch) ui.sideSwitch.set(side);
+    scheduleDraw(true);
+    updateBoardLabel();
+    Shell.announce(side === "bottom" ? "Viewed from the bottom, mirrored" : "Viewed from the top");
+  }
+
+  // ---------- hit test ----------
+
+  const CELL = 100;  // mil
+
+  /** A uniform grid of the decoded objects on visible layers (built when needed). */
+  function buildGrid() {
+    const started = performance.now();
+    const grid = new Map();
+    const add = (minx, miny, maxx, maxy, item) => {
+      for (let gx = Math.floor(minx / CELL); gx <= Math.floor(maxx / CELL); gx += 1) {
+        for (let gy = Math.floor(miny / CELL); gy <= Math.floor(maxy / CELL); gy += 1) {
+          const key = gx * 1000003 + gy;
+          let list = grid.get(key);
+          if (!list) grid.set(key, list = []);
+          list.push(item);
+        }
+      }
+    };
+    for (const [layer, list] of geo.pads) {
+      if (layer === MULTI ? !view.other.has("multi") : !layerVisible(layer)) continue;
+      for (const pad of list) {
+        const stack = geo.stacks[pad.stack];
+        const r = stack ? Math.max(stack.w, stack.h) / 2 : 5;
+        add(pad.x - r, pad.y - r, pad.x + r, pad.y + r, { kind: "pad", layer, pad, r });
+      }
+    }
+    for (const via of geo.vias) {
+      if (!viaVisible(via)) continue;
+      const type = geo.viatypes[via.type];
+      const r = type ? type.d / 2 : 5;
+      add(via.x - r, via.y - r, via.x + r, via.y + r, { kind: "via", via, r });
+    }
+    for (const [layer, list] of geo.tracks) {
+      if (!layerVisible(layer)) continue;
+      for (const track of list) {
+        const pts = track.pts;
+        for (let i = 2; i < pts.length; i += 2) {
+          add(Math.min(pts[i - 2], pts[i]) - track.w / 2, Math.min(pts[i - 1], pts[i + 1]) - track.w / 2,
+              Math.max(pts[i - 2], pts[i]) + track.w / 2, Math.max(pts[i - 1], pts[i + 1]) + track.w / 2,
+              { kind: "track", layer, track, i });
+        }
+      }
+    }
+    for (const [layer, list] of geo.arcs) {
+      if (!layerVisible(layer)) continue;
+      for (const arc of list) add(arc.cx - arc.r - arc.w, arc.cy - arc.r - arc.w, arc.cx + arc.r + arc.w, arc.cy + arc.r + arc.w, { kind: "arc", layer, arc });
+    }
+    const areaBox = (pts) => {
+      let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+      for (let i = 0; i < pts.length; i += 2) {
+        minx = Math.min(minx, pts[i]); maxx = Math.max(maxx, pts[i]);
+        miny = Math.min(miny, pts[i + 1]); maxy = Math.max(maxy, pts[i + 1]);
+      }
+      return [minx, miny, maxx, maxy];
+    };
+    for (const [layer, list] of geo.areas) {
+      if (!layerVisible(layer)) continue;
+      for (const area of list) add(...areaBox(area.rings[0]), { kind: "area", layer, area });
+    }
+    for (const [layer, list] of geo.pours) {
+      if (!layerVisible(layer) || !view.other.has("pours")) continue;
+      for (const pour of list) add(...areaBox(pour.pts), { kind: "pour", layer, pour });
+    }
+    for (const part of geo.parts) {
+      if (!part || part.side === 2) continue;
+      add(part.minx, part.miny, part.maxx, part.maxy, { kind: "part", part });
+    }
+    geo.grid = grid;
+    view.lastGridMs = performance.now() - started;
+  }
+
+  function insideRings(x, y, rings) {
+    let inside = false;
+    for (const pts of rings) {
+      for (let i = 0, j = pts.length - 2; i < pts.length; j = i, i += 2) {
+        const xi = pts[i], yi = pts[i + 1], xj = pts[j], yj = pts[j + 1];
+        if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+      }
+    }
+    return inside;
+  }
+
+  function segmentDistance(px_, py_, x1, y1, x2, y2) {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const t = dx || dy ? clamp(((px_ - x1) * dx + (py_ - y1) * dy) / (dx * dx + dy * dy), 0, 1) : 0;
+    return Math.hypot(px_ - (x1 + t * dx), py_ - (y1 + t * dy));
+  }
+
+  const PRIORITY = { pad: 0, via: 1, track: 2, arc: 2, area: 3, pour: 3, part: 4 };
+
+  /** The objects under a point, nearest kind first (pad, via, track or arc, area or pour,
+   *  part box), within 3 px. */
+  function hitTest(x, y) {
+    if (!geo) return [];
+    if (!geo.grid) buildGrid();
+    const tolerance = 3 / view.scale;
+    const seen = new Set();
+    const hits = [];
+    for (let gx = Math.floor((x - tolerance) / CELL); gx <= Math.floor((x + tolerance) / CELL); gx += 1) {
+      for (let gy = Math.floor((y - tolerance) / CELL); gy <= Math.floor((y + tolerance) / CELL); gy += 1) {
+        for (const item of geo.grid.get(gx * 1000003 + gy) || []) {
+          if (seen.has(item)) continue;
+          seen.add(item);
+          let hit = false;
+          if (item.kind === "pad") {
+            hit = padContains(geo.stacks[item.pad.stack], x - item.pad.x, y - item.pad.y, tolerance);
+          } else if (item.kind === "via") {
+            hit = Math.hypot(x - item.via.x, y - item.via.y) <= item.r + tolerance;
+          } else if (item.kind === "track") {
+            const pts = item.track.pts;
+            hit = segmentDistance(x, y, pts[item.i - 2], pts[item.i - 1], pts[item.i], pts[item.i + 1]) <= item.track.w / 2 + tolerance;
+          } else if (item.kind === "arc") {
+            const arc = item.arc;
+            const distance = Math.abs(Math.hypot(x - arc.cx, y - arc.cy) - arc.r);
+            let angle = Math.atan2(y - arc.cy, x - arc.cx) * 180 / Math.PI - arc.a0;
+            angle = ((angle % 360) + 360) % 360;
+            hit = distance <= arc.w / 2 + tolerance && angle <= arc.sweep + 1e-6;
+          } else if (item.kind === "area") {
+            hit = insideRings(x, y, item.area.rings);
+          } else if (item.kind === "pour") {
+            hit = insideRings(x, y, [item.pour.pts]);
+          } else if (item.kind === "part") {
+            const part = item.part;
+            hit = x >= part.minx - tolerance && x <= part.maxx + tolerance && y >= part.miny - tolerance && y <= part.maxy + tolerance;
+          }
+          if (hit) hits.push(item);
+        }
+      }
+    }
+    const merged = [];
+    const keys = new Set();
+    for (const item of hits) {
+      const key = hitKey(item);
+      if (keys.has(key)) continue;
+      keys.add(key);
+      merged.push(item);
+    }
+    // The nearest kind first; within a kind, the object whose centre is nearest (a fine-
+    // pitch pad before the neighbour whose copper the click only grazes).
+    const centre = (item) => {
+      const at = item.pad || item.via || (item.part ? { x: (item.part.minx + item.part.maxx) / 2, y: (item.part.miny + item.part.maxy) / 2 } : null);
+      return at ? Math.hypot(x - at.x, y - at.y) : 0;
+    };
+    return merged.sort((a, b) => PRIORITY[a.kind] - PRIORITY[b.kind] || centre(a) - centre(b));
+  }
+
+  /** The object a hit is on (a track's segments are one object). */
+  function hitKey(item) {
+    return item.track || item.pad || item.via || item.arc || item.area || item.pour || item.part || item;
+  }
+
+  /** Whether a point (dx, dy from the pad's centre, in mil) lies on a pad stack's copper,
+   *  within tolerance: its shape (round or obround, rectangle, rounded rectangle,
+   *  octagon) turned by its rotation. */
+  function padContains(stack, dx, dy, tolerance) {
+    if (!stack) return Math.hypot(dx, dy) <= 5 + tolerance;
+    const angle = -(stack.rot || 0) * Math.PI / 180;
+    const x = Math.abs(dx * Math.cos(angle) - dy * Math.sin(angle));
+    const y = Math.abs(dx * Math.sin(angle) + dy * Math.cos(angle));
+    const w = stack.w / 2;
+    const h = stack.h / 2;
+    if (stack.shape === 2) return x <= w + tolerance && y <= h + tolerance;
+    if (stack.shape === 3) {
+      const c = Math.min(stack.w, stack.h) / 4;
+      return x <= w + tolerance && y <= h + tolerance && x + y <= w + h - c + tolerance * Math.SQRT2;
+    }
+    // Round, obround and rounded rectangles: a rectangle shrunk by the corner radius,
+    // grown again by it (round and obround pads have half the short side as radius).
+    const r = stack.shape === 9 ? Math.max(0, Math.min(stack.corner || 0, w, h)) : Math.min(w, h);
+    const ox = Math.max(0, x - (w - r));
+    const oy = Math.max(0, y - (h - r));
+    return Math.hypot(ox, oy) <= r + tolerance;
+  }
+
+  /** Forget the click cycle (the view, the side or the shown layers changed). */
+  function resetCycle() {
+    view.cycle = [];
+    view.cycleAt = null;
+    view.cycleIndex = 0;
+  }
+
+  function clickAt(sx, sy) {
+    const size = canvasSize();
+    if (!size || !view.scale) return;
+    const [x, y] = toBoard(sx, sy, size);
+    const started = performance.now();
+    const hits = hitTest(x, y);
+    view.lastHitMs = performance.now() - started;
+    // Repeated clicks on the same spot cycle through the objects there: the same screen
+    // spot, under the same view (zoom, pan, side), finding the same objects.
+    const where = `${view.cx}|${view.cy}|${view.scale}|${view.side}`;
+    const same = view.cycleAt && view.cycleAt.where === where &&
+      Math.hypot(view.cycleAt.sx - sx, view.cycleAt.sy - sy) <= 3 &&
+      view.cycle.length === hits.length && view.cycle.every((item, index) => hitKey(item) === hitKey(hits[index]));
+    // A double-click's second click puts back the first's selection (onDoubleClick).
+    view.cycleBefore = same ? view.cycleIndex : null;
+    view.cycle = hits;
+    view.cycleIndex = same ? (view.cycleIndex + 1) % Math.max(hits.length, 1) : 0;
+    view.cycleAt = { sx, sy, where };
+    const item = view.cycle[view.cycleIndex];
+    if (item) select(selectionOf(item));
+    else if (geo && insideBoard(x, y)) select({ kind: "board", at: { x, y }, name: "the board" });
+    else select(null);
+  }
+
+  function insideBoard(x, y) {
+    if (geo && geo.outline) return insideRings(x, y, [geo.outline]);
+    const extents = boardBox();
+    return extents && x >= extents.minx && x <= extents.maxx && y >= extents.miny && y <= extents.maxy;
+  }
+
+  /** A selection from a hit: what it is, its name, box and path for the outline. */
+  function selectionOf(item) {
+    if (item.kind === "pad") {
+      const pad = item.pad;
+      const stack = geo.stacks[pad.stack];
+      const path = new Path2D();
+      path.addPath(stackPath(pad.stack, false), new DOMMatrix([1, 0, 0, 1, pad.x, pad.y]));
+      const part = geo.parts[pad.part];
+      return { kind: "pad", name: `${part ? part.name : "?"}-${pad.pin}`, pad, layer: item.layer, stack, path, at: { x: pad.x, y: pad.y } };
+    }
+    if (item.kind === "via") {
+      return { kind: "via", name: "Via", via: item.via, at: { x: item.via.x, y: item.via.y } };
+    }
+    if (item.kind === "track") {
+      const path = new Path2D();
+      polyPath(path, item.track.pts);
+      return { kind: "track", name: "Track", track: item.track, layer: item.layer, path, at: { x: item.track.pts[item.i], y: item.track.pts[item.i + 1] } };
+    }
+    if (item.kind === "arc") {
+      const path = new Path2D();
+      arcPath(path, item.arc);
+      return { kind: "arc", name: "Arc", arc: item.arc, layer: item.layer, path, at: { x: item.arc.cx, y: item.arc.cy } };
+    }
+    if (item.kind === "area" || item.kind === "pour") {
+      const path = new Path2D();
+      for (const pts of item.kind === "area" ? item.area.rings : [item.pour.pts]) ringPath(path, pts);
+      return { kind: item.kind, name: item.kind === "area" ? "Copper area" : "Pour", area: item.area, pour: item.pour, layer: item.layer, path };
+    }
+    const part = item.part;
+    return { kind: "part", name: part.name, part, box: { minx: part.minx, miny: part.miny, maxx: part.maxx, maxy: part.maxy } };
+  }
+
+  // ---------- selection, targets, details ----------
+
+  function select(item) {
+    view.selected = item;
+    view.asked = [];
+    if (!item) view.solo = false;
+    scheduleDraw(false);
+    renderPane();
+    if (item) Shell.announce(`Selected ${item.kind} ${item.name || ""}`.trim());
+  }
+
+  function openDetails() {
+    if (!view.selected) return;
+    if (compactHost()) {
+      view.solo = true;
+      renderLayout();
+      renderPane();  // its Close reads Back
+    }
+    const heading = ui.pane && ui.pane.querySelector("h2");
+    if (heading) {
+      heading.setAttribute("tabindex", "-1");
+      heading.focus();
+    }
+  }
+
+  function closeDetails() {
+    const wasIn = ui.pane && ui.pane.contains(document.activeElement);
+    view.solo = false;
+    select(null);
+    renderLayout();
+    if (wasIn && ui.board) ui.board.focus();
+  }
+
+  /** Zoom to a text target (net, part, pad, mark, measure), select it, announce. */
+  function goTo(target) {
+    let targetBox = target.box || null;
+    if (target.kind === "measure" && target.from && target.to) {
+      targetBox = { minx: Math.min(target.from.x, target.to.x), miny: Math.min(target.from.y, target.to.y),
+                    maxx: Math.max(target.from.x, target.to.x), maxy: Math.max(target.from.y, target.to.y) };
+    } else if (!targetBox && target.at) {
+      targetBox = { minx: target.at.x - 40, miny: target.at.y - 40, maxx: target.at.x + 40, maxy: target.at.y + 40 };
+    }
+    if (targetBox) {
+      const grow = Math.max(targetBox.maxx - targetBox.minx, targetBox.maxy - targetBox.miny) * 0.3 + 30;
+      fitBox({ minx: targetBox.minx - grow, miny: targetBox.miny - grow, maxx: targetBox.maxx + grow, maxy: targetBox.maxy + grow });
+    }
+    const pad = target.kind === "pad" ? findPad(target.name, target.at) : null;
+    select({ ...target, box: targetBox && target.kind !== "mark" && target.kind !== "pad" ? targetBox : null,
+             at: target.at || null, path: pad ? selectionOf({ kind: "pad", pad: pad.pad, layer: pad.layer }).path : null });
+    Shell.announce(`${target.kind} ${target.name}${target.row && target.row.where ? `, ${target.row.where}` : ""}`);
+  }
+
+  function stepTarget(direction) {
+    const list = view.targets.filter((target) => target.kind !== "notfound");
+    if (!list.length) return;
+    view.stepAt = (view.stepAt + direction + list.length) % list.length;
+    goTo(list[view.stepAt]);
+  }
+
+  function highlightBox() {
+    let out = null;
+    const take = (b) => {
+      if (!b) return;
+      out = out ? { minx: Math.min(out.minx, b.minx), miny: Math.min(out.miny, b.miny), maxx: Math.max(out.maxx, b.maxx), maxy: Math.max(out.maxy, b.maxy) } : { ...b };
+    };
+    if (!view.cleared) {
+      for (const target of view.targets) {
+        take(target.box);
+        if (target.at) take({ minx: target.at.x, miny: target.at.y, maxx: target.at.x, maxy: target.at.y });
+        if (target.from) take({ minx: target.from.x, miny: target.from.y, maxx: target.from.x, maxy: target.from.y });
+        if (target.to) take({ minx: target.to.x, miny: target.to.y, maxx: target.to.x, maxy: target.to.y });
+      }
+    }
+    if (geo) {
+      for (const index of view.local.parts) {
+        const part = geo.parts[index];
+        if (part) take({ minx: part.minx, miny: part.miny, maxx: part.maxx, maxy: part.maxy });
+      }
+      for (const id of view.local.nets) take(netExtents(id));
+    }
+    if (!out) return null;
+    const grow = Math.max((out.maxx - out.minx) * 0.075, 50);
+    const growY = Math.max((out.maxy - out.miny) * 0.075, 50);
+    return { minx: out.minx - grow, miny: out.miny - growY, maxx: out.maxx + grow, maxy: out.maxy + growY };
+  }
+
+  /** A net's extents in the geometry read so far (its copper on every layer, and vias). */
+  function netExtents(id) {
+    if (!geo) return null;
+    let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+    const take = (x0, y0, x1, y1) => {
+      minx = Math.min(minx, x0); miny = Math.min(miny, y0); maxx = Math.max(maxx, x1); maxy = Math.max(maxy, y1);
+    };
+    const takeRing = (pts) => {
+      for (let i = 0; i < pts.length; i += 2) take(pts[i], pts[i + 1], pts[i], pts[i + 1]);
+    };
+    for (const layerMap of geo.byNet.values()) {
+      const own = layerMap.get(id);
+      if (!own) continue;
+      for (const track of [...own.tracks, ...own.pouredTracks]) takeRing(track.pts);
+      for (const arc of [...own.arcs, ...own.pouredArcs]) take(arc.cx - arc.r, arc.cy - arc.r, arc.cx + arc.r, arc.cy + arc.r);
+      for (const area of [...own.areas, ...own.pouredAreas]) takeRing(area.rings[0]);
+      for (const pour of own.pours) takeRing(pour.pts);
+      for (const pad of own.pads) {
+        const stack = geo.stacks[pad.stack];
+        const r = stack ? Math.max(stack.w, stack.h) / 2 : 5;
+        take(pad.x - r, pad.y - r, pad.x + r, pad.y + r);
+      }
+    }
+    for (const via of geo.vias) if (via.net === id) take(via.x, via.y, via.x, via.y);
+    return minx <= maxx ? { minx, miny, maxx, maxy } : null;
+  }
+
+  /** A short message of the view's own (find box, Reload, full screen), shown with the
+   *  notices until dismissed or replaced by the next of its kind. */
+  function message(key, kind, text) {
+    if (!view.messages) view.messages = new Map();
+    if (text) view.messages.set(key, { kind, text });
+    else view.messages.delete(key);
+    renderNotices();
+  }
+
+  /** The find box: a net or part highlighted in the view (no call), zoomed to. */
+  function find(text) {
+    const query = String(text || "").trim();
+    if (!query) return;
+    if (!geo) {
+      message("find", "info", canCall() && !view.closed
+        ? `The find box needs the board's geometry, which is still being read: try ${query} again in a moment.`
+        : `The find box needs the board's geometry, which this view could not read: ask Claude where ${query} is.`);
+      return;
+    }
+    const lower = query.toLowerCase();
+    let netId = geo.netIndex.get(query);
+    if (netId === undefined) netId = geo.nets.findIndex((name) => name && name.toLowerCase() === lower);
+    let starting = [];
+    if (netId < 0) {
+      starting = geo.nets.map((name, id) => [name, id]).filter(([name]) => name && name.toLowerCase().startsWith(lower));
+      if (starting.length === 1) netId = starting[0][1];
+    }
+    // The view's own highlight adds to what is shown; the text's stays as Clear left it.
+    const parts = partsNamed(query).filter((index) => geo.parts[index]);
+    if (parts.length) {
+      for (const index of parts) view.local.parts.add(index);
+      const part = geo.parts[parts[0]];
+      const others = parts.length > 1 ? ` (${plural(parts.length, "instance")})` : "";
+      message("find", "info", `Part ${part.name}${others} highlighted in the view.`);
+      goTo({ kind: "part", name: part.name, box: { minx: part.minx, miny: part.miny, maxx: part.maxx, maxy: part.maxy }, row: { where: "highlighted in the view" } });
+    } else if (netId >= 0) {
+      view.local.nets.add(netId);
+      const extents = netExtents(netId);
+      message("find", "info", `Net ${geo.nets[netId]} highlighted in the view${extents ? "" : " (no copper of it in the pages read)"}.`);
+      if (extents) {
+        const grow = Math.max(extents.maxx - extents.minx, extents.maxy - extents.miny) * 0.15 + 40;
+        fitBox({ minx: extents.minx - grow, miny: extents.miny - grow, maxx: extents.maxx + grow, maxy: extents.maxy + grow });
+      }
+      Shell.announce(`Net ${geo.nets[netId]} highlighted in the view`);
+    } else if (starting.length > 1) {
+      message("find", "info", `${plural(starting.length, "net")} start with ${query}: type more of the name (${starting.slice(0, 5).map(([name]) => name).join(", ")}${starting.length > 5 ? ", …" : ""}).`);
+    } else {
+      message("find", "info", `No net or part named ${query} on this board (the find box looks in the geometry read so far).`);
+    }
+    scheduleDraw(false);
+    renderObjects();
+  }
+
+  function clearHighlight() {
+    view.cleared = true;
+    view.local = { nets: new Set(), parts: new Set() };
+    scheduleDraw(false);
+    Shell.announce("Highlight cleared");
+    if (view.messages && view.messages.has("find")) message("find", null);
+    renderObjects();
+  }
+
+  // ---------- details pane ----------
+
+  function renderPane() {
+    if (ui.pane && view.data) Shell.keepFocus(ui.pane, drawPane, () => ui.board);
+  }
+
+  /** The geometry's part a selection is of (a part, or a pad's part), else null. */
+  function selectedPart(item) {
+    if (!geo) return null;
+    if (item.part && typeof item.part.index === "number") return item.part;
+    const pad = item.pad || (item.kind === "pad" ? (findPad(item.name, item.at) || {}).pad : null);
+    if (pad && pad.part >= 0) return geo.parts[pad.part] || null;
+    if (item.kind === "part") {
+      const list = item.row ? partsOf(item) : partsNamed(item.name);
+      return list.length ? geo.parts[list[0]] : null;
+    }
+    return null;
+  }
+
+  function serverButtons(item) {
+    const units = view.units;
+    const calls = [];
+    const owner = selectedPart(item);
+    const designator = owner ? owner.name : item.kind === "part" ? item.name
+      : item.kind === "pad" ? item.name.slice(0, item.name.lastIndexOf("-")) : null;
+    let net = null;
+    if (item.kind === "net") net = item.name;
+    else if (geo && item.pad) net = geo.nets[item.pad.net];
+    else if (geo && item.via) net = geo.nets[item.via.net];
+    else if (geo && item.track) net = geo.nets[item.track.net];
+    else if (geo && item.arc) net = geo.nets[item.arc.net];
+    else if (geo && (item.area || item.pour)) net = geo.nets[(item.area || item.pour).net];
+    else if (item.row && typeof item.row.net === "string") net = item.row.net;
+    if (designator) {
+      calls.push(["get_component_placement", { refdes: designator, units }, `Placement of ${designator}`]);
+      // get_component takes the schematic designator (a channel's U3A, not the board's U3).
+      const sch = owner && geo.sch[String(owner.index)];
+      const refdes = (item.row && item.row.sch_refdes) || sch || designator;
+      calls.push(["get_component", { refdes }, `Part ${refdes}`]);
+    }
+    if (net) calls.push(["get_net_pcb", { net, units }, `Net ${net} on the board`]);
+    const at = item.at || (item.box ? { x: (item.box.minx + item.box.maxx) / 2, y: (item.box.miny + item.box.maxy) / 2 } : null);
+    if (at) {
+      const digits = units === "mm" ? 3 : 1;
+      calls.push(["query_pcb_region", { x: round(fromMil(at.x, units), digits), y: round(fromMil(at.y, units), digits), units },
+                  `Around ${pointText(at.x, at.y)}`]);
+    }
+    return calls;
+  }
+
+  function itemFacts(item) {
+    const pairs = [];
+    const where = (x, y) => `${pointText(x, y)} (absolute); ${fromOriginText(x, y)} from the origin`;
+    if (item.kind === "pad" && item.pad && geo) {
+      const stack = item.stack || geo.stacks[item.pad.stack] || {};
+      pairs.push(["Pad", item.name], ["Net", geo.nets[item.pad.net] || "no net"], ["Layer", layerName(item.layer)],
+                 ["Shape", `${SHAPE_NAME[String(stack.shape)] || "pad"} ${lengthText(stack.w)} × ${lengthText(stack.h)}${stack.rot ? `, ${round(stack.rot, 2)}°` : ""}`],
+                 ["Hole", stack.hole > 0 ? `${HOLE_NAME[String(stack.holeShape)] || "round"} ${lengthText(stack.hole)}${stack.slot > 0 ? `, slot ${lengthText(stack.slot)}` : ""}` : "none"],
+                 ["At", where(item.pad.x, item.pad.y)]);
+    } else if (item.kind === "via" && geo) {
+      const type = geo.viatypes[item.via.type] || {};
+      pairs.push(["Net", geo.nets[item.via.net] || "no net"], ["Span", `${layerName(type.from)} to ${layerName(type.to)}`],
+                 ["Diameter", lengthText(type.d || 0)], ["Hole", lengthText(type.hole || 0)], ["At", where(item.via.x, item.via.y)]);
+    } else if (item.kind === "track" && geo) {
+      const pts = item.track.pts;
+      let total = 0;
+      for (let i = 2; i < pts.length; i += 2) total += Math.hypot(pts[i] - pts[i - 2], pts[i + 1] - pts[i - 1]);
+      pairs.push(["Net", geo.nets[item.track.net] || "no net"], ["Layer", layerName(item.layer)], ["Width", lengthText(item.track.w)],
+                 ["Chain length", `${lengthText(total)} (${plural(pts.length / 2 - 1, "segment")} joined end to end)`]);
+    } else if (item.kind === "arc" && geo) {
+      pairs.push(["Net", geo.nets[item.arc.net] || "no net"], ["Layer", layerName(item.layer)], ["Width", lengthText(item.arc.w)],
+                 ["Radius", lengthText(item.arc.r)], ["Sweep", `${round(item.arc.sweep, 2)}°`]);
+    } else if ((item.kind === "area" || item.kind === "pour") && geo) {
+      const object = item.area || item.pour;
+      pairs.push(["Net", geo.nets[object.net] || "no net"], ["Layer", layerName(item.layer)],
+                 ["Kind", item.kind === "area" ? "free copper region or fill" : ["solid pour", "hatched pour", "pour (outline only)"][object.style] || "pour"]);
+    } else if (item.kind === "part" && item.part && geo) {
+      const part = item.part;
+      const pads = [...geo.pads.values()].reduce((sum, list) => sum + list.filter((pad) => pad.part === part.index).length, 0);
+      pairs.push(["Designator", part.name], ["Schematic", geo.sch[String(part.index)]], ["Side", ["top", "bottom", "not placed"][part.side]],
+                 ["Rotation", `${round(part.rot, 2)}°`], ["Pads", String(pads)], ["Not Fitted", geo.dnp.has(part.index) ? `yes, in variant ${geo.variant}` : "no"],
+                 ["At", part.side === 2 ? "not placed" : where(...partAt(part))]);
+    } else if (item.kind === "board") {
+      pairs.push(["At", where(item.at.x, item.at.y)]);
+    } else if (item.row) {
+      const row = item.row;
+      if (item.kind === "net") {
+        pairs.push(["Net", row.net], ["Layers", (row.layers || []).join(", ") || "none routed"],
+                   ["Copper", `${plural(row.pads, "pad")}, ${plural(row.vias, "via")}, ${plural(row.tracks, "track")}, ${plural(row.arcs, "arc")}, ${plural(row.areas, "area")}, ${plural(row.pours, "pour")}`],
+                   ["Parts", `${(row.parts || []).join(", ")}${row.parts_total > (row.parts || []).length ? ` (${row.parts.length} of ${row.parts_total})` : ""}`],
+                   ["Where", row.where]);
+      } else if (item.kind === "part") {
+        const at = point(unitKey(row, "at"));
+        const origin = point(unitKey(row, "from_origin"));
+        pairs.push(["Designator", row.designator], ["Schematic", row.sch_refdes], ["Side", row.side], ["Rotation", row.rotation === null ? null : `${row.rotation}°`],
+                   ["Pads", String(row.pads)], ["Not Fitted", row.dnp ? "yes" : "no"], ["At", at ? pointText(at.x, at.y) + " (absolute)" : "not placed"],
+                   ["From origin", origin ? pointText(origin.x, origin.y) : null], ["Where", row.where]);
+      } else if (item.kind === "pad") {
+        const at = point(unitKey(row, "at"));
+        pairs.push(["Pad", row.pad], ["Net", row.net || "no net"], ["Layer", row.layer], ["At", at ? where(at.x, at.y) : null], ["Where", row.where]);
+      } else if (item.kind === "mark") {
+        const at = point(unitKey(row, "at"));
+        const origin = point(unitKey(row, "from_origin"));
+        pairs.push(["Mark", row.label], ["At", at ? pointText(at.x, at.y) + " (absolute)" : null],
+                   ["From origin", origin ? pointText(origin.x, origin.y) : null], ["Layer", row.layer], ["On the board", row.on_board ? "yes" : "no"],
+                   ["Frame", row.frame_hint], ["Nets near", (row.near && row.near.nets || []).join(", ") || "none"],
+                   ["Parts near", (row.near && row.near.parts || []).join(", ") || "none"], ["Where", row.where]);
+      } else if (item.kind === "measure") {
+        pairs.push(["From", row.from_pad], ["To", row.to_pad], ["Distance", `${lengthText(item.distance)}`], ["Net", row.net], ["Basis", row.basis]);
+      } else if (item.kind === "notfound") {
+        pairs.push(["Asked", row.asked], ["Kind", row.kind], ["Why", row.why], ["Suggestions", (row.suggestions || []).join(", ")], ["From", row.from]);
+      } else if (item.kind === "finding") {
+        pairs.push(["Finding", `${row.finding} of ${row.tool || "an unnamed tool"}`], ["Frame", row.frame],
+                   ["Read", (row.read || []).join(", ") || "nothing"], ["Not placed", (row.ignored || []).join(", ")],
+                   ["Marks", String(row.marks)]);
+      }
+    }
+    return pairs;
+  }
+
+  function answer(tool, args, title) {
+    const entry = details.get(tool, args);
+    const head = el("h3", { text: `${title} (${tool}: ${argsText(args)})` });
+    if (!entry || entry.loading) return [head, el("p", { class: "muted", text: `Asking ${tool}…` })];
+    if (entry.error) {
+      return [head, el("div", { class: "notice error" }, el("span", { class: "grow", text: entry.error }),
+        el("button", { type: "button", class: "btn-link", text: "Retry", on: { click: () => ask(tool, args, title) } }))];
+    }
+    let json;
+    try {
+      json = Shell.resultJson(entry.data);
+    } catch (error) {
+      return [head, el("div", { class: "notice warning", text: error.message })];
+    }
+    if (json.error) return [head, el("div", { class: "notice warning", text: json.message || json.error })];
+    return [head, summary(tool, json), el("details", { class: "more" }, el("summary", { text: "The whole answer" }),
+      el("pre", { class: "text", text: JSON.stringify(json, null, 1).slice(0, 6000) }))];
+  }
+
+  function summary(tool, json) {
+    const units = unitsOf(json.units ? json : view.data);
+    if (tool === "get_component_placement") {
+      return el("ul", { class: "small-list" }, (json.instances || []).map((instance) => el("li", {
+        text: `${instance.refdes}${instance.sch_refdes && instance.sch_refdes !== instance.refdes ? ` (${instance.sch_refdes})` : ""}: ${instance.side}, ${instance.rotation}°, ${plural((instance.pins || []).length, "pin")}${instance.dnp ? ", Not Fitted" : ""}; nearest ${(instance.nearest_components || []).slice(0, 4).map((item) => item.refdes).join(", ")}` })));
+    }
+    if (tool === "get_component") {
+      return Shell.facts([["Description", json.description], ["Value", json.value], ["MPN", json.mpn], ["Sheet", json.sheet],
+                          ["Fitted", json.dnp ? "no (DNP in the active variant)" : "yes"], ["Pins", json.pins ? String(Object.keys(json.pins).length) : null]]);
+    }
+    if (tool === "get_net_pcb") {
+      return Shell.facts([["Layers", (json.layers || []).map((layer) => layer.layer).join(", ")], ["Pads", json.pad_count === undefined ? null : String(json.pad_count)],
+                          ["Vias", json.via_count === undefined ? null : String(json.via_count)], ["Pours", json.pour_count === undefined ? null : String(json.pour_count)],
+                          ["Classes", (json.net_classes || []).join(", ")], ["Matches", json.match_count ? String(json.match_count) : null]]);
+    }
+    if (tool === "query_pcb_region") {
+      return Shell.facts([["Nets", (json.nets || []).map((item) => item.net).join(", ") || "none"],
+                          ["Parts", (json.components || []).map((item) => item.refdes).join(", ") || "none"],
+                          ["Pours", (json.pours || []).map((item) => `${item.net || "no net"} on ${item.layer}`).join(", ") || "none"],
+                          ["Radius", `50 mil (${units === "mm" ? "1.27 mm" : "the default"})`]]);
+    }
+    return el("p", { class: "muted", text: "Answered." });
+  }
+
+  function drawPane() {
+    clear(ui.pane);
+    const item = view.selected;
+    ui.pane.classList.toggle("idle", !item);
+    if (!item) {
+      Shell.append(ui.pane, [
+        el("h2", { text: "Select an object" }),
+        el("p", { class: "help", text: `Coordinates: ${view.data.frame}.` }),
+        el("p", { class: "help", text: "Click the board (or a row of the Objects or Parts tab) for a pad, via, track, arc, area, pour or part: its net, layer, size and position. Repeated clicks on one spot step through what lies there." }),
+        el("p", { class: "help", text: KEY_HELP }),
+        el("p", { class: "help", text: view.closed ? "The view was closed: it asks the server nothing more." : canCall() ? "Its buttons ask get_component_placement, get_component, get_net_pcb and query_pcb_region." : "This host does not let the view call tools: ask Claude in the conversation for details." }),
+      ]);
+      return;
+    }
+    const calls = serverButtons(item);
+    Shell.append(ui.pane, [
+      el("div", { class: "row" }, el("h2", { text: `${item.kind === "notfound" ? "Not found" : item.kind}: ${item.name || ""}` }),
+        el("button", { type: "button", class: "btn", text: view.solo ? "Back" : "Close", on: { click: closeDetails } })),
+      Shell.facts(itemFacts(item), "facts section-gap"),
+      !["notfound", "finding", "measure", "mark", "board"].includes(item.kind) ? el("div", { class: "btn-row section-gap" },
+        netOf(item) !== null ? el("button", { type: "button", class: "btn", text: "Highlight this net", on: { click: () => highlightNet(netOf(item)) } }) : null,
+        partOf(item) !== null ? el("button", { type: "button", class: "btn", text: "Highlight this part", on: { click: () => highlightPart(partOf(item)) } }) : null) : null,
+      calls.length ? [el("h3", { text: "From the server" }), canCall() && !view.closed
+        ? [el("div", { class: "btn-row" }, calls.map(([tool, args, label]) => el("button", { type: "button", class: "btn", text: label,
+            title: `Ask ${tool} (${argsText(args)})`, on: { click: () => ask(tool, args, label) } }))),
+           ...view.asked.map(([tool, args, label]) => answer(tool, args, label))]
+        : [el("p", { class: "muted", text: view.closed
+            ? "The view was closed: it asks the server nothing more. Ask Claude in the conversation for the details."
+            : "This host does not let the view call the server's tools: ask Claude in the conversation for the details." }),
+           ...view.asked.filter(([tool, args]) => { const entry = details.get(tool, args); return entry && entry.data; })
+             .map(([tool, args, label]) => answer(tool, args, label))]] : null,
+    ]);
+  }
+
+  function netOf(item) {
+    if (!geo) return null;
+    const object = item.pad || item.via || item.track || item.arc || item.area || item.pour;
+    if (object && object.net >= 0) return object.net;
+    if (item.kind === "net") {
+      const id = geo.netIndex.get(item.name);
+      return id === undefined ? null : id;
+    }
+    return null;
+  }
+
+  function partOf(item) {
+    const part = selectedPart(item);
+    return part ? part.index : null;
+  }
+
+  function highlightNet(id) {
+    view.local.nets.add(id);
+    scheduleDraw(false);
+    Shell.announce(`Net ${geo.nets[id]} highlighted in the view`);
+    renderObjects();
+  }
+
+  function highlightPart(index) {
+    view.local.parts.add(index);
+    scheduleDraw(false);
+    Shell.announce(`Part ${geo.parts[index].name} highlighted in the view`);
+    renderObjects();
+  }
+
+  // ---------- tables ----------
+
+  function objectRows() {
+    const rows = [];
+    for (const target of view.targets) {
+      const row = target.row;
+      let layers = "";
+      let where = row.where || "";
+      let distance = "";
+      let status = "found";
+      let colour = "";
+      if (target.kind === "net") {
+        layers = (row.layers || []).join(", ");
+        colour = haloName(target.color);
+      }
+      if (target.kind === "part") {
+        layers = row.side;
+        status = row.dnp ? "Not Fitted" : "found";
+      }
+      if (target.kind === "pad") layers = row.layer;
+      if (target.kind === "mark") {
+        layers = row.layer || "";
+        status = row.on_board === false ? (row.frame_hint ? `outside board, ${row.frame_hint}` : "outside board") : "on board";
+      }
+      if (target.kind === "measure") {
+        layers = row.net || "";
+        distance = lengthText(target.distance);
+      }
+      const at = target.at || (target.box ? { x: (target.box.minx + target.box.maxx) / 2, y: (target.box.miny + target.box.maxy) / 2 } : null);
+      if (at) where = `${where}; ${fromOriginText(at.x, at.y)} from origin`;
+      rows.push({ id: rows.length, target, kind: target.kind, name: target.name, layers, where, distance, status, colour, from: row.from });
+    }
+    for (const row of view.data.highlight.findings) {
+      rows.push({ id: rows.length, target: { kind: "finding", name: `Finding ${row.finding}`, row }, kind: "finding",
+                  name: `Finding ${row.finding}${row.tool ? ` (${row.tool})` : ""}`, layers: row.frame,
+                  where: `read ${(row.read || []).join(", ") || "nothing"}${(row.ignored || []).length ? `; not placed: ${row.ignored.join(", ")}` : ""}`,
+                  distance: "", status: plural(row.marks, "mark"), from: "asked" });
+    }
+    for (const row of view.data.highlight.not_found) {
+      rows.push({ id: rows.length, target: { kind: "notfound", name: row.asked, row }, kind: "not found", name: row.asked,
+                  layers: row.kind, where: row.why, distance: "", status: (row.suggestions || []).length ? `not found; try ${row.suggestions.join(", ")}` : "not found", from: row.from || "asked" });
+    }
+    if (geo) {
+      for (const id of view.local.nets) {
+        const extents = netExtents(id);
+        rows.push({ id: rows.length, target: { kind: "net", name: geo.nets[id], box: extents, local: true, row: { where: "highlighted in the view" } },
+                    kind: "net", name: geo.nets[id], layers: "", where: "highlighted in the view", distance: "", status: "found",
+                    colour: haloName(netColor(id)), from: "the view" });
+      }
+      for (const index of view.local.parts) {
+        const part = geo.parts[index];
+        if (!part) continue;
+        rows.push({ id: rows.length, target: { kind: "part", name: part.name, part, box: { minx: part.minx, miny: part.miny, maxx: part.maxx, maxy: part.maxy }, row: { where: "highlighted in the view" } },
+                    kind: "part", name: part.name, layers: ["top", "bottom", "not placed"][part.side], where: `highlighted in the view; ${fromOriginText(...partAt(part))} from origin`,
+                    distance: "", status: geo.dnp.has(part.index) ? "Not Fitted" : "found", colour: "", from: "the view" });
+      }
+    }
+    return rows;
+  }
+
+  const KIND_TOTAL = { net: "nets", part: "parts", pad: "pads", mark: "marks", measure: "measures", finding: "findings",
+                       "not found": "not_found" };
+
+  function renderObjects() {
+    updateObjectsLabel();
+    if (view.tab !== "objects" || !ui.content) return;
+    renderTab();
+  }
+
+  /** The Objects tab's count: the rows it lists. */
+  function updateObjectsLabel() {
+    const tab = ui.tabBar && ui.tabBar.el.querySelectorAll('[role="tab"]')[1];
+    if (tab && view.data) tab.textContent = `Objects (${objectRows().length})`;
+  }
+
+  function objectsTable() {
+    const h = view.data.highlight;
+    return Shell.table({
+      label: "Highlighted objects", rows: objectRows(), rowKey: (row) => row.id,
+      onActivate: (row) => {
+        if (row.target.kind === "notfound" || row.target.kind === "finding") select({ ...row.target });
+        else goTo(row.target);
+        openDetails();
+      },
+      empty: "get_board_view highlighted nothing.",
+      group: {
+        key: (row) => row.kind,
+        label: (key) => key,
+        count: (key, rows) => {
+          const total = h[`${KIND_TOTAL[key]}_total`];
+          // The server's totals are exact: a list it cut short shows "N of M".
+          const text = typeof total === "number" && total > rows.length ? `${rows.length} of ${total}` : String(rows.length);
+          return el("span", { class: "badge", text });
+        },
+        order: (a, b) => Object.keys(KIND_TOTAL).indexOf(a) - Object.keys(KIND_TOTAL).indexOf(b),
+      },
+      columns: [
+        { key: "kind", label: "Kind", hidden: true },
+        { key: "name", label: "Name", cls: "c-name" },
+        { key: "layers", label: "Layers or side", cls: "c-name" },
+        { key: "where", label: `Where (from origin, ${view.units})`, cls: "c-msg" },
+        { key: "distance", label: "Distance" },
+        { key: "status", label: "Status", cls: "c-name" },
+        { key: "colour", label: "Halo", hidden: !view.targets.some((target) => target.kind === "net") && !view.local.nets.size },
+        { key: "from", label: "From", hidden: true },
+      ],
+    });
+  }
+
+  /** A part's position: the text's own (exact) when the text names this part, else the
+   *  geometry's (on the 0.1 mil grid), so a part shows one position everywhere. */
+  function partAt(part) {
+    for (const target of view.targets || []) {
+      if (target.kind === "part" && target.at && partsOf(target).includes(part.index) && partsOf(target).length === 1) {
+        return [target.at.x, target.at.y];
+      }
+    }
+    return [part.x, part.y];
+  }
+
+  function partsTable() {
+    if (!geo) {
+      const why = view.closed ? "The view was closed before the board's geometry arrived."
+        : view.stopReason ? `The board's geometry could not be read: ${view.stopReason.replace(/\.$/, "")}.`
+          : canCall() ? "Reading the board…" : "This host does not let the view read the board's geometry.";
+      return Shell.state("info", "The parts come with the board's geometry", why);
+    }
+    const rows = geo.parts.filter(Boolean).map((part) => ({
+      id: part.index, part, name: part.name, sch: geo.sch[String(part.index)] || "", side: ["top", "bottom", "not placed"][part.side],
+      at: part.side === 2 ? "not placed" : fromOriginText(...partAt(part)), rot: round(part.rot, 2), dnp: geo.dnp.has(part.index) ? "Not Fitted" : "",
+    }));
+    return Shell.table({
+      label: "Parts", rows, rowKey: (row) => row.id,
+      onActivate: (row) => {
+        goTo({ kind: "part", name: row.name, box: { minx: row.part.minx, miny: row.part.miny, maxx: row.part.maxx, maxy: row.part.maxy },
+               row: { where: "" }, at: null });
+        view.selected = selectionOf({ kind: "part", part: row.part });
+        renderPane();
+        openDetails();
+      },
+      group: { key: (row) => row.side, order: (a, b) => ["top", "bottom", "not placed"].indexOf(a) - ["top", "bottom", "not placed"].indexOf(b) },
+      columns: [
+        { key: "name", label: "Designator", cls: "c-name", value: (row) => row.name },
+        { key: "sch", label: "Schematic", hidden: !Object.keys(geo.sch).length },
+        { key: "at", label: `At (from origin, ${view.units})` },
+        { key: "rot", label: "Rotation", numeric: true },
+        { key: "dnp", label: "Fitted" },
+      ],
+      sort: { key: "name", dir: 1 },
+    });
+  }
+
+  // ---------- page ----------
+
+  function heightLimit() {
+    const dims = Shell.context().containerDimensions || {};
+    return Number(dims.height || dims.maxHeight) || 0;
+  }
+
+  /** A host 980 px wide or less (details stacked under the board) too short for both:
+   *  there the details take the board's place. */
+  function compactHost() {
+    const limit = heightLimit();
+    return window.innerWidth <= 980 && limit > 0 && limit < 760;
+  }
+
+  /** Whether the Layers panel opens by itself: on a roomy host with no height limit, or
+   *  a tall one (taller still for many layers), so the board keeps most of the height;
+   *  in full screen by the host's height (the window's when it gives none). */
+  function layersRoomy() {
+    if (!Shell.roomy()) return false;
+    const fullscreen = Shell.context().displayMode === "fullscreen";
+    const limit = heightLimit() || (fullscreen ? window.innerHeight : 0);
+    const layers = view.data ? view.data.copper_layers.length : 0;
+    return limit === 0 || limit >= (layers <= 6 ? 900 : 1300);
+  }
+
+  function renderLayout() {
+    if (!ui.layout) return;
+    ui.layout.classList.toggle("solo", Boolean(view.solo && view.selected));
+    // The details in the board's place: the board's tools are of no use then.
+    app.classList.toggle("solo-details", Boolean(view.solo && view.selected));
+    scheduleDraw(true);
+  }
+
+  function updateBoardLabel() {
+    if (!ui.board || !view.data) return;
+    const h = view.data.highlight;
+    const shown = geo ? geo.layers.filter((layer) => isCopperId(layer.id) && layerVisible(layer.id)).map((layer) => layer.name) : view.data.view.layers_on;
+    ui.board.setAttribute("aria-label", `Board ${view.data.pcb_doc}, viewed from the ${view.side}${view.side === "bottom" ? " (mirrored)" : ""}; ` +
+      `copper shown: ${shown.join(", ") || "none"}; highlighted: ${plural(h.nets_total, "net")}, ${plural(h.parts_total, "part")}, ` +
+      `${plural(h.pads_total, "pad")}, ${plural(h.marks_total, "mark")}, ${plural(h.measures_total, "measure")}.`);
+  }
+
+  /** A dismissible notice that stays dismissed when the notices are drawn again. */
+  function noticeOnce(kind, text) {
+    const dismissed = view.dismissed || (view.dismissed = new Set());
+    if (dismissed.has(text)) return null;
+    const box_ = Shell.notice(kind, text);
+    const button = box_.querySelector("button");
+    if (button) button.addEventListener("click", () => dismissed.add(text));
+    return box_;
+  }
+
+  function renderNotices() {
+    if (!ui.notices || !view.data) return;
+    Shell.keepFocus(ui.notices, () => {
+      clear(ui.notices);
+      const data = view.data;
+      const h = data.highlight;
+      const add = (node) => { if (node) ui.notices.appendChild(node); };
+      const infos = [];
+      if (view.closed) add(Shell.notice("warning", "The view was closed: it sends no more requests, and its server buttons are gone."));
+      if (view.warning) add(noticeOnce("warning", view.warning));
+      for (const [, item] of view.messages || []) add(noticeOnce(item.kind, item.text));
+      if (!canCall()) {
+        add(noticeOnce("info", `This host does not let the view read the board's geometry (${GEOMETRY_TOOL}): shown is where the highlighted objects lie.`));
+      }
+      if (view.changed) {
+        const box_ = el("div", { class: "notice warning", role: "status" },
+          el("span", { class: "grow", text: "The board changed since this answer (saved again, or another board loaded): the pages read so far are drawn." }),
+          canCall() && !view.closed ? el("button", { type: "button", class: "btn-link", text: "Reload", title: `Call get_board_view again (${argsText(view.argsKnown ? view.args : askedArgs()) || "no arguments"})`, on: { click: reload } }) : null);
+        add(box_);
+      } else if (view.stopReason) {
+        const missing = view.readQueue.length;
+        // Before page 1 arrives the page count is not known: say what is shown instead.
+        const what = geo ? `Drawn is what arrived; ${plural(missing, "page")} not read.`
+          : "None of the board's geometry arrived: shown is where the highlighted objects lie, from the text.";
+        const button = canCall() && !view.closed && (geo ? missing && view.sessionBudget && view.sessionBudget.left > 0 : true)
+          ? el("button", { type: "button", class: "btn-link", text: geo && /at most/.test(view.stopReason) ? `Read the remaining ${plural(missing, "page")}` : "Retry", on: { click: retry } }) : null;
+        add(el("div", { class: "notice warning", role: "status" },
+          el("span", { class: "grow", text: `Reading the board stopped: ${view.stopReason.replace(/\.$/, "")}. ${what}` }), button));
+      }
+      // The notes, and on a short host the warnings about the answer too, fold so the
+      // board keeps the height; what asks for an action (Reload, Retry) stays in sight.
+      const foldable = [];
+      const missingRows = h.not_found;
+      if (missingRows.length) {
+        foldable.push(["warning", `Not found (${missingRows.length < h.not_found_total ? `${missingRows.length} of ${h.not_found_total}` : h.not_found_total}): ${missingRows.slice(0, 4).map((row) => `${row.asked} (${row.why}${(row.suggestions || []).length ? `; try ${row.suggestions.slice(0, 3).join(", ")}` : ""})`).join("; ")}` +
+          (h.not_found_total > 4 ? `; ${h.not_found_total - 4} more in Objects` : "") + "."]);
+      }
+      const hints = h.marks.filter((row) => row.frame_hint);
+      if (hints.length) foldable.push(["warning", `${hints.map((row) => `${row.label}: ${row.frame_hint}`).join("; ")}.`]);
+      for (const note of data.notes || []) infos.push(note);
+      // The geometry's own notes beyond the fixed "not drawn" list (the legend has it),
+      // and how the board is paged while pages are still to read.
+      const fixed = new Set(data.view.not_drawn || []);
+      if (geo) {
+        if (geo.paging && geo.plan.some((entry) => !view.loadedPages.has(entry.page))) infos.push(geo.paging);
+        for (const note of geo.notes.filter((item) => !fixed.has(item) && !/embedded board/.test(item))) infos.push(note);
+      }
+      const roomy = Shell.roomy();
+      const warnings = foldable.map(([kind, text]) => noticeOnce(kind, text)).filter(Boolean);
+      if (roomy) warnings.forEach(add);
+      const notes = infos.map((text) => noticeOnce("info", text)).filter(Boolean);
+      const folded = roomy ? notes : [...warnings, ...notes];
+      if (!folded.length) return;
+      if (roomy) {
+        add(el("details", { class: "more notes-box" }, el("summary", { text: `Notes (${folded.length})` }), folded));
+        // Open on a roomy host: the notes are in sight unless the user folds them.
+        ui.notices.lastChild.open = view.notesOpen !== false;
+      } else {
+        const label = [warnings.length ? plural(warnings.length, "warning") : "", notes.length ? plural(notes.length, "note") : ""].filter(Boolean).join(", ");
+        add(el("details", { class: "more notes-box" }, el("summary", { text: label[0].toUpperCase() + label.slice(1) }), folded));
+        ui.notices.lastChild.open = view.notesOpen === true;
+      }
+      ui.notices.lastChild.addEventListener("toggle", (event) => { view.notesOpen = event.target.open; });
+    });
+  }
+
+  function layerRow(layer) {
+    const box_ = el("input", { type: "checkbox", "aria-label": `Show ${layer.name}` });
+    box_.checked = layerVisible(layer.id);
+    box_.dataset.layer = String(layer.id);
+    box_.addEventListener("change", () => setLayer(layer.id, box_.checked));
+    const pouredPages = geo.plan.filter((entry) => !entry.auto && !view.loadedPages.has(entry.page) && entry.chunks.some(([kind, id]) => kind.startsWith("poured_") && id === layer.id));
+    const poured = pouredPages.length;
+    const pouredSize = Math.round(pouredPages.reduce((sum, entry) => sum + entry.chars, 0) / 1000);
+    return el("div", { class: "layer-row" },
+      el("label", {}, box_, el("span", { class: `sw ${swatchClass(layer.id)}` }), el("span", { class: "name", text: layer.name })),
+      el("button", { type: "button", class: "btn-link", text: "Only", title: `Show ${layer.name} only`, on: { click: () => only(layer.id) } }),
+      poured && canCall() && !view.closed ? el("button", { type: "button", class: "btn-link load", text: `Load poured copper (${plural(poured, "page")}, ${pouredSize} kB)`,
+                                          on: { click: () => loadPoured(layer.id) } }) : null);
+  }
+
+  function otherRow(item) {
+    const box_ = el("input", { type: "checkbox", "aria-label": `Show ${item.label}` });
+    box_.checked = view.other.has(item.id);
+    box_.dataset.other = item.id;
+    box_.addEventListener("change", () => {
+      if (box_.checked) view.other.add(item.id);
+      else view.other.delete(item.id);
+      changedLayers();
+    });
+    return el("div", { class: "layer-row" }, el("label", {}, box_, el("span", { class: "name", text: item.label })));
+  }
+
+  function renderLayers() {
+    if (!ui.layersBody || !view.data) return;
+    Shell.keepFocus(ui.layersBody, () => {
+      clear(ui.layersBody);
+      if (!geo) {
+        ui.layersBody.appendChild(el("p", { class: "muted small", text: canCall() ? "The layers come with the board's geometry." : "The layers need the board's geometry, which this host does not let the view read." }));
+        return;
+      }
+      const group = (title, layers) => (layers.length ? el("div", { class: layers.length > 6 ? "many" : null },
+        el("h3", { text: title }), el("div", { class: "rows" }, layers.map(layerRow))) : null);
+      const top = geo.layers.filter((layer) => layer.id === TOP_OVERLAY || layer.id === TOP);
+      const inner = geo.layers.filter((layer) => layer.kind === "inner" || layer.kind === "plane");
+      const bottom = geo.layers.filter((layer) => layer.id === BOTTOM || layer.id === BOTTOM_OVERLAY);
+      const onRequest = geo.plan.filter((entry) => !entry.auto && !view.loadedPages.has(entry.page)).length;
+      Shell.append(ui.layersBody, [
+        el("div", { class: "toolbar" },
+          el("span", { class: "chips-label", text: "Show" }),
+          el("button", { type: "button", class: "btn", text: "Top", on: { click: () => preset("top") } }),
+          el("button", { type: "button", class: "btn", text: "Bottom", on: { click: () => preset("bottom") } }),
+          el("button", { type: "button", class: "btn", text: "Highlighted layers", on: { click: () => preset("highlighted") } }),
+          el("button", { type: "button", class: "btn", text: "All copper", on: { click: () => preset("all") } }),
+          onRequest && canCall() && !view.closed ? el("button", { type: "button", class: "btn", text: `Load all poured copper (${plural(onRequest, "page")})`, on: { click: () => loadPoured(null) } }) : null),
+        el("p", { class: "muted small", text: `Poured copper: ${view.data.view.poured_copper}.` }),
+        el("div", { class: "layer-groups" },
+          group("Top side", top), group("Inner", inner), group("Bottom side", bottom),
+          el("div", {}, el("h3", { text: "Other" }), OTHER.map(otherRow),
+            el("div", { class: "layer-row" }, el("label", {}, (() => {
+              const dim = el("input", { type: "checkbox", "aria-label": "Dim the others" });
+              dim.checked = view.dim;
+              dim.addEventListener("change", () => { view.dim = dim.checked; scheduleDraw(false); });
+              return dim;
+            })(), el("span", { class: "name", text: "Dim others" }))))),
+      ]);
+    });
+  }
+
+  function syncLayerBoxes() {
+    if (!ui.layersBody) return;
+    for (const input of ui.layersBody.querySelectorAll("input[data-layer]")) input.checked = layerVisible(Number(input.dataset.layer));
+    for (const input of ui.layersBody.querySelectorAll("input[data-other]")) input.checked = view.other.has(input.dataset.other);
+  }
+
+  function legend() {
+    // Inner layers take the colours in turn, top down (one swatch per inner layer).
+    const inner = Math.max(0, (view.data.copper_layers || []).length - 2);
+    const items = [
+      [["l-top"], "Top"], [["l-bottom"], "Bottom"],
+      inner ? [Array.from({ length: Math.min(inner, COLORS.inner.length) }, (_, index) => `l-i${index}`),
+               inner === 1 ? "inner" : `inner, top down${inner > COLORS.inner.length ? " (colours repeat)" : ""}`] : null,
+      [["l-multi"], "Multi-Layer, vias"], [["l-overlay-top"], "Top Overlay"], [["l-overlay-bottom"], "Bottom Overlay"],
+      [["l-hatch"], "Not Fitted"], [["l-mark"], "mark"], [["l-measure"], "measure"],
+      // Each highlighted net's halo colour.
+      ...view.targets.filter((target) => target.kind === "net").slice(0, COLORS.halo.length)
+        .map((target) => [[`h-${COLORS.halo.indexOf(target.color)}`], `${target.name} (halo)`]),
+    ].filter(Boolean);
+    const notDrawn = (view.data.view.not_drawn || []).slice(0, 3).join("; ");
+    return el("div", { class: "legend" },
+      el("span", { class: "legend-keys", "aria-hidden": "true" },
+        items.map(([classes, text]) => el("span", {}, classes.map((cls) => el("span", { class: `sw ${cls}` })), text))),
+      notDrawn ? el("span", { text: `Not drawn: ${notDrawn}${view.data.view.not_drawn.length > 3 ? "; …" : ""}`,
+                              title: view.data.view.not_drawn.join("; ") }) : null,
+      geo && geo.embedded ? el("span", { text: `${plural(geo.embedded, "embedded board array")} of a panel not drawn` }) : null);
+  }
+
+  function updateReadout(x, y) {
+    if (!ui.coords) return;
+    ui.coords.textContent = `${fromOriginText(x, y, view.readoutUnits)} from origin`;
+  }
+
+  function updateScaleBar() {
+    if (!ui.scaleBar || !view.scale) return;
+    const units = view.readoutUnits || view.units;
+    const steps = units === "mm" ? [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200] : [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000];
+    const target = 80 / view.scale;  // mil in 80 px
+    const value = steps.find((step) => toMil(step, units) >= target * 0.6) || steps[steps.length - 1];
+    ui.scaleBar.style.width = `${Math.round(toMil(value, units) * view.scale)}px`;
+    ui.scaleText.textContent = `${value} ${units}`;
+  }
+
+  function renderTab() {
+    if (!ui.content || !view.data) return;
+    ui.boardWrap.hidden = view.tab !== "board";
+    if (ui.tableHost) ui.tableHost.remove();
+    ui.tableHost = null;
+    if (view.tab === "objects") ui.tableHost = objectsTable().el;
+    else if (view.tab === "parts") {
+      const built = partsTable();
+      ui.tableHost = built.el || built;
+    }
+    if (ui.tableHost) ui.content.appendChild(ui.tableHost);
+    if (view.tab === "board") scheduleDraw(true);
+  }
+
+  function renderAll() {
+    const data = view.data;
+    const h = data.highlight;
+    const mark = Shell.focusMark(app);
+    ui.content = el("div", { class: "content" });
+    ui.pane = el("aside", { class: "pane idle", "aria-label": "Details" });
+    ui.layout = el("div", { class: "layout" }, ui.content, ui.pane);
+    ui.notices = el("div", {});
+    ui.base = ui.base || el("canvas", { "aria-hidden": "true" });
+    ui.over = ui.over || el("canvas", { "aria-hidden": "true" });
+    ui.hint = ui.hint || el("div", { class: "hint", hidden: true });
+    ui.progress = ui.progress || el("div", { class: "progress", hidden: true, "aria-hidden": "true" });
+    ui.keyHelp = ui.keyHelp || el("p", { class: "sr-only", id: "board-keys", text: KEY_HELP });
+    if (!ui.board) {
+      ui.board = el("div", { class: "board", tabindex: "0", role: "application", "aria-roledescription": "board view",
+                             "aria-describedby": "board-keys" }, ui.base, ui.over, ui.hint, ui.progress);
+      ui.over.addEventListener("pointerdown", onPointerDown);
+      ui.over.addEventListener("pointermove", onPointerMove);
+      ui.over.addEventListener("pointerup", onPointerUp);
+      ui.over.addEventListener("pointercancel", onPointerUp);
+      ui.over.addEventListener("dblclick", onDoubleClick);
+      ui.board.addEventListener("wheel", onWheel, { passive: false });
+      ui.board.addEventListener("keydown", onKey);
+      if (typeof ResizeObserver === "function") new ResizeObserver(() => scheduleDraw(true)).observe(ui.board);
+      window.addEventListener("resize", () => scheduleDraw(true));
+    }
+    const short = !Shell.roomy();
+    view.renderedShort = short;
+    ui.coords = el("span", { class: "coords", text: short ? "x, y: point at the board" : "Move over the board for coordinates" });
+    ui.scaleBar = el("span", { class: "bar" });
+    ui.scaleText = el("span", { text: "" });
+    const readoutSwitch = Shell.segmented({ label: "Units", current: view.readoutUnits || view.units,
+      items: [{ id: "mil", label: "mil" }, { id: "mm", label: "mm" }],
+      onChange: (id) => { view.readoutUnits = id; updateScaleBar(); } });
+    // On a short host the legend folds behind "More" (below), so the board keeps the height.
+    ui.boardWrap = el("div", {}, ui.board,
+      el("div", { class: "readout" }, ui.coords, readoutSwitch.el, el("span", { class: "scalebar" }, ui.scaleBar, ui.scaleText)),
+      short ? null : legend(), ui.keyHelp);
+    ui.content.appendChild(ui.boardWrap);
+    ui.zoom = el("span", { class: "zoom", "aria-live": "off", text: "" });
+    ui.sideSwitch = Shell.segmented({ label: "View from", current: view.side,
+      items: [{ id: "top", label: "Top" }, { id: "bottom", label: "Bottom", title: "Viewed from below, mirrored (as View > Flip Board)" }],
+      onChange: (id) => setSide(id) });
+    const findBox = el("input", { type: "search", class: "filter find", placeholder: "Find net or part", "aria-label": "Find a net or part (highlighted in the view)" });
+    findBox.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") find(findBox.value);
+      if (event.key === "Escape" && findBox.value) { findBox.value = ""; event.stopPropagation(); }
+    });
+    ui.displayButton = ui.displayButton || Shell.displayModeButton((error) => message("display", "error", `The host did not change the display mode: ${error.message}`));
+    // On a short host Fit highlight, the side switch, the find box, Clear highlight, Full
+    // screen and the legend fold behind "More", so the toolbar keeps to one line.
+    const fitHighlightButton = el("button", { type: "button", class: "btn", text: "Fit highlight", on: { click: fitHighlight } });
+    const more = [short ? fitHighlightButton : null, short ? ui.sideSwitch.el : null, findBox,
+                  el("button", { type: "button", class: "btn", text: "Clear highlight", on: { click: clearHighlight } }), ui.displayButton,
+                  short ? el("details", { class: "more legend-box" }, el("summary", { text: "Legend" }), legend()) : null];
+    const toolbar = el("div", { class: "toolbar board-tools" },
+      el("button", { type: "button", class: "btn", text: "−", title: "Zoom out", "aria-label": "Zoom out", on: { click: () => zoomAt(0.8) } }),
+      ui.zoom,
+      el("button", { type: "button", class: "btn", text: "+", title: "Zoom in", "aria-label": "Zoom in", on: { click: () => zoomAt(1.25) } }),
+      el("button", { type: "button", class: "btn", text: "Fit board", on: { click: fitBoard } }),
+      short ? null : fitHighlightButton,
+      view.targets.length ? [
+        el("button", { type: "button", class: "btn", text: "◀", title: "The previous highlighted object (P)",
+                       "aria-label": "Previous highlighted object", on: { click: () => stepTarget(-1) } }),
+        el("button", { type: "button", class: "btn", text: "▶", title: "The next highlighted object (N)",
+                       "aria-label": "Next highlighted object", on: { click: () => stepTarget(1) } })] : null,
+      short ? null : ui.sideSwitch.el,
+      short ? el("details", { class: "more-tools" }, el("summary", { class: "btn", text: "More" }), el("div", { class: "toolbar" }, more)) : more);
+    ui.layersBody = el("div", { class: "layers" });
+    // Open as the user left it, else where there is room for it (layersRoomy).
+    view.layersSet = view.layersUser === null ? layersRoomy() : view.layersUser;
+    ui.layersBox = el("details", { class: "layers-box", open: view.layersSet }, el("summary", { text: "Layers" }), ui.layersBody);
+    ui.layersBox.addEventListener("toggle", () => {
+      // A toggle the view did not make is the user's: kept from then on.
+      if (ui.layersBox.open !== view.layersSet) view.layersUser = ui.layersBox.open;
+      view.layersSet = ui.layersBox.open;
+    });
+    const tabBar = Shell.tabs([
+      { id: "board", label: "Board" },
+      { id: "objects", label: `Objects (${objectRows().length})` },
+      { id: "parts", label: geo ? `Parts (${geo.counts.parts || 0})` : "Parts" },
+    ], (id) => {
+      view.tab = id;
+      renderTab();
+    }, view.tab, ui.content);
+    ui.tabBar = tabBar;
+    const counts = [
+      h.nets_total ? el("span", { class: "badge", text: plural(h.nets_total, "net") }) : null,
+      h.parts_total ? el("span", { class: "badge", text: plural(h.parts_total, "part") }) : null,
+      h.pads_total ? el("span", { class: "badge", text: plural(h.pads_total, "pad") }) : null,
+      h.marks_total ? el("span", { class: "badge info", text: plural(h.marks_total, "mark") }) : null,
+      h.measures_total ? el("span", { class: "badge info", text: plural(h.measures_total, "measure") }) : null,
+      h.findings_total ? el("span", { class: "badge", text: `${plural(h.findings_total, "finding")} read` }) : null,
+      h.not_found_total ? el("span", { class: "badge warning", text: `${h.not_found_total} not found` }) : null,
+    ];
+    const about = `${data.pcb_doc}, ${data.units}, variant ${data.variant}`;
+    const asked = `Asked: ${askedLabel() || "the whole board"}`;
+    app.classList.toggle("short", short);
+    // A short host: the file, units, variant and the arguments on one line (cut short,
+    // the whole of it in its title and for screen readers).
+    clear(app).append(
+      el("div", { class: "head" }, el("h1", { text: "Board view" }),
+        short ? null : el("span", { class: "muted small", text: about }),
+        el("span", { class: "summary" }, counts)),
+      el("p", { class: "asked", text: short ? `${about}. ${asked}` : asked, title: short ? `${about}. ${asked}` : null }),
+      ui.notices, toolbar, ui.layersBox, tabBar.el, ui.layout);
+    renderNotices();
+    renderLayers();
+    renderTab();
+    renderPane();
+    updateBoardLabel();
+    updateZoomLabel();
+    scheduleDraw(true);
+    if (mark) Shell.refocus(app, mark, () => ui.board);
+  }
+
+  // ---------- host ----------
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && view.selected && !event.defaultPrevented && event.target !== ui.board) closeDetails();
+  });
+  Shell.on("toolInput", (args) => {
+    view.args = args || {};
+    view.argsKnown = true;
+    if (!view.data) showState("loading", "Locating on the board", "get_board_view is reading the board.");
+  });
+  Shell.on("toolInputPartial", () => {
+    if (!view.data) showState("loading", "Locating on the board", "Waiting for the tool's arguments.");
+  });
+  Shell.on("toolResult", (result) => onResult(result));
+  Shell.on("toolCancelled", (reason) => {
+    if (!view.data) showState("info", "The get_board_view call was cancelled", reason || "No result to show.");
+  });
+  Shell.on("context", () => {
+    scheduleDraw(true);
+    if (view.solo && !compactHost()) {
+      view.solo = false;
+      renderLayout();
+    }
+    if (!view.data || view.errorPayload || !ui.layersBox) return;
+    // Full screen, or a host that changes size: fold or open what depends on the room.
+    if (view.renderedShort !== !Shell.roomy()) {
+      renderAll();
+      return;
+    }
+    if (view.layersUser === null && ui.layersBox.open !== layersRoomy()) {
+      view.layersSet = layersRoomy();
+      ui.layersBox.open = view.layersSet;
+    }
+  });
+  Shell.on("teardown", () => {
+    view.closed = true;
+    closeCalls();
+    setProgress("");
+    if (view.data) {
+      renderNotices();
+      renderLayers();
+      renderPane();
+      if (view.tab === "parts") renderTab();
+    }
+    else showState("info", "The view was closed", "It sends no more requests.");
+  });
+
+  // Hooks for checking the drawing (timings), read by tests and the simulator only.
+  window.boardView = {
+    stats: () => ({ decode: view.decodeMs, base: view.lastBaseMs, draw: view.lastDrawMs, batch: view.lastBatchMs, highlight: view.lastHighlightMs,
+                    grid: view.lastGridMs, hit: view.lastHitMs, pages: view.loadedPages.size, reading: view.reading,
+                    stopped: view.stopReason, scale: view.scale, labels: (view.labels || []).map((box) => [Math.round(box.x), Math.round(box.y), Math.round(box.w)]) }),
+    // A full redraw, timed until the pixels are there (a read of one pixel waits for it).
+    redraw: (overlayOnly = false) => {
+      const started = performance.now();
+      if (!overlayOnly) baseDirty = true;
+      draw();
+      for (const canvas of [ui.base, ui.over]) canvas.getContext("2d").getImageData(0, 0, 1, 1);
+      return performance.now() - started;
+    },
+    profile: () => {
+      view.profiling = [];
+      view.profileStart = performance.now();
+      baseDirty = true;
+      draw();
+      ui.over.getContext("2d").getImageData(0, 0, 1, 1);
+      const out = [...view.profiling, ["overlay", Math.round(performance.now() - view.profileStart)]];
+      view.profiling = null;
+      return out;
+    },
+    hit: (sx, sy) => { clickAt(sx, sy); return view.selected ? view.selected.kind : null; },
+    // What is highlighted and selected (net ids, part indices, pads as part and pin).
+    sets: () => {
+      const sets = highlightSets();
+      return { nets: [...sets.nets], parts: [...sets.parts], pads: sets.pads.map((found) => [found.pad.part, found.pad.pin]),
+               selected: view.selected ? `${view.selected.kind} ${view.selected.name || ""}`.trim() : null };
+    },
+    at: (sx, sy) => {
+      const size = canvasSize();
+      const [x, y] = toBoard(sx, sy, size);
+      return { x, y, size, inside: insideBoard(x, y), hits: hitTest(x, y).map((item) => item.kind) };
+    },
+  };
+
+  showState("loading", "Connecting to the host", "");
+  Shell.connect({ name: "altium-copilot-kc board view", version: "1.0.0" })
+    .then(() => {
+      if (!view.data) showState("loading", "Waiting for get_board_view", "The board appears when the tool's result arrives.");
+    })
+    .catch((error) => showState("error", "This view needs a host that shows MCP Apps", error.message));
+})();
+</script>
+</body>
+</html>

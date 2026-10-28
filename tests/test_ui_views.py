@@ -173,9 +173,15 @@ def test_the_tool_links_its_view_in_current_and_legacy_meta():
     assert tools["get_power_tree"]["_meta"]["anthropic/maxResultSizeChars"] == \
         main_mod.QUERY_NET_MAX_RESULT_SIZE_CHARS
     linked = {view.tool for view in uv.VIEWS}
+    assert tools["get_board_view"]["_meta"]["ui"] == {"resourceUri": uv.view_for("get_board_view").uri}
     for name, tool in tools.items():
-        if name not in linked:
+        if name in uv.APP_ONLY_TOOLS:
+            # Pages call it; hosts that know the extension keep it from the model.
+            assert tool["_meta"] == {"ui": {"visibility": ["app"]},
+                                     "anthropic/maxResultSizeChars": 60000}, name
+        elif name not in linked:
             assert set(tool.get("_meta") or {}) <= {"anthropic/maxResultSizeChars"}, name
+    assert set(uv.APP_ONLY_TOOLS) <= set(tools) and not set(uv.APP_ONLY_TOOLS) & linked
 
 
 def test_link_meta_keeps_the_other_keys_and_needs_a_view():
