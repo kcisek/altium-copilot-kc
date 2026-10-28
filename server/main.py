@@ -5434,7 +5434,8 @@ DiffSection = Literal[
 @mcp.tool(
     title="Diff Design",
     annotations=ToolAnnotations(readOnlyHint=True),
-    meta={"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS},
+    meta=ui_views.link_meta("diff_design",
+                            {"anthropic/maxResultSizeChars": QUERY_NET_MAX_RESULT_SIZE_CHARS}),
 )
 def diff_design(
     rev_a: str | None = None,

@@ -448,6 +448,66 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
     ball names, many alternate functions, several candidates, several pages, variants that
     change parts, a stopped read, another netlist), the layout rule, the outputs as the
     tool's own text and the unchanged text results.
+- Design diff view (roadmap #76): Claude Desktop (and other MCP Apps hosts) draws
+  `diff_design`'s result as an interactive side-by-side change list; its text result is
+  unchanged, byte for byte (only its `_meta` links the view), and Claude Code shows the
+  text as before.
+  - The page (`server/ui/design_diff.html`, one `VIEWS` entry; the registry stays one tool
+    per view, no app-only tool and no `structuredContent`) reads every page of the sections
+    the result covers, from offset 0 when the result is a later page. A data contract in the
+    page (the sections, every section and change the service makes with its kind, label and
+    subject, the name rule's patterns and the result's shapes) is checked on every page, and
+    a page whose sides, units, section or total differ from the first (the files or a branch
+    moved while reading) is not merged: Read again starts from offset 0. A read of several
+    pages of the files on disk says that a save in between that keeps the count would not
+    show (Read again). A read that stops (a failed page, the 60-page budget) says why and
+    offers Read the rest.
+  - Header: the two sides as the tool reports them (a commit with its date, author and
+    message, the files on disk, or a folder), the answer's arguments and who asked, the
+    counts per section, the notes and what was not compared, and the ICT hazards first in a
+    banner, each opening its change (on a short host the banner keeps its count and
+    buttons).
+  - Change list: one row per change with its before (a) and after (b) side by side (the
+    rows a change's fields give: from/to pairs, parameters and properties, a rule's or a
+    layer's changes, positions and lengths in the result's units, pins, designators and
+    members that left and joined, capped lists said so; each value named by its field unless
+    the change's label names it, and a BOM line's or fitting's variant shown with its
+    subject), grouped by section (with counts per kind), kind or part and net, sortable,
+    filtered by text and section and kind chips, with a column chooser; each kind has a
+    glyph and a word, never colour alone.
+  - Revision picker: a and b from the recent commits a call without revisions lists (or a
+    button that asks `diff_design` without revisions, section `ict_hazards`, for them), or
+    the files on disk; Compare and What b changed ask `diff_design` again. Folders get no
+    picker.
+  - Details pane: every field before and after, `get_component` and `query_net` asked in
+    place for the change's part or net in the loaded project (labelled so, with the side the
+    loaded files are), and buttons that ask Claude, by `ui/message`, to show the part, pad or
+    net on the board view (`get_board_view`) or on the schematic (`get_component` or
+    `query_net`, then `get_sheet_context`; there is no schematic view yet), to explain the
+    hazards or to write release notes. The message rule, documented in `ui_views.py`: sent
+    only on a click and only with `hostCapabilities.message.text`; fixed words naming
+    read-only tools, and as the only variable parts designators (letters, then digits, then
+    optionally letters, digits or `_`, at most 24 characters), net names (letters, digits
+    and `_ + - . [ ] /`, at most 32 characters) and pads (a designator, a hyphen and at most
+    8 letters or digits), at most four names, and commit hashes (SHA-1 or SHA-256, cut to
+    12 characters, or working), each quoted; never a comment, value, footprint, parameter,
+    sheet, variant, rule, layer, commit message, author, branch, tag or folder. A name
+    outside the rule is not sent (the pane says which rule, shows it to copy and still asks
+    `get_component` or `query_net` for it in place); without messages the sentence is shown
+    to copy, in a field labelled with its purpose.
+  - States: no project, a folder that is not a Git clone (with the folder option), no
+    design change, an unknown revision (with the picker), a section with no change, a
+    partial read with its reason, a cancelled call and a closed view.
+  - Tests (`tests/test_ui_design_diff.py`): the resource and link, the self-contained page,
+    the read-only rule, the message rule (fixed words; the patterns against names that would
+    break out of their quotes, and against a public example's designators and nets), the
+    contract against `diff_design` on Git repositories built in tmp_path (the diff tests'
+    JSON sheets and boards with ICT hazards over several pages, recent commits, the
+    picker's calls, a SHA-256 clone) and on Altium's Bluetooth Sentinel committed with
+    edited revisions, a synthetic comparison with every section (in mil and mm), two
+    folders, paging as the view pages (every change once per section, a later page read
+    again from offset 0, each section alone), the list cells' field names and variants, and
+    the unchanged text results.
 - `trace_net_across_boards`, `check_multiboard` and `get_system_connections` (roadmap
   #54): multi-board systems (`.PrjMbd`) read offline; the loaded project is never
   changed and none of the three needs its netlist.
